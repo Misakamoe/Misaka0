@@ -1,0 +1,18 @@
+# Python 相关
+__pycache__/
+*.py[cod]
+*.so
+.env
+venv/
+
+# 日志文件
+logs/
+*.log
+
+# 配置文件 (只忽略实际配置)
+config/config.json
+
+# IDE 相关
+.idea/
+.vscode/
+.DS_Store

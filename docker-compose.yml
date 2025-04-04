@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  telegram-bot:
+    build: .
+    container_name: modular-telegram-bot
+    restart: unless-stopped
+    volumes:
+      # 持久化配置和日志
+      - ./config:/app/config
+      - ./logs:/app/logs
+      # 如果需要热更新模块，取消下面的注释
+      # - ./modules:/app/modules
+    environment:
+      - TZ=Asia/Hong_Kong
+      # 可选：通过环境变量设置 token，而不是使用配置文件
+      # - TELEGRAM_BOT_TOKEN=your_token_here
+    # 健康检查
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os; exit(0 if os.path.exists('/app/logs') else 1)",
+        ]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 10s
