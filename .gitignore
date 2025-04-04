@@ -9,8 +9,9 @@ venv/
 logs/
 *.log
 
-# 配置文件 (只忽略实际配置)
+# 配置文件和数据 (只忽略实际配置)
 config/config.json
+config/reminders.json
 
 # IDE 相关
 .idea/

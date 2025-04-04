@@ -258,7 +258,13 @@ class BotEngine:
                     metadata = self.module_loader.loaded_modules[module][
                         "metadata"]
                     desc = f" - {metadata.get('description', '')}"
-                message += f"- {module}{desc}\n"
+                # 转义可能导致 Markdown 解析错误的字符
+                safe_module = module.replace("_", "\\_").replace(
+                    "*", "\\*").replace("[", "\\[").replace("`", "\\`")
+                safe_desc = desc.replace("_",
+                                         "\\_").replace("*", "\\*").replace(
+                                             "[", "\\[").replace("`", "\\`")
+                message += f"- {safe_module}{safe_desc}\n"
 
         # 可启用但未启用的模块
         available_not_enabled = [
@@ -268,10 +274,22 @@ class BotEngine:
                 update.effective_user.id):
             message += "\n*可启用:*\n"
             for module in available_not_enabled:
-                message += f"- {module}\n"
+                # 转义可能导致 Markdown 解析错误的字符
+                safe_module = module.replace("_", "\\_").replace(
+                    "*", "\\*").replace("[", "\\[").replace("`", "\\`")
+                message += f"- {safe_module}\n"
 
-        # 发送消息
-        await update.message.reply_text(message, parse_mode="MARKDOWN")
+        try:
+            # 尝试发送带有 Markdown 格式的消息
+            await update.message.reply_text(message, parse_mode="MARKDOWN")
+        except Exception as e:
+            # 如果失败，尝试发送纯文本消息
+            self.logger.error(f"使用 Markdown 发送模块列表失败: {e}")
+            plain_message = message.replace("*", "").replace(
+                "\\_", "_").replace("\\*",
+                                    "*").replace("\\[",
+                                                 "[").replace("\\`", "`")
+            await update.message.reply_text(plain_message)
 
     async def list_commands_command(self, update: Update,
                                     context: ContextTypes.DEFAULT_TYPE):
@@ -293,11 +311,21 @@ class BotEngine:
 
             # 添加到消息
             for cmd in command_list:
-                message += f"/{cmd}\n"
+                # 转义可能导致 Markdown 解析错误的字符
+                safe_cmd = cmd.replace("_", "\\_").replace("*", "\\*").replace(
+                    "[", "\\[").replace("`", "\\`")
+                message += f"/{safe_cmd}\n"
         else:
             message += "无已注册命令\n"
 
-        await update.message.reply_text(message, parse_mode="MARKDOWN")
+        try:
+            # 尝试发送带有 Markdown 格式的消息
+            await update.message.reply_text(message, parse_mode="MARKDOWN")
+        except Exception as e:
+            # 如果失败，尝试发送纯文本消息
+            self.logger.error(f"使用 Markdown 发送命令列表失败: {e}")
+            plain_message = message.replace("*", "")
+            await update.message.reply_text(plain_message)
 
     async def reload_config_command(self, update: Update,
                                     context: ContextTypes.DEFAULT_TYPE):
@@ -327,7 +355,7 @@ class BotEngine:
         await self.application.start()
         await self.application.updater.start_polling()
 
-        self.logger.info("Bot 已成功启动，按 CTRL+C 停止")
+        self.logger.info("Bot 已成功启动，按 Ctrl+C 或发送中断信号来停止")
 
     async def stop(self):
         """停止 Bot"""
@@ -345,8 +373,20 @@ class BotEngine:
         for module_name in list(self.module_loader.loaded_modules.keys()):
             await self.unload_single_module(module_name)
 
-        # 停止应用
-        await self.application.stop()
-        await self.application.shutdown()
+        # 正确顺序停止 Telegram 应用
+        try:
+            # 首先停止轮询
+            if self.application.updater and self.application.updater.running:
+                await self.application.updater.stop()
 
-        self.logger.info("Bot 已停止")
+            # 然后停止应用
+            await self.application.stop()
+
+            # 最后关闭应用
+            await self.application.shutdown()
+
+            self.logger.info("Bot 已成功停止")
+        except Exception as e:
+            self.logger.error(f"停止 Bot 时发生错误: {e}", exc_info=True)
+            # 即使出错，也尝试继续关闭
+            self.logger.info("尝试强制关闭 Bot")

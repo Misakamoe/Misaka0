@@ -5,6 +5,7 @@ import sys
 import argparse
 import logging
 import asyncio
+import signal
 from core.bot_engine import BotEngine
 from utils.logger import setup_logger
 
@@ -25,6 +26,7 @@ async def main_async():
     logger = setup_logger("Main", args.log_level)
     logger.info("正在启动模块化 Telegram Bot...")
 
+    bot = None
     try:
         # 创建 Bot 引擎
         bot = BotEngine()
@@ -39,23 +41,55 @@ async def main_async():
         # 运行 Bot
         await bot.run()
 
-        # 保持脚本运行，直到收到中断信号
+        # 使用事件来等待中断，而不是循环
+        stop_event = asyncio.Event()
+
+        def signal_handler():
+            logger.info("收到停止信号，准备关闭...")
+            stop_event.set()
+
+        # 为 SIGINT 和 SIGTERM 设置处理器
         try:
-            # 创建一个永不完成的 future 来保持程序运行
-            while True:
-                await asyncio.sleep(1)
+            # 在 Windows 上可能不支持 SIGTERM
+            loop = asyncio.get_running_loop()
+            signals = [signal.SIGINT]
+            if sys.platform != 'win32':
+                signals.append(signal.SIGTERM)
+
+            for sig in signals:
+                loop.add_signal_handler(sig, signal_handler)
+        except NotImplementedError:
+            # 如果平台不支持信号处理，则使用传统方法
+            logger.warning("当前平台不支持信号处理，将使用传统的键盘中断检测")
+
+        # 等待停止事件或键盘中断
+        try:
+            await stop_event.wait()
+        except asyncio.CancelledError:
+            logger.info("任务被取消")
         except KeyboardInterrupt:
-            logger.info("收到键盘中断，正在退出...")
-        finally:
-            # 确保在退出前停止 bot
+            logger.info("收到键盘中断")
+
+        logger.info("正在优雅地关闭...")
+
+        # 确保在退出前停止 bot
+        if bot:
             await bot.stop()
 
     except KeyboardInterrupt:
         logger.info("收到键盘中断，正在退出...")
+        if bot:
+            await bot.stop()
     except Exception as e:
         logger.error(f"启动 Bot 时发生错误: {e}", exc_info=True)
+        if bot:
+            try:
+                await bot.stop()
+            except Exception as stop_error:
+                logger.error(f"停止 Bot 时发生错误: {stop_error}")
         return 1
 
+    logger.info("Bot 已完全关闭")
     return 0
 
 
