@@ -30,8 +30,16 @@ class BotEngine:
         # 获取 Token
         self.token = self.config_manager.get_token()
         if not self.token:
-            self.logger.error("未设置 Bot Token，请在 config/config.json 中设置 token")
-            raise ValueError("Bot Token 未设置")
+            self.logger.error(
+                "未设置有效的 Bot Token，请在 config/config.json 中设置 token")
+            raise ValueError("Bot Token 未设置或无效")
+
+        # 检查管理员 ID
+        admin_ids = self.config_manager.get_valid_admin_ids()
+        if not admin_ids:
+            self.logger.error(
+                "未设置有效的管理员 ID，请在 config/config.json 中设置 admin_ids")
+            raise ValueError("管理员 ID 未设置或无效")
 
         # 初始化 Telegram Application
         self.application = Application.builder().token(self.token).build()

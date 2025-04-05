@@ -13,8 +13,9 @@ services:
       # - ./modules:/app/modules
     environment:
       - TZ=Asia/Hong_Kong
-      # 可选：通过环境变量设置 token，而不是使用配置文件
-      # - TELEGRAM_BOT_TOKEN=your_token_here
+      # 可选：通过环境变量设置配置（优先级高于配置文件）
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - ADMIN_IDS=${ADMIN_IDS:-}
     # 健康检查
     healthcheck:
       test:
@@ -22,7 +23,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import os; exit(0 if os.path.exists('/app/logs') else 1)",
+          "import json; f=open('/app/config/config.json'); c=json.load(f); exit(0 if c.get('token') and c.get('admin_ids') else 1)",
         ]
       interval: 1m
       timeout: 10s

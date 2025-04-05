@@ -86,6 +86,26 @@ class ConfigManager:
             except Exception as e:
                 self.logger.error(f"备份损坏的配置文件失败: {e}")
 
+    def _validate_main_config(self, config):
+        """验证主配置的有效性"""
+        # 验证 token
+        token = config.get("token", "")
+        if token:
+            # 检查 token 是否为示例值
+            invalid_tokens = [
+                'your_token_here', 'YOUR_TELEGRAM_BOT_TOKEN_HERE'
+            ]
+            if token in invalid_tokens or 'your_token' in token.lower(
+            ) or 'token_here' in token.lower():
+                self.logger.warning("配置中的 Bot Token 是示例值，请修改为真实值")
+
+        # 验证管理员 ID
+        admin_ids = config.get("admin_ids", [])
+        if admin_ids:
+            # 检查是否包含示例 ID
+            if 123456789 in admin_ids:
+                self.logger.warning("配置中的管理员 ID 包含示例值 123456789，请修改为真实值")
+
     def reload_main_config(self):
         """重新加载主配置"""
         default_config = {
@@ -117,6 +137,9 @@ class ConfigManager:
             current_hash = self._get_file_hash(self.main_config_path)
             self.logger.info("主配置已自动补充缺失项并保存")
             config_changed = True
+
+        # 验证配置有效性
+        self._validate_main_config(new_config)
 
         # 更新内存中的配置
         self.main_config = new_config
@@ -191,21 +214,65 @@ class ConfigManager:
 
     # Token 管理
     def get_token(self):
-        """获取 Bot Token"""
-        return self.main_config.get("token", "")
+        """获取 Bot Token，并验证其有效性"""
+        token = self.main_config.get("token", "")
+
+        # 检查 token 是否为空
+        if not token:
+            self.logger.warning("Bot Token 未设置")
+            return ""
+
+        # 检查 token 是否为示例值
+        invalid_tokens = ['your_token_here', 'YOUR_TELEGRAM_BOT_TOKEN_HERE']
+        if token in invalid_tokens or 'your_token' in token.lower(
+        ) or 'token_here' in token.lower():
+            self.logger.warning("Bot Token 是示例值，请修改为真实值")
+            return ""
+
+        return token
 
     def set_token(self, token):
         """设置 Bot Token"""
+        # 检查 token 是否为示例值
+        invalid_tokens = ['your_token_here', 'YOUR_TELEGRAM_BOT_TOKEN_HERE']
+        if token in invalid_tokens or 'your_token' in token.lower(
+        ) or 'token_here' in token.lower():
+            self.logger.warning("尝试设置示例 Bot Token，操作被拒绝")
+            return False
+
         self.main_config["token"] = token
         return self.save_main_config()
 
     # 管理员管理
+    def get_valid_admin_ids(self):
+        """获取有效的管理员 ID 列表"""
+        admin_ids = self.main_config.get("admin_ids", [])
+
+        # 检查是否为空
+        if not admin_ids:
+            self.logger.warning("管理员 ID 列表为空")
+            return []
+
+        # 过滤掉示例 ID
+        valid_ids = [id for id in admin_ids if id != 123456789]
+
+        # 如果过滤后为空，记录警告
+        if not valid_ids and 123456789 in admin_ids:
+            self.logger.warning("管理员 ID 列表仅包含示例值 123456789")
+
+        return valid_ids
+
     def is_admin(self, user_id):
         """检查用户是否为管理员"""
-        return user_id in self.main_config.get("admin_ids", [])
+        return user_id in self.get_valid_admin_ids()
 
     def add_admin(self, user_id):
         """添加管理员"""
+        # 检查是否是示例 ID
+        if user_id == 123456789:
+            self.logger.warning("尝试添加示例管理员 ID，操作被拒绝")
+            return False
+
         if user_id not in self.main_config.get("admin_ids", []):
             self.main_config.setdefault("admin_ids", []).append(user_id)
             return self.save_main_config()

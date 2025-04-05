@@ -18,3 +18,7 @@ logs/
 .idea/
 .vscode/
 .DS_Store
+
+# Git 相关
+.git/
+.gitignore

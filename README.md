@@ -22,6 +22,8 @@
 
 ### 配置
 
+在部署前，您必须准备配置文件或环境变量。
+
 1. 复制示例配置文件：
 
    ```bash
@@ -38,6 +40,16 @@
      "allowed_groups": {}
    }
    ```
+
+3. 如果使用环境变量配置，需要设置以下变量：
+
+- `TELEGRAM_BOT_TOKEN`：您的 Telegram Bot Token
+
+- `ADMIN_IDS`：超级管理员 ID，多个 ID 用逗号分隔
+
+使用 Docker 部署时，配置的优先级为：环境变量 > 配置文件
+
+首次运行时，如果没有提供有效的 Token 和 ID，机器人将无法启动
 
 ### 部署方式
 
@@ -60,9 +72,16 @@ pip install -r requirements.txt
 python bot.py
 ```
 
-**方式 2: Docker Compose**
+**方式 2: Docker Compose （推荐）**
 
 ```bash
+# 启动容器
+# 确保 config/config.json 已正确配置
+# 或使用环境变量
+# 创建 .env 文件
+echo "TELEGRAM_BOT_TOKEN=your_token_here" > .env
+echo "ADMIN_IDS=123456789" >> .env
+
 # 启动容器
 docker-compose up -d
 
@@ -76,11 +95,11 @@ docker-compose logs -f
 # 构建镜像
 docker build -t modular-telegram-bot .
 
-# 运行容器
-docker run -d --name telegram-bot \
-  -v $(pwd)/config:/app/config \
-  -v $(pwd)/logs:/app/logs \
-  modular-telegram-bot
+# 运行容器（使用已配置的 config）
+docker run -d --name telegram-bot -v ./config:/app/config -v ./logs:/app/logs modular-telegram-bot
+
+# 或者使用环境变量运行
+docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./logs:/app/logs modular-telegram-bot
 ```
 
 **方式 4: Systemd 服务**
