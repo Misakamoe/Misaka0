@@ -684,7 +684,7 @@ def stop_reminder_tasks():
     """停止所有提醒任务"""
     global _reminder_tasks
 
-    # 取消所有任务
+    # 取消所有任务，但保留提醒数据
     for chat_id, reminders in _reminder_tasks.items():
         for reminder_id, task_info in reminders.items():
             task = task_info.get("task")
@@ -699,8 +699,11 @@ def stop_reminder_tasks():
     # 保存更新的状态
     save_reminders()
 
-    # 清空任务列表
-    _reminder_tasks = {}
+    # 只清除任务对象，保留提醒数据
+    for chat_id in _reminder_tasks:
+        for reminder_id in _reminder_tasks[chat_id]:
+            if "task" in _reminder_tasks[chat_id][reminder_id]:
+                _reminder_tasks[chat_id][reminder_id]["task"] = None
 
 
 @error_handler
@@ -1061,7 +1064,7 @@ def setup(module_interface):
     module_interface.register_command("reminders", list_reminders)
     module_interface.register_command("delreminder", delete_reminder_command)
 
-    # 启动提醒任务
+    # 启动提醒任务 - 会从文件加载提醒数据
     start_reminder_tasks(module_interface.application)
 
     print(f"已注册提醒模块")
