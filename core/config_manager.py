@@ -3,87 +3,166 @@ import os
 import json
 import logging
 import time
+from datetime import datetime
+from utils.logger import setup_logger
 
 
 class ConfigManager:
+    """配置管理器，处理所有配置的加载、保存和访问"""
 
     def __init__(self, config_dir="config"):
         # 设置日志
-        self.logger = logging.getLogger("ConfigManager")
+        self.logger = setup_logger("ConfigManager")
 
         self.config_dir = config_dir
         self.main_config_path = os.path.join(config_dir, "config.json")
         self.modules_config_path = os.path.join(config_dir, "modules.json")
 
-        # 配置缓存和时间戳
+        # 配置缓存和文件哈希
         self.main_config = {}
         self.modules_config = {}
-        self.main_config_timestamp = 0
-        self.modules_config_timestamp = 0
+        self.main_config_hash = ""
+        self.modules_config_hash = ""
 
         # 初始化配置
+        self._ensure_config_dir()
         self.reload_main_config()
         self.reload_modules_config()
 
-    def _load_config(self, config_path, default_config):
-        """加载配置文件，如果不存在则创建默认配置"""
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    def _ensure_config_dir(self):
+        """确保配置目录存在"""
+        os.makedirs(self.config_dir, exist_ok=True)
 
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
+    def _get_file_hash(self, file_path):
+        """获取文件内容哈希值"""
+        if not os.path.exists(file_path):
+            return ""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return hash(f.read())
+        except Exception:
+            return ""
+
+    def _load_json_file(self, file_path, default_value=None):
+        """从文件加载 JSON 数据"""
+        if default_value is None:
+            default_value = {}
+
+        try:
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
                     # 检查文件是否为空
                     if not content:
-                        # 文件为空，写入默认配置
-                        with open(config_path, 'w', encoding='utf-8') as wf:
-                            json.dump(default_config, wf, indent=4)
-                        return default_config
+                        return default_value
                     return json.loads(content)
+            return default_value
+        except json.JSONDecodeError as e:
+            self.logger.error(f"解析配置文件 {file_path} 失败: {e}")
+            # 备份损坏的配置文件
+            self._backup_corrupted_file(file_path)
+            return default_value
+        except Exception as e:
+            self.logger.error(f"加载配置文件 {file_path} 失败: {e}")
+            return default_value
+
+    def _save_json_file(self, file_path, data):
+        """保存 JSON 数据到文件"""
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            return True
+        except Exception as e:
+            self.logger.error(f"保存配置文件 {file_path} 失败: {e}")
+            return False
+
+    def _backup_corrupted_file(self, file_path):
+        """备份损坏的配置文件"""
+        if os.path.exists(file_path):
+            backup_path = f"{file_path}.bak.{int(time.time())}"
+            try:
+                os.rename(file_path, backup_path)
+                self.logger.info(f"已将损坏的配置文件备份为 {backup_path}")
             except Exception as e:
-                self.logger.error(f"加载配置文件 {config_path} 失败: {e}")
-                # 备份损坏的配置文件
-                if os.path.exists(config_path):
-                    backup_path = f"{config_path}.bak.{int(time.time())}"
-                    try:
-                        os.rename(config_path, backup_path)
-                        self.logger.info(f"已将损坏的配置文件备份为 {backup_path}")
-                    except Exception:
-                        pass
-                # 创建新的默认配置
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump(default_config, f, indent=4)
-                return default_config
-        else:
-            # 创建默认配置文件
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(default_config, f, indent=4)
-            return default_config
+                self.logger.error(f"备份损坏的配置文件失败: {e}")
 
     def reload_main_config(self):
         """重新加载主配置"""
-        default_config = {"token": "", "admin_ids": [], "log_level": "INFO"}
+        default_config = {
+            "token": "",
+            "admin_ids": [],
+            "log_level": "INFO",
+            "allowed_groups": {}
+        }
 
-        if os.path.exists(self.main_config_path):
-            self.main_config_timestamp = os.path.getmtime(
-                self.main_config_path)
+        # 获取当前文件哈希
+        current_hash = self._get_file_hash(self.main_config_path)
+        config_changed = (current_hash != self.main_config_hash)
 
-        self.main_config = self._load_config(self.main_config_path,
-                                             default_config)
-        self.logger.info("主配置已重新加载")
+        # 加载配置
+        new_config = self._load_json_file(self.main_config_path,
+                                          default_config)
+
+        # 检查是否需要补充缺失的配置项
+        needs_save = False
+        for key, value in default_config.items():
+            if key not in new_config:
+                new_config[key] = value
+                needs_save = True
+
+        # 如果有缺失的配置项，保存更新后的配置
+        if needs_save:
+            self._save_json_file(self.main_config_path, new_config)
+            # 更新哈希值
+            current_hash = self._get_file_hash(self.main_config_path)
+            self.logger.info("主配置已自动补充缺失项并保存")
+            config_changed = True
+
+        # 更新内存中的配置
+        self.main_config = new_config
+        self.main_config_hash = current_hash
+
+        # 只在配置实际变化时输出日志
+        if config_changed:
+            self.logger.info("主配置已重新加载")
+
         return self.main_config
 
     def reload_modules_config(self):
         """重新加载模块配置"""
-        default_config = {"enabled_modules": []}
+        default_config = {"enabled_modules": [], "group_modules": {}}
 
-        if os.path.exists(self.modules_config_path):
-            self.modules_config_timestamp = os.path.getmtime(
-                self.modules_config_path)
+        # 获取当前文件哈希
+        current_hash = self._get_file_hash(self.modules_config_path)
+        config_changed = (current_hash != self.modules_config_hash)
 
-        self.modules_config = self._load_config(self.modules_config_path,
-                                                default_config)
-        self.logger.info("模块配置已重新加载")
+        # 加载配置
+        new_config = self._load_json_file(self.modules_config_path,
+                                          default_config)
+
+        # 检查是否需要补充缺失的配置项
+        needs_save = False
+        for key, value in default_config.items():
+            if key not in new_config:
+                new_config[key] = value
+                needs_save = True
+
+        # 如果有缺失的配置项，保存更新后的配置
+        if needs_save:
+            self._save_json_file(self.modules_config_path, new_config)
+            # 更新哈希值
+            current_hash = self._get_file_hash(self.modules_config_path)
+            self.logger.info("模块配置已自动补充缺失项并保存")
+            config_changed = True
+
+        # 更新内存中的配置
+        self.modules_config = new_config
+        self.modules_config_hash = current_hash
+
+        # 只在配置实际变化时输出日志
+        if config_changed:
+            self.logger.info("模块配置已重新加载")
+
         return self.modules_config
 
     def reload_all_configs(self):
@@ -94,45 +173,23 @@ class ConfigManager:
 
     def save_main_config(self):
         """保存主配置"""
-        # 检查是否需要更新文件
-        if os.path.exists(self.main_config_path):
-            if self.main_config_timestamp >= os.path.getmtime(
-                    self.main_config_path):
-                with open(self.main_config_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.main_config, f, indent=4)
-                self.main_config_timestamp = os.path.getmtime(
-                    self.main_config_path)
-                return
-
-        # 文件不存在或需要更新
-        with open(self.main_config_path, 'w', encoding='utf-8') as f:
-            json.dump(self.main_config, f, indent=4)
-
-        if os.path.exists(self.main_config_path):
-            self.main_config_timestamp = os.path.getmtime(
-                self.main_config_path)
+        success = self._save_json_file(self.main_config_path, self.main_config)
+        if success:
+            # 更新哈希值
+            self.main_config_hash = self._get_file_hash(self.main_config_path)
+        return success
 
     def save_modules_config(self):
         """保存模块配置"""
-        # 检查是否需要更新文件
-        if os.path.exists(self.modules_config_path):
-            if self.modules_config_timestamp >= os.path.getmtime(
-                    self.modules_config_path):
-                with open(self.modules_config_path, 'w',
-                          encoding='utf-8') as f:
-                    json.dump(self.modules_config, f, indent=4)
-                self.modules_config_timestamp = os.path.getmtime(
-                    self.modules_config_path)
-                return
-
-        # 文件不存在或需要更新
-        with open(self.modules_config_path, 'w', encoding='utf-8') as f:
-            json.dump(self.modules_config, f, indent=4)
-
-        if os.path.exists(self.modules_config_path):
-            self.modules_config_timestamp = os.path.getmtime(
+        success = self._save_json_file(self.modules_config_path,
+                                       self.modules_config)
+        if success:
+            # 更新哈希值
+            self.modules_config_hash = self._get_file_hash(
                 self.modules_config_path)
+        return success
 
+    # Token 管理
     def get_token(self):
         """获取 Bot Token"""
         return self.main_config.get("token", "")
@@ -140,8 +197,9 @@ class ConfigManager:
     def set_token(self, token):
         """设置 Bot Token"""
         self.main_config["token"] = token
-        self.save_main_config()
+        return self.save_main_config()
 
+    # 管理员管理
     def is_admin(self, user_id):
         """检查用户是否为管理员"""
         return user_id in self.main_config.get("admin_ids", [])
@@ -150,8 +208,17 @@ class ConfigManager:
         """添加管理员"""
         if user_id not in self.main_config.get("admin_ids", []):
             self.main_config.setdefault("admin_ids", []).append(user_id)
-            self.save_main_config()
+            return self.save_main_config()
+        return True
 
+    def remove_admin(self, user_id):
+        """移除管理员"""
+        if user_id in self.main_config.get("admin_ids", []):
+            self.main_config["admin_ids"].remove(user_id)
+            return self.save_main_config()
+        return True
+
+    # 模块管理
     def get_enabled_modules(self):
         """获取已启用模块列表"""
         return self.modules_config.get("enabled_modules", [])
@@ -161,10 +228,123 @@ class ConfigManager:
         if module_name not in self.modules_config.get("enabled_modules", []):
             self.modules_config.setdefault("enabled_modules",
                                            []).append(module_name)
-            self.save_modules_config()
+            return self.save_modules_config()
+        return True
 
     def disable_module(self, module_name):
         """禁用模块"""
         if module_name in self.modules_config.get("enabled_modules", []):
             self.modules_config["enabled_modules"].remove(module_name)
-            self.save_modules_config()
+            return self.save_modules_config()
+        return True
+
+    # 群组管理
+    def is_allowed_group(self, group_id):
+        """检查群组是否允许使用 bot"""
+        allowed_groups = self.main_config.get("allowed_groups", {})
+        return str(group_id) in allowed_groups
+
+    def add_allowed_group(self, group_id, added_by):
+        """添加允许的群组到白名单"""
+        # 确保 allowed_groups 字段存在
+        if "allowed_groups" not in self.main_config:
+            self.main_config["allowed_groups"] = {}
+
+        group_id_str = str(group_id)
+        self.main_config["allowed_groups"][group_id_str] = {
+            "added_by": added_by,
+            "added_at": time.time()
+        }
+        # 保存配置
+        success = self.save_main_config()
+        if success:
+            self.logger.info(f"群组 {group_id} 已添加到白名单")
+        return success
+
+    def remove_allowed_group(self, group_id):
+        """从白名单移除群组"""
+        if "allowed_groups" in self.main_config:
+            group_id_str = str(group_id)
+            if group_id_str in self.main_config["allowed_groups"]:
+                del self.main_config["allowed_groups"][group_id_str]
+                success = self.save_main_config()
+                if success:
+                    self.logger.info(f"群组 {group_id} 已从白名单移除")
+                return success
+        return False
+
+    def list_allowed_groups(self):
+        """列出所有允许的群组"""
+        return self.main_config.get("allowed_groups", {})
+
+    # 聊天特定的模块管理
+    def get_enabled_modules_for_chat(self, chat_id):
+        """获取指定聊天的已启用模块列表"""
+        chat_id_str = str(chat_id)
+
+        # 检查是否是群组 ID（群组 ID 通常为负数）
+        if chat_id < 0:  # 群组 ID
+            # 获取群组特定的模块列表
+            return self.modules_config.get("group_modules", {}).get(
+                chat_id_str, self.modules_config.get("enabled_modules", []))
+        else:  # 私聊 ID
+            # 私聊使用全局设置
+            return self.modules_config.get("enabled_modules", [])
+
+    def enable_module_for_chat(self, module_name, chat_id):
+        """为特定聊天启用模块"""
+        chat_id_str = str(chat_id)
+
+        # 检查是否是群组 ID
+        if chat_id < 0:  # 群组 ID
+            # 确保 group_modules 存在
+            if "group_modules" not in self.modules_config:
+                self.modules_config["group_modules"] = {}
+
+            # 确保该群组的配置存在
+            if chat_id_str not in self.modules_config["group_modules"]:
+                # 初始化为全局启用的模块列表的副本
+                self.modules_config["group_modules"][
+                    chat_id_str] = self.get_enabled_modules().copy()
+
+            # 启用模块
+            if module_name not in self.modules_config["group_modules"][
+                    chat_id_str]:
+                self.modules_config["group_modules"][chat_id_str].append(
+                    module_name)
+                return self.save_modules_config()
+            return True
+        else:  # 私聊 ID
+            # 使用全局设置
+            return self.enable_module(module_name)
+
+    def disable_module_for_chat(self, module_name, chat_id):
+        """为特定聊天禁用模块"""
+        chat_id_str = str(chat_id)
+
+        # 检查是否是群组 ID
+        if chat_id < 0:  # 群组 ID
+            # 确保 group_modules 存在
+            if "group_modules" not in self.modules_config:
+                self.modules_config["group_modules"] = {}
+
+            # 确保该群组的配置存在
+            if chat_id_str not in self.modules_config["group_modules"]:
+                # 初始化为全局启用的模块列表的副本
+                self.modules_config["group_modules"][
+                    chat_id_str] = self.get_enabled_modules().copy()
+
+            # 禁用模块
+            if module_name in self.modules_config["group_modules"][
+                    chat_id_str]:
+                self.modules_config["group_modules"][chat_id_str].remove(
+                    module_name)
+                return self.save_modules_config()
+            return True
+        else:  # 私聊 ID
+            # 使用全局设置
+            return self.disable_module(module_name)
+
+    def is_module_enabled_for_chat(self, module_name, chat_id):
+        """检查模块是否在特定聊天中启用"""
+        return module_name in self.get_enabled_modules_for_chat(chat_id)

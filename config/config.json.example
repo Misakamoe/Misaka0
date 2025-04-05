@@ -1,5 +1,6 @@
 {
   "token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
   "admin_ids": [123456789],
-  "log_level": "INFO"
+  "log_level": "INFO",
+  "allowed_groups": {}
 }

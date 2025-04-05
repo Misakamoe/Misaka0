@@ -3,14 +3,47 @@ import importlib
 import os
 import sys
 import logging
+from utils.logger import setup_logger
+
+
+class ModuleInterface:
+    """模块接口类，提供模块与核心系统交互的标准接口"""
+
+    def __init__(self, module_name, application, bot_engine):
+        self.module_name = module_name
+        self.application = application
+        self.bot_engine = bot_engine
+        self.command_processor = bot_engine.command_processor
+        self.config_manager = bot_engine.config_manager
+        self.registered_handlers = []
+
+    def register_command(self, command, callback, admin_only=False):
+        """注册命令处理器"""
+        # 使用命令处理器注册命令
+        self.command_processor.register_command(command, callback, admin_only)
+
+    def register_handler(self, handler, group=0):
+        """注册自定义处理器"""
+        self.application.add_handler(handler, group)
+        self.registered_handlers.append((handler, group))
+
+    def unregister_all_handlers(self):
+        """注销所有注册的处理器"""
+        for handler, group in self.registered_handlers:
+            try:
+                self.application.remove_handler(handler, group)
+            except Exception as e:
+                pass
+        self.registered_handlers.clear()
 
 
 class ModuleLoader:
+    """模块加载器，负责发现、加载和卸载模块"""
 
     def __init__(self, modules_dir="modules"):
         self.modules_dir = modules_dir
         self.loaded_modules = {}
-        self.logger = logging.getLogger("ModuleLoader")
+        self.logger = setup_logger("ModuleLoader")
 
         # 确保模块目录存在
         os.makedirs(modules_dir, exist_ok=True)
@@ -51,7 +84,7 @@ class ModuleLoader:
         self.logger.info(f"发现可用模块: {available_modules}")
         return available_modules
 
-    def load_module(self, module_name):
+    def load_module(self, module_name, application=None, bot_engine=None):
         """加载单个模块"""
         if module_name in self.loaded_modules:
             self.logger.info(f"模块 {module_name} 已加载")
@@ -89,13 +122,21 @@ class ModuleLoader:
                 "name": getattr(module, "MODULE_NAME", module_name),
                 "version": getattr(module, "MODULE_VERSION", "unknown"),
                 "description": getattr(module, "MODULE_DESCRIPTION", ""),
-                "dependencies": getattr(module, "MODULE_DEPENDENCIES", [])
+                "dependencies": getattr(module, "MODULE_DEPENDENCIES", []),
+                "commands": getattr(module, "MODULE_COMMANDS", [])  # 添加命令列表
             }
+
+            # 创建模块接口
+            interface = None
+            if application and bot_engine:
+                interface = ModuleInterface(module_name, application,
+                                            bot_engine)
 
             # 存储模块和元数据
             self.loaded_modules[module_name] = {
                 "module": module,
-                "metadata": metadata
+                "metadata": metadata,
+                "interface": interface
             }
 
             self.logger.info(f"成功加载模块 {module_name} v{metadata['version']}")
@@ -105,6 +146,29 @@ class ModuleLoader:
             self.logger.error(f"加载模块 {module_name} 失败: {e}", exc_info=True)
             return None
 
+    def initialize_module(self, module_name, application, bot_engine):
+        """初始化已加载的模块"""
+        if module_name not in self.loaded_modules:
+            self.logger.error(f"模块 {module_name} 未加载，无法初始化")
+            return False
+
+        module_data = self.loaded_modules[module_name]
+        module = module_data["module"]
+
+        # 如果模块接口不存在，创建一个
+        if not module_data.get("interface"):
+            module_data["interface"] = ModuleInterface(module_name,
+                                                       application, bot_engine)
+
+        try:
+            # 调用模块的 setup 方法
+            module.setup(module_data["interface"])
+            self.logger.info(f"模块 {module_name} 已初始化")
+            return True
+        except Exception as e:
+            self.logger.error(f"初始化模块 {module_name} 失败: {e}", exc_info=True)
+            return False
+
     def unload_module(self, module_name):
         """卸载模块"""
         if module_name not in self.loaded_modules:
@@ -112,6 +176,25 @@ class ModuleLoader:
             return False
 
         try:
+            module_data = self.loaded_modules[module_name]
+            module = module_data["module"]
+            interface = module_data.get("interface")
+
+            # 如果模块有 cleanup 方法，调用它
+            if hasattr(module, "cleanup") and callable(module.cleanup):
+                try:
+                    if interface:
+                        module.cleanup(interface)
+                    else:
+                        # 兼容旧接口
+                        module.cleanup(None, None)
+                except Exception as e:
+                    self.logger.error(f"清理模块 {module_name} 失败: {e}")
+
+            # 如果有接口，注销所有处理器
+            if interface:
+                interface.unregister_all_handlers()
+
             # 从已加载模块中移除
             del self.loaded_modules[module_name]
 
@@ -140,3 +223,9 @@ class ModuleLoader:
     def is_module_loaded(self, module_name):
         """检查模块是否已加载"""
         return module_name in self.loaded_modules
+
+    def get_module_interface(self, module_name):
+        """获取模块接口"""
+        if module_name in self.loaded_modules:
+            return self.loaded_modules[module_name].get("interface")
+        return None

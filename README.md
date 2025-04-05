@@ -28,21 +28,31 @@
    cp config/config.json.example config/config.json
    ```
 
-2. 编辑配置文件，添加你的 Telegram Bot Token 和管理员 ID：
+2. 编辑配置文件，添加你的 Telegram Bot Token 和超级管理员 ID：
 
    ```json
    {
      "token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
-     "admin_ids": [12345678],
-     "log_level": "INFO"
+     "admin_ids": [123456789],
+     "log_level": "INFO",
+     "allowed_groups": {}
    }
    ```
 
 ### 部署方式
 
-**方式 1: 直接运行**
+**方式 1: 使用 Python 虚拟环境**
 
 ```bash
+# 创建虚拟环境
+python -m venv venv
+
+# 激活虚拟环境
+# Windows
+venv\Scripts\activate
+# Linux/macOS
+source venv/bin/activate
+
 # 安装依赖
 pip install -r requirements.txt
 
@@ -86,7 +96,7 @@ After=network.target
 Type=simple
 User=botuser
 WorkingDirectory=/path/to/bot
-ExecStart=/usr/bin/python3 /path/to/bot/bot.py
+ExecStart=/path/to/venv/bin/python /path/to/bot/bot.py
 Restart=on-failure
 RestartSec=10
 
@@ -110,6 +120,8 @@ sudo systemctl status telegram-bot
 
 - `/help` - 显示帮助信息
 
+- `/id` - 显示用户和聊天 ID
+
 - `/modules` - 列出可用模块
 
 - `/commands` - 列出所有可用命令
@@ -122,6 +134,12 @@ sudo systemctl status telegram-bot
 
 - `/reload_config` - 重新加载配置
 
+- `/listgroups` - 列出授权的群组 (超级管理员)
+
+- `/addgroup` <群组 ID> - 添加群组到白名单 (超级管理员)
+
+- `/removegroup` <群组 ID> - 从白名单移除群组 (超级管理员)
+
 ### 开发模块
 
 请参阅 `modules/README.md` 了解如何开发新模块。
@@ -130,18 +148,20 @@ sudo systemctl status telegram-bot
 
 ```bash
 .
-├── bot.py # 主入口点
-├── config/ # 配置目录
-│ ├── config.json # 主配置
-│ └── modules.json # 模块配置
-├── core/ # 核心组件
-│ ├── bot_engine.py # Bot 引擎
-│ ├── command_handler.py # 命令处理器
-│ ├── config_manager.py # 配置管理器
-│ └── module_loader.py # 模块加载器
-├── modules/ # 模块目录
-│ ├── echo.py # 示例模块
-│ └── README.md # 模块开发指南
-└── utils/ # 工具函数
-└── logger.py # 日志工具
+├── bot.py                  # 主入口点
+├── config/                 # 配置目录
+│   ├── config.json         # 主配置
+│   └── modules.json        # 模块配置
+├── core/                   # 核心组件
+│   ├── bot_engine.py       # Bot 引擎
+│   ├── command_handler.py  # 命令处理器
+│   ├── config_manager.py   # 配置管理器
+│   └── module_loader.py    # 模块加载器
+├── modules/                # 模块目录
+│   ├── echo.py             # 示例模块
+│   ├── reminder.py         # 提醒模块
+│   └── README.md           # 模块开发指南
+└── utils/                  # 工具函数
+    ├── decorators.py       # 装饰器工具
+    └── logger.py           # 日志工具
 ```

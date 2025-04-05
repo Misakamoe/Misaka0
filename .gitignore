@@ -11,6 +11,7 @@ logs/
 
 # 配置文件和数据 (只忽略实际配置)
 config/config.json
+config/modules.json
 config/reminders.json
 
 # IDE 相关
