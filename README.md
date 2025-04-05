@@ -99,7 +99,7 @@ docker build -t modular-telegram-bot .
 docker run -d --name telegram-bot -v ./config:/app/config -v ./logs:/app/logs modular-telegram-bot
 
 # 或者使用环境变量运行
-docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./logs:/app/logs modular-telegram-bot
+docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./config:/app/config -v ./logs:/app/logs modular-telegram-bot
 ```
 
 **方式 4: Systemd 服务**
