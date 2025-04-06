@@ -13,7 +13,7 @@ from utils.decorators import error_handler, permission_check
 # 模块元数据
 MODULE_NAME = "reminder"
 MODULE_VERSION = "1.2.3"
-MODULE_DESCRIPTION = "定时提醒功能，包括周期性和一次性提醒"
+MODULE_DESCRIPTION = "周期/一次性提醒功能"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["remind", "remindonce", "reminders",
                    "delreminder"]  # 声明此模块包含的命令
@@ -883,7 +883,7 @@ async def remind_once_command(update: Update,
                                         "- 2025年4月5日18:30\n"
                                         "- 4月5日16:00\n"
                                         "- 6-25 16:00\n"
-                                        "- 2025-04-05 18:30\n"
+                                        "- 2025/04/05 18:30\n"
                                         "- 18:30 (今天或明天)")
         return
 

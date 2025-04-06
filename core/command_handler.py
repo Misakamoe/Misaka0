@@ -100,11 +100,6 @@ class CommandProcessor:
         # 命令列表命令
         self.register_command("commands", bot_engine.list_commands_command)
 
-        # 配置重载命令
-        self.register_command("reload_config",
-                              bot_engine.reload_config_command,
-                              admin_only="group_admin")
-
         # 群组白名单管理命令
         self.register_command("listgroups",
                               bot_engine.list_allowed_groups_command,
@@ -158,7 +153,6 @@ class CommandProcessor:
             help_text += "\n管理员命令:\n"
             help_text += "/enable <模块名> - 启用模块\n"
             help_text += "/disable <模块名> - 禁用模块\n"
-            help_text += "/reload_config - 重新加载配置\n"
 
         # 显示超级管理员命令
         if is_super_admin:

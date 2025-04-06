@@ -536,6 +536,16 @@ class BotEngine:
             self.config_manager.remove_allowed_group(chat.id)
             self.logger.info(f"Bot 已从群组 {chat.id} 移除，已从白名单删除")
 
+    @staticmethod
+    def escape_markdown(text):
+        """转义 Markdown 特殊字符"""
+        if not text:
+            return ""
+        # 转义以下字符: _ * [ ] ` \
+        return text.replace('\\', '\\\\').replace('_', '\\_').replace(
+            '*', '\\*').replace('[', '\\[').replace(']',
+                                                    '\\]').replace('`', '\\`')
+
     async def get_id_command(self, update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
         """获取用户 ID 和聊天 ID"""
@@ -549,8 +559,8 @@ class BotEngine:
             message = f"👤 *用户信息*\n"
             message += f"用户 ID: `{replied_user.id}`\n"
             if replied_user.username:
-                message += f"用户名: @{replied_user.username}\n"
-            message += f"名称: {replied_user.full_name}\n"
+                message += f"用户名: @{BotEngine.escape_markdown(replied_user.username)}\n"
+            message += f"名称: {BotEngine.escape_markdown(replied_user.full_name)}\n"
 
             # 直接回复原消息
             await update.message.reply_to_message.reply_text(
@@ -560,15 +570,15 @@ class BotEngine:
             message = f"👤 *用户信息*\n"
             message += f"用户 ID: `{user.id}`\n"
             if user.username:
-                message += f"用户名: @{user.username}\n"
-            message += f"名称: {user.full_name}\n\n"
+                message += f"用户名: @{BotEngine.escape_markdown(user.username)}\n"
+            message += f"名称: {BotEngine.escape_markdown(user.full_name)}\n\n"
 
             message += f"💬 *聊天信息*\n"
             message += f"聊天 ID: `{chat.id}`\n"
             message += f"类型: {chat.type}\n"
 
             if chat.type in ["group", "supergroup"]:
-                message += f"群组名称: {chat.title}\n"
+                message += f"群组名称: {BotEngine.escape_markdown(chat.title)}\n"
 
                 # 如果是群组管理员或超级管理员，显示更多信息
                 config_manager = context.bot_data.get("config_manager")
@@ -591,12 +601,12 @@ class BotEngine:
                             chat.id)
                         for admin in administrators:
                             admin_user = admin.user
-                            message += f"- {admin_user.full_name} (ID: `{admin_user.id}`)"
+                            message += f"- {BotEngine.escape_markdown(admin_user.full_name)} (ID: `{admin_user.id}`)"
                             if admin_user.username:
-                                message += f" @{admin_user.username}"
+                                message += f" @{BotEngine.escape_markdown(admin_user.username)}"
                             message += f" - {admin.status}\n"
                     except Exception as e:
-                        message += f"获取管理员列表失败: {e}\n"
+                        message += f"获取管理员列表失败: {BotEngine.escape_markdown(str(e))}\n"
 
             # 正常回复当前消息
             await update.message.reply_text(message, parse_mode="MARKDOWN")
