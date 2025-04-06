@@ -7,16 +7,21 @@ import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters, ChatMemberHandler
+import threading
 
 from core.module_loader import ModuleLoader
 from core.command_handler import CommandProcessor
 from core.config_manager import ConfigManager
 from utils.logger import setup_logger
-from utils.decorators import error_handler, permission_check, group_check
+from utils.decorators import error_handler, permission_check, group_check, module_check
+from utils.event_system import EventSystem
 
 
 class BotEngine:
     """Bot 引擎，负责初始化和管理整个机器人"""
+
+    # 示例模块
+    EXAMPLE_MODULES = ['event_publisher', 'event_subscriber']
 
     def __init__(self):
         # 初始化配置管理器
@@ -50,6 +55,10 @@ class BotEngine:
         # 将自身添加到 bot_data 中
         self.application.bot_data["bot_engine"] = self
 
+        # 初始化事件系统
+        self.event_system = EventSystem()
+        self.application.bot_data["event_system"] = self.event_system
+
         # 初始化模块加载器
         self.module_loader = ModuleLoader()
 
@@ -76,8 +85,10 @@ class BotEngine:
             group=999  # 使用高数字确保它在最后处理
         )
 
-        # 设置配置文件监视任务
+        # 配置文件监控相关
         self.config_watch_task = None
+        self.config_change_lock = asyncio.Lock()
+        self.last_config_change = {}  # 记录最后修改时间
 
         self.logger.info("Bot 引擎初始化完成")
 
@@ -91,34 +102,140 @@ class BotEngine:
             await update.effective_message.reply_text("处理命令时发生错误，请查看日志获取详情。")
 
     async def watch_config_changes(self):
-        """监视配置文件变化并自动重新加载"""
-        while True:
+        """监控配置文件变化的异步任务"""
+        config_dir = self.config_manager.config_dir
+        main_config_path = os.path.join(config_dir, "config.json")
+        modules_config_path = os.path.join(config_dir, "modules.json")
+
+        # 初始化文件最后修改时间
+        self.last_config_change[main_config_path] = os.path.getmtime(
+            main_config_path) if os.path.exists(main_config_path) else 0
+        self.last_config_change[modules_config_path] = os.path.getmtime(
+            modules_config_path) if os.path.exists(modules_config_path) else 0
+
+        self.logger.info(f"开始监控配置文件变化，目录: {config_dir}")
+
+        # 防抖动变量
+        debounce_timers = {}
+
+        try:
+            while True:
+                try:
+                    # 检查主配置文件
+                    if os.path.exists(main_config_path):
+                        current_mtime = os.path.getmtime(main_config_path)
+                        if current_mtime > self.last_config_change[
+                                main_config_path]:
+                            self.logger.debug(f"检测到配置文件变化: {main_config_path}")
+                            self.last_config_change[
+                                main_config_path] = current_mtime
+
+                            # 取消之前的定时器（如果存在）
+                            if main_config_path in debounce_timers and not debounce_timers[
+                                    main_config_path].done():
+                                debounce_timers[main_config_path].cancel()
+
+                            # 创建新的延迟处理任务
+                            debounce_timers[
+                                main_config_path] = asyncio.create_task(
+                                    self.debounce_config_change(
+                                        main_config_path, 1.0))
+
+                    # 检查模块配置文件
+                    if os.path.exists(modules_config_path):
+                        current_mtime = os.path.getmtime(modules_config_path)
+                        if current_mtime > self.last_config_change[
+                                modules_config_path]:
+                            self.logger.debug(
+                                f"检测到配置文件变化: {modules_config_path}")
+                            self.last_config_change[
+                                modules_config_path] = current_mtime
+
+                            # 取消之前的定时器（如果存在）
+                            if modules_config_path in debounce_timers and not debounce_timers[
+                                    modules_config_path].done():
+                                debounce_timers[modules_config_path].cancel()
+
+                            # 创建新的延迟处理任务
+                            debounce_timers[
+                                modules_config_path] = asyncio.create_task(
+                                    self.debounce_config_change(
+                                        modules_config_path, 1.0))
+
+                    # 短暂休眠以减少CPU使用
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    self.logger.error(f"监控配置文件时出错: {e}", exc_info=True)
+                    await asyncio.sleep(5)  # 出错后等待更长时间再重试
+        except asyncio.CancelledError:
+            self.logger.info("配置文件监控任务已取消")
+            # 取消所有未完成的防抖动任务
+            for path, task in debounce_timers.items():
+                if not task.done():
+                    task.cancel()
+            raise
+
+    async def debounce_config_change(self, file_path, delay):
+        """延迟处理配置文件变更，实现防抖动"""
+        try:
+            # 等待指定的延迟时间
+            await asyncio.sleep(delay)
+            # 处理配置变更
+            await self.handle_config_change(file_path)
+        except asyncio.CancelledError:
+            # 如果任务被取消，不做任何处理
+            pass
+
+    async def handle_config_change(self, file_path):
+        """处理配置文件变更"""
+        # 使用锁防止并发处理同一个文件
+        async with self.config_change_lock:
             try:
+                self.logger.info(f"处理配置文件变更: {file_path}")
+
                 # 保存当前模块列表用于比较
                 old_modules = set(self.config_manager.get_enabled_modules())
 
-                # 重新加载配置
-                self.config_manager.reload_main_config()
-                self.config_manager.reload_modules_config()
+                # 根据文件路径重新加载相应配置
+                if file_path.endswith("config.json"):
+                    self.config_manager.reload_main_config()
+                    self.logger.info("已重新加载主配置文件")
+                elif file_path.endswith("modules.json"):
+                    self.config_manager.reload_modules_config()
+                    self.logger.info("已重新加载模块配置文件")
 
                 # 检查模块列表是否变化
                 new_modules = set(self.config_manager.get_enabled_modules())
-                if old_modules != new_modules:
-                    # 处理新启用的模块
-                    for module_name in new_modules - old_modules:
-                        self.logger.info(f"检测到新启用的模块: {module_name}")
-                        await self.load_single_module(module_name)
 
-                    # 处理新禁用的模块
-                    for module_name in old_modules - new_modules:
-                        self.logger.info(f"检测到新禁用的模块: {module_name}")
-                        await self.unload_single_module(module_name)
+                # 处理新启用的模块
+                for module_name in new_modules - old_modules:
+                    self.logger.info(f"检测到新启用的模块: {module_name}，正在自动加载...")
+                    success = await self.load_single_module(module_name)
+                    if success:
+                        self.logger.info(f"模块 {module_name} 已成功加载")
+                    else:
+                        self.logger.error(f"模块 {module_name} 加载失败")
+
+                # 处理新禁用的模块
+                for module_name in old_modules - new_modules:
+                    self.logger.info(f"检测到模块 {module_name} 已被禁用")
+
+                # 检查已加载模块的文件是否有变化，如果有，执行热更新
+                for module_name in self.module_loader.loaded_modules.keys():
+                    if module_name in new_modules:  # 只处理仍然启用的模块
+                        # 检查模块文件是否有变化
+                        module_path = os.path.join(
+                            self.module_loader.modules_dir,
+                            f"{module_name}.py")
+                        if os.path.exists(module_path):
+                            self.logger.info(f"检查模块 {module_name} 是否需要热更新...")
+                            success = self.module_loader.hot_reload_module(
+                                module_name, self.application, self)
+                            if success:
+                                self.logger.info(f"模块 {module_name} 已成功热更新")
 
             except Exception as e:
-                self.logger.error(f"监视配置文件时出错: {e}")
-
-            # 每 5 秒检查一次
-            await asyncio.sleep(5)
+                self.logger.error(f"处理配置变更时出错: {e}", exc_info=True)
 
     async def load_single_module(self, module_name):
         """加载单个模块及其依赖"""
@@ -179,13 +296,39 @@ class BotEngine:
             self.logger.error(f"卸载模块 {module_name} 失败")
             return False
 
-    def load_modules(self):
-        """加载已启用的模块"""
+    async def load_modules(self):
+        """并行加载全局和群组启用的模块"""
+        # 获取全局启用的模块
         enabled_modules = self.config_manager.get_enabled_modules()
         self.logger.info(f"正在加载全局启用的模块: {enabled_modules}")
 
-        for module_name in enabled_modules:
-            asyncio.create_task(self.load_single_module(module_name))
+        # 获取所有群组的启用模块并去重
+        group_modules = set()
+        for modules in self.config_manager.modules_config.get(
+                "group_modules", {}).values():
+            group_modules.update(modules)
+
+        if group_modules:
+            self.logger.info(f"正在加载群组启用的模块: {list(group_modules)}")
+
+        # 合并去重后的所有需要加载的模块
+        all_modules = list(set(enabled_modules) | group_modules)
+
+        if not all_modules:
+            return
+
+        # 创建加载任务列表并执行
+        load_tasks = [
+            self.load_single_module(module_name) for module_name in all_modules
+        ]
+        results = await asyncio.gather(*load_tasks, return_exceptions=True)
+
+        # 处理加载结果
+        for module_name, result in zip(all_modules, results):
+            if isinstance(result, Exception):
+                self.logger.error(f"加载模块 {module_name} 时发生错误: {result}")
+            elif not result:
+                self.logger.warning(f"模块 {module_name} 加载失败")
 
     async def enable_module_command(self, update: Update,
                                     context: ContextTypes.DEFAULT_TYPE):
@@ -198,8 +341,16 @@ class BotEngine:
         chat_id = update.effective_chat.id
         chat_type = update.effective_chat.type
 
+        # 检查是否是示例模块
+        if module_name in self.EXAMPLE_MODULES:
+            await update.message.reply_text(f"找不到模块 {module_name}")
+            return
+
         # 检查模块是否可用
-        available_modules = self.module_loader.discover_modules()
+        available_modules = [
+            m for m in self.module_loader.discover_modules()
+            if m not in self.EXAMPLE_MODULES
+        ]
         if module_name not in available_modules:
             await update.message.reply_text(f"找不到模块 {module_name}")
             return
@@ -236,6 +387,11 @@ class BotEngine:
         chat_id = update.effective_chat.id
         chat_type = update.effective_chat.type
 
+        # 检查是否是示例模块
+        if module_name in self.EXAMPLE_MODULES:
+            await update.message.reply_text(f"找不到模块 {module_name}")
+            return
+
         # 检查模块是否已启用
         if not self.config_manager.is_module_enabled_for_chat(
                 module_name, chat_id):
@@ -262,6 +418,14 @@ class BotEngine:
         enabled_modules = self.config_manager.get_enabled_modules_for_chat(
             chat_id)
         available_modules = self.module_loader.discover_modules()
+
+        # 过滤掉示例模块
+        available_modules = [
+            m for m in available_modules if m not in self.EXAMPLE_MODULES
+        ]
+        enabled_modules = [
+            m for m in enabled_modules if m not in self.EXAMPLE_MODULES
+        ]
 
         # 构建消息
         if chat_type in ["group", "supergroup"]:
@@ -366,7 +530,7 @@ class BotEngine:
         # 核心命令（按权限分类）
         core_commands_all = ["start", "help", "id", "modules",
                              "commands"]  # 所有用户可用
-        core_commands_admin = ["enable", "disable", "reload_config"]  # 管理员可用
+        core_commands_admin = ["enable", "disable"]  # 管理员可用
         core_commands_super = ["listgroups", "addgroup",
                                "removegroup"]  # 超级管理员可用
 
@@ -392,6 +556,10 @@ class BotEngine:
                 # 检查命令所属的模块
                 for module_name, module_data in self.module_loader.loaded_modules.items(
                 ):
+                    # 跳过示例模块
+                    if module_name in self.EXAMPLE_MODULES:
+                        continue
+
                     module_cmds = module_data["metadata"].get("commands", [])
                     if cmd in module_cmds:
                         # 检查模块是否在当前聊天中启用
@@ -767,12 +935,13 @@ class BotEngine:
         # 检查 Bot 所在群组
         await self.check_bot_groups()
 
-        # 加载已启用的模块
-        self.load_modules()
+        # 并行加载已启用的模块
+        await self.load_modules()
 
-        # 启动配置监视任务
+        # 启动配置文件监控任务
         self.config_watch_task = asyncio.create_task(
             self.watch_config_changes())
+        self.logger.info("已启动配置文件监控任务")
 
         # 启动轮询
         self.logger.info("启动 Bot 轮询...")
@@ -788,13 +957,14 @@ class BotEngine:
         """停止 Bot"""
         self.logger.info("正在停止 Bot...")
 
-        # 取消配置监视任务
-        if self.config_watch_task:
+        # 停止配置监视任务
+        if self.config_watch_task and not self.config_watch_task.done():
             self.config_watch_task.cancel()
             try:
                 await self.config_watch_task
             except asyncio.CancelledError:
                 pass
+            self.logger.info("配置文件监控任务已停止")
 
         # 卸载所有模块
         for module_name in list(self.module_loader.loaded_modules.keys()):

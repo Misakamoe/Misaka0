@@ -355,9 +355,9 @@ class ConfigManager:
 
         # 检查是否是群组 ID（群组 ID 通常为负数）
         if chat_id < 0:  # 群组 ID
-            # 获取群组特定的模块列表
-            return self.modules_config.get("group_modules", {}).get(
-                chat_id_str, self.modules_config.get("enabled_modules", []))
+            # 获取群组特定的模块列表，如果不存在则返回空列表
+            return self.modules_config.get("group_modules",
+                                           {}).get(chat_id_str, [])
         else:  # 私聊 ID
             # 私聊使用全局设置
             return self.modules_config.get("enabled_modules", [])
@@ -372,11 +372,9 @@ class ConfigManager:
             if "group_modules" not in self.modules_config:
                 self.modules_config["group_modules"] = {}
 
-            # 确保该群组的配置存在
+            # 确保该群组的配置存在，初始化为空列表
             if chat_id_str not in self.modules_config["group_modules"]:
-                # 初始化为全局启用的模块列表的副本
-                self.modules_config["group_modules"][
-                    chat_id_str] = self.get_enabled_modules().copy()
+                self.modules_config["group_modules"][chat_id_str] = []
 
             # 启用模块
             if module_name not in self.modules_config["group_modules"][
@@ -399,11 +397,10 @@ class ConfigManager:
             if "group_modules" not in self.modules_config:
                 self.modules_config["group_modules"] = {}
 
-            # 确保该群组的配置存在
+            # 确保该群组的配置存在，初始化为空列表
             if chat_id_str not in self.modules_config["group_modules"]:
-                # 初始化为全局启用的模块列表的副本
-                self.modules_config["group_modules"][
-                    chat_id_str] = self.get_enabled_modules().copy()
+                self.modules_config["group_modules"][chat_id_str] = []
+                return self.save_modules_config()  # 已经是空列表，没有模块可禁用
 
             # 禁用模块
             if module_name in self.modules_config["group_modules"][

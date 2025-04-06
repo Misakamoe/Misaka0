@@ -1,3 +1,4 @@
 # requirements.txt
 python-telegram-bot==22.0
 pytz==2025.2
+watchdog==6.0.0

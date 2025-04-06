@@ -1,7 +1,6 @@
 # 配置文件和数据
-config/config.json
-config/modules.json
-config/reminders.json
+config/*.json
+data/
 
 # Python 相关
 __pycache__/
