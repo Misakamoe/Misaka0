@@ -153,7 +153,11 @@ class ConfigManager:
 
     def reload_modules_config(self):
         """重新加载模块配置"""
-        default_config = {"enabled_modules": [], "group_modules": {}}
+        default_config = {
+            "enabled_modules": [],
+            "group_modules": {},
+            "module_configs": {}  # 添加模块配置部分
+        }
 
         # 获取当前文件哈希
         current_hash = self._get_file_hash(self.modules_config_path)
@@ -415,3 +419,27 @@ class ConfigManager:
     def is_module_enabled_for_chat(self, module_name, chat_id):
         """检查模块是否在特定聊天中启用"""
         return module_name in self.get_enabled_modules_for_chat(chat_id)
+
+    # 模块配置管理
+    def get_module_config(self, module_name):
+        """获取模块配置"""
+        # 确保模块配置存在
+        if "module_configs" not in self.modules_config:
+            self.modules_config["module_configs"] = {}
+            self.save_modules_config()
+
+        # 返回模块配置，如果不存在则返回空字典
+        return self.modules_config.get("module_configs",
+                                       {}).get(module_name, {})
+
+    def save_module_config(self, module_name, config):
+        """保存模块配置"""
+        # 确保模块配置存在
+        if "module_configs" not in self.modules_config:
+            self.modules_config["module_configs"] = {}
+
+        # 更新配置
+        self.modules_config["module_configs"][module_name] = config
+
+        # 保存配置
+        return self.save_modules_config()

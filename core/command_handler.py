@@ -1,6 +1,7 @@
 # core/command_handler.py
 import logging
-from telegram.ext import CommandHandler, ContextTypes
+import difflib
+from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 from telegram import Update
 from utils.logger import setup_logger
 from utils.decorators import error_handler, permission_check, group_check, module_check
@@ -14,6 +15,12 @@ class CommandProcessor:
         self.logger = setup_logger("CommandProcessor")
         self.command_handlers = {}
         self.command_metadata = {}  # 存储命令元数据
+
+        # 添加未知命令处理器（低优先级，确保在所有其他处理器之后运行）
+        unknown_command_handler = MessageHandler(
+            filters.COMMAND & ~filters.UpdateType.EDITED_MESSAGE,
+            self.handle_unknown_command)
+        self.application.add_handler(unknown_command_handler, group=999)
 
     def register_command(self, command, callback, admin_only=False):
         """注册命令处理器
@@ -76,6 +83,41 @@ class CommandProcessor:
     def get_command_metadata(self, command):
         """获取命令元数据"""
         return self.command_metadata.get(command, {})
+
+    def find_similar_command(self, command):
+        """查找最相似的命令"""
+        if not command or command in self.command_handlers:
+            return None
+
+        # 使用 difflib 查找最相似的命令
+        similar_commands = difflib.get_close_matches(
+            command, self.command_handlers.keys(), n=1, cutoff=0.6)
+
+        return similar_commands[0] if similar_commands else None
+
+    @error_handler
+    async def handle_unknown_command(self, update: Update,
+                                     context: ContextTypes.DEFAULT_TYPE):
+        """处理未知命令"""
+        if not update.message or not update.message.text:
+            return
+
+        # 提取命令名称
+        text = update.message.text
+        if not text.startswith('/'):
+            return
+
+        command = text.split()[0][1:].split('@')[0]
+
+        # 检查是否是未知命令
+        if command in self.command_handlers:
+            return  # 已知命令，不处理
+
+        # 查找相似命令
+        similar_command = self.find_similar_command(command)
+        if similar_command:
+            await update.message.reply_text(f"您是否想使用 /{similar_command} 命令?")
+        # 如果没有找到相似命令，不做任何响应
 
     def register_core_commands(self, bot_engine):
         """注册核心命令"""
