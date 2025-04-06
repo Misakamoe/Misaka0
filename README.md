@@ -96,10 +96,10 @@ docker-compose logs -f
 docker build -t modular-telegram-bot .
 
 # 运行容器（使用已配置的 config）
-docker run -d --name telegram-bot -v ./config:/app/config -v ./logs:/app/logs modular-telegram-bot
+docker run -d --name telegram-bot -v ./config:/app/config modular-telegram-bot
 
 # 或者使用环境变量运行
-docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./config:/app/config -v ./logs:/app/logs modular-telegram-bot
+docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./config:/app/config modular-telegram-bot
 ```
 
 **方式 4: Systemd 服务**
@@ -150,8 +150,6 @@ sudo systemctl status telegram-bot
 - `/enable` <模块名> - 启用模块
 
 - `/disable` <模块名> - 禁用模块
-
-- `/reload_config` - 重新加载配置
 
 - `/listgroups` - 列出授权的群组 (超级管理员)
 

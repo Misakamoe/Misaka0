@@ -6,9 +6,9 @@ services:
     container_name: modular-telegram-bot
     restart: unless-stopped
     volumes:
-      # 持久化配置和日志
+      # 持久化配置
       - ./config:/app/config
-      - ./logs:/app/logs
+      # ./logs:/app/logs
       # 如果需要热更新模块，取消下面的注释
       # - ./modules:/app/modules
     environment:
@@ -16,6 +16,7 @@ services:
       # 可选：通过环境变量设置配置（优先级高于配置文件）
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - ADMIN_IDS=${ADMIN_IDS:-}
+      # - LOG_LEVEL=${LOG_LEVEL:-INFO}
     # 健康检查
     healthcheck:
       test:

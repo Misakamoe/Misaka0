@@ -10,9 +10,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 确保目录存在
-RUN mkdir -p logs config
+RUN mkdir -p config
 
-# 创建默认配置示例
+# 创建示例配置
 RUN echo '{"token":"", "admin_ids":[], "log_level":"INFO", "allowed_groups":{}}' > config/config.json.example
 
 # 设置时区

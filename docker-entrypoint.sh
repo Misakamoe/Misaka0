@@ -10,28 +10,43 @@ fi
 # 检查是否有配置文件，如果没有则创建示例配置
 if [ ! -f config/config.json ]; then
   echo "配置文件不存在，创建示例配置..."
-  cp config/config.json.example config/config.json
+  # 复制示例配置或创建默认配置
+  if [ -f config/config.json.example ]; then
+    cp config/config.json.example config/config.json
+  else
+    echo '{"token":"", "admin_ids":[], "log_level":"INFO", "allowed_groups":{}}' >config/config.json
+  fi
+  echo "已创建默认配置文件，请编辑后重启容器"
 fi
 
-# 使用环境变量更新配置（如果提供）
-if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
-  # 检查是否是示例值
-  if [[ "$TELEGRAM_BOT_TOKEN" == "your_token_here" || "$TELEGRAM_BOT_TOKEN" == "YOUR_TELEGRAM_BOT_TOKEN_HERE" || -z "$TELEGRAM_BOT_TOKEN" ]]; then
-    echo "错误: 请提供真实的 Telegram Bot Token，而不是示例值或空值"
-    exit 1
-  fi
-  echo "从环境变量更新 Bot Token..."
-  python -c "import json; c=json.load(open('config/config.json')); c['token']='$TELEGRAM_BOT_TOKEN'; json.dump(c, open('config/config.json', 'w'), indent=4)"
-fi
+# 使用环境变量更新配置中的特定字段（如果提供）
+if [ -n "$TELEGRAM_BOT_TOKEN" ] || [ -n "$ADMIN_IDS" ]; then
+  echo "从环境变量更新配置..."
 
-if [ -n "$ADMIN_IDS" ]; then
-  # 检查是否是示例 ID
-  if [[ "$ADMIN_IDS" == "123456789" ]]; then
-    echo "错误: 请提供真实的管理员 ID，而不是示例值"
-    exit 1
-  fi
-  echo "从环境变量更新管理员 ID..."
-  python -c "import json; c=json.load(open('config/config.json')); c['admin_ids']=[int(id) for id in '$ADMIN_IDS'.split(',') if id]; json.dump(c, open('config/config.json', 'w'), indent=4)"
+  # 使用 Python 更新配置，保留其他字段
+  python -c "
+import json
+import os
+
+# 读取现有配置
+with open('config/config.json', 'r') as f:
+    config = json.load(f)
+
+# 只更新环境变量指定的字段
+token = os.environ.get('TELEGRAM_BOT_TOKEN')
+if token and token not in ['your_token_here', 'YOUR_TELEGRAM_BOT_TOKEN_HERE', '']:
+    print('从环境变量更新 Bot Token')
+    config['token'] = token
+
+admin_ids = os.environ.get('ADMIN_IDS')
+if admin_ids and admin_ids != '123456789':
+    print('从环境变量更新管理员 ID')
+    config['admin_ids'] = [int(id) for id in admin_ids.split(',') if id]
+
+# 写回配置文件
+with open('config/config.json', 'w') as f:
+    json.dump(config, f, indent=4)
+"
 fi
 
 # 验证配置是否有效
