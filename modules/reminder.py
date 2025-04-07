@@ -14,10 +14,13 @@ from utils.text_utils import TextUtils
 
 # 模块元数据
 MODULE_NAME = "reminder"
-MODULE_VERSION = "1.2.3"
+MODULE_VERSION = "1.3.0"
 MODULE_DESCRIPTION = "周期/一次性提醒功能"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["remind", "remindonce", "reminders", "delreminder"]
+
+# 更新代数，每次热更新时递增
+_UPDATE_GENERATION = 0
 
 # 模块状态
 _state = {}
@@ -52,6 +55,7 @@ class ReminderBase:
         self.task_running = False
         self.title = title or (message[:15] +
                                "..." if len(message) > 15 else message)
+        self.update_generation = _UPDATE_GENERATION  # 添加更新代数标识
 
     def to_dict(self):
         """转换为字典用于保存"""
@@ -65,7 +69,8 @@ class ReminderBase:
             "chat_type": self.chat_type,
             "created_at": self.created_at,
             "enabled": self.enabled,
-            "task_running": self.task_running
+            "task_running": self.task_running,
+            "update_generation": self.update_generation
         }
 
     async def send_reminder(self, context):
@@ -137,6 +142,8 @@ class PeriodicReminder(ReminderBase):
         reminder.enabled = data.get("enabled", True)
         reminder.task_running = data.get("task_running", False)
         reminder.last_reminded = data.get("last_reminded")
+        reminder.update_generation = data.get("update_generation",
+                                              _UPDATE_GENERATION)
         return reminder
 
     async def start_task(self, context):
@@ -146,8 +153,19 @@ class PeriodicReminder(ReminderBase):
         self.task_running = True
         save_reminders()
 
+        # 记录创建时的代数
+        task_generation = self.update_generation
+
         try:
             while True:
+                # 检查是否是最新代数的任务
+                if task_generation < _UPDATE_GENERATION:
+                    if module_interface:
+                        module_interface.logger.debug(
+                            f"提醒任务 {self.id} 属于旧代数 {task_generation}，当前代数 {_UPDATE_GENERATION}，停止执行"
+                        )
+                    break
+
                 # 计算应该等待的时间
                 now = time.time()
                 elapsed_time = now - (self.last_reminded or self.created_at)
@@ -161,6 +179,13 @@ class PeriodicReminder(ReminderBase):
                         module_interface.logger.debug(
                             f"提醒 {self.id} 将在 {wait_time:.1f} 秒后发送")
                     await asyncio.sleep(wait_time)
+
+                # 再次检查代数，防止在等待期间发生热更新
+                if task_generation < _UPDATE_GENERATION:
+                    if module_interface:
+                        module_interface.logger.debug(
+                            f"提醒任务 {self.id} 在等待期间检测到热更新，停止执行")
+                    break
 
                 # 重新加载数据以获取最新状态
                 reminder_data = get_reminder(self.chat_id, self.id)
@@ -237,6 +262,8 @@ class OneTimeReminder(ReminderBase):
         reminder.enabled = data.get("enabled", True)
         reminder.task_running = data.get("task_running", False)
         reminder.reminded = data.get("reminded", False)
+        reminder.update_generation = data.get("update_generation",
+                                              _UPDATE_GENERATION)
         return reminder
 
     async def start_task(self, context):
@@ -246,6 +273,9 @@ class OneTimeReminder(ReminderBase):
         self.task_running = True
         save_reminders()
 
+        # 记录创建时的代数
+        task_generation = self.update_generation
+
         try:
             # 计算等待时间
             now = time.time()
@@ -253,7 +283,19 @@ class OneTimeReminder(ReminderBase):
 
             if wait_time > 0:
                 # 等待直到目标时间
+                if module_interface:
+                    module_interface.logger.debug(
+                        f"一次性提醒 {self.id} 将在 {wait_time:.1f} 秒后发送")
+
                 await asyncio.sleep(wait_time)
+
+                # 检查是否是最新代数的任务
+                if task_generation < _UPDATE_GENERATION:
+                    if module_interface:
+                        module_interface.logger.debug(
+                            f"一次性提醒任务 {self.id} 属于旧代数 {task_generation}，当前代数 {_UPDATE_GENERATION}，停止执行"
+                        )
+                    return
 
                 # 重新加载数据以获取最新状态
                 reminder_data = get_reminder(self.chat_id, self.id)
@@ -770,11 +812,13 @@ def stop_reminder_tasks():
         module_interface.logger.info("正在停止所有提醒任务...")
 
     # 取消所有任务，但保留提醒数据
+    task_count = 0
     for chat_id, reminders in _state["reminder_tasks"].items():
         for reminder_id, task_info in reminders.items():
             task = task_info.get("task")
-            if task:
+            if task and not task.done():
                 task.cancel()
+                task_count += 1
 
             # 更新任务状态
             reminder = task_info.get("reminder")
@@ -791,7 +835,7 @@ def stop_reminder_tasks():
                 _state["reminder_tasks"][chat_id][reminder_id]["task"] = None
 
     if module_interface:
-        module_interface.logger.info("所有提醒任务已停止")
+        module_interface.logger.info(f"已停止 {task_count} 个提醒任务")
 
 
 @error_handler
@@ -1202,9 +1246,22 @@ async def delete_reminder_command(update: Update,
 
 # 获取模块状态的方法（用于热更新）
 def get_state(module_interface):
-    """获取模块状态（只存储必要的数据，不存储对象）"""
-    # 将所有提醒转换为字典格式
+    """获取模块状态（用于热更新）"""
     module_interface.logger.debug("正在获取模块状态用于热更新")
+
+    # 取消所有正在运行的任务
+    task_count = 0
+    for chat_id, reminders in _state["reminder_tasks"].items():
+        for reminder_id, task_info in reminders.items():
+            task = task_info.get("task")
+            if task and not task.done():
+                task.cancel()
+                task_count += 1
+                module_interface.logger.debug(f"已取消提醒任务 {reminder_id} 用于热更新")
+
+    if task_count > 0:
+        module_interface.logger.info(f"热更新: 已取消 {task_count} 个正在运行的提醒任务")
+
     return {
         "last_save_time": _state.get("last_save_time", time.time()),
         "reminders_data": get_all_reminders_dict()
@@ -1214,9 +1271,15 @@ def get_state(module_interface):
 # 设置模块状态的方法（用于热更新）
 def set_state(module_interface, state):
     """设置模块状态"""
-    global _state
+    global _state, _UPDATE_GENERATION
 
     module_interface.logger.debug("正在恢复模块状态")
+
+    # 递增更新代数
+    _UPDATE_GENERATION += 1
+    current_generation = _UPDATE_GENERATION
+
+    module_interface.logger.debug(f"当前热更新代数: {current_generation}")
 
     # 更新最后保存时间
     _state["last_save_time"] = state.get("last_save_time", time.time())
@@ -1248,6 +1311,9 @@ def set_state(module_interface, state):
             else:  # 周期性提醒
                 reminder = PeriodicReminder.from_dict(reminder_data)
 
+            # 更新提醒的代数
+            reminder.update_generation = current_generation
+
             # 初始化聊天记录
             if chat_id_str not in _state["reminder_tasks"]:
                 _state["reminder_tasks"][chat_id_str] = {}
@@ -1266,6 +1332,11 @@ def set_state(module_interface, state):
 
 def setup(module_interface):
     """模块初始化"""
+    # 初始化更新代数
+    if '_UPDATE_GENERATION' not in globals():
+        global _UPDATE_GENERATION
+        _UPDATE_GENERATION = 0
+
     # 注册命令
     module_interface.register_command("remind", remind_command)
     module_interface.register_command("remindonce", remind_once_command)
@@ -1312,6 +1383,9 @@ def cleanup(module_interface):
     if hasattr(module_interface,
                'periodic_save_task') and module_interface.periodic_save_task:
         module_interface.periodic_save_task.cancel()
+
+    # 记录当前代数
+    module_interface.logger.debug(f"清理模块，当前热更新代数: {_UPDATE_GENERATION}")
 
     # 停止所有提醒任务
     stop_reminder_tasks()

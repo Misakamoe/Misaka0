@@ -16,7 +16,7 @@ from core.config_manager import ConfigManager
 from utils.logger import setup_logger
 from utils.decorators import error_handler, permission_check, group_check, module_check
 from utils.event_system import EventSystem
-from utils.text_utils import TextUtils  # 导入新的工具类
+from utils.text_utils import TextUtils
 
 
 class BotEngine:
