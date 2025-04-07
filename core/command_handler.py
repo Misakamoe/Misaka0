@@ -5,6 +5,7 @@ from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 from telegram import Update
 from utils.logger import setup_logger
 from utils.decorators import error_handler, permission_check, group_check, module_check
+from utils.text_utils import TextUtils
 
 
 class CommandProcessor:
@@ -62,6 +63,51 @@ class CommandProcessor:
         # 保存处理器引用以便后续可能的移除
         self.command_handlers[command] = handler
         self.logger.debug(f"注册命令 /{command}")
+
+    def register_command_group(self, commands, module_name=None):
+        """批量注册一组命令
+        
+        Args:
+            commands: 命令配置字典，格式为 {命令名: {callback, admin_only, aliases}}
+            module_name: 模块名称，用于日志记录
+            
+        Returns:
+            dict: 注册结果，命令名到成功状态的映射
+        """
+        results = {}
+        prefix = f"[{module_name}] " if module_name else ""
+
+        for cmd_name, cmd_data in commands.items():
+            callback = cmd_data.get("callback")
+            admin_only = cmd_data.get("admin_only", False)
+            aliases = cmd_data.get("aliases", [])
+
+            if not callback:
+                self.logger.warning(f"{prefix}命令 {cmd_name} 没有提供回调函数，跳过注册")
+                results[cmd_name] = False
+                continue
+
+            # 注册主命令
+            try:
+                self.register_command(cmd_name, callback, admin_only)
+                results[cmd_name] = True
+                self.logger.debug(f"{prefix}注册命令 /{cmd_name}")
+            except Exception as e:
+                self.logger.error(f"{prefix}注册命令 /{cmd_name} 失败: {e}")
+                results[cmd_name] = False
+
+            # 注册别名
+            for alias in aliases:
+                try:
+                    self.register_command(alias, callback, admin_only)
+                    results[alias] = True
+                    self.logger.debug(
+                        f"{prefix}注册命令别名 /{alias} -> /{cmd_name}")
+                except Exception as e:
+                    self.logger.error(f"{prefix}注册命令别名 /{alias} 失败: {e}")
+                    results[alias] = False
+
+        return results
 
     def unregister_command(self, command):
         """注销命令处理器"""
@@ -200,7 +246,7 @@ class CommandProcessor:
         if is_super_admin:
             help_text += "\n超级管理员命令:\n"
             help_text += "/listgroups - 列出允许的群组\n"
-            help_text += "/addgroup [群组 ID] - 添加群组到白名单\n"
+            help_text += "/addgroup <群组 ID> - 添加群组到白名单\n"
             help_text += "/removegroup <群组 ID> - 从白名单移除群组\n"
 
         await update.message.reply_text(help_text)

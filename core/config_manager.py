@@ -1,4 +1,5 @@
 # core/config_manager.py
+
 import os
 import json
 import logging
@@ -26,8 +27,7 @@ class ConfigManager:
 
         # 初始化配置
         self._ensure_config_dir()
-        self.reload_main_config()
-        self.reload_modules_config()
+        self.reload_all_configs()
 
     def _ensure_config_dir(self):
         """确保配置目录存在"""
@@ -86,6 +86,87 @@ class ConfigManager:
             except Exception as e:
                 self.logger.error(f"备份损坏的配置文件失败: {e}")
 
+    def _reload_config(self, file_path, default_config, validate_func=None):
+        """通用配置重新加载函数
+        
+        Args:
+            file_path: 配置文件路径
+            default_config: 默认配置
+            validate_func: 配置验证函数
+            
+        Returns:
+            dict: 加载的配置
+        """
+        # 获取当前文件哈希
+        current_hash = self._get_file_hash(file_path)
+
+        # 确定配置类型（main 或 modules）
+        config_type = "main" if file_path == self.main_config_path else "modules"
+        old_hash = self.main_config_hash if config_type == "main" else self.modules_config_hash
+        config_changed = (current_hash != old_hash)
+
+        # 加载配置
+        new_config = self._load_json_file(file_path, default_config)
+
+        # 检查是否需要补充缺失的配置项
+        needs_save = False
+        for key, value in default_config.items():
+            if key not in new_config:
+                new_config[key] = value
+                needs_save = True
+
+        # 如果有缺失的配置项，保存更新后的配置
+        if needs_save:
+            self._save_json_file(file_path, new_config)
+            # 更新哈希值
+            current_hash = self._get_file_hash(file_path)
+            self.logger.info(f"{config_type} 配置已自动补充缺失项并保存")
+            config_changed = True
+
+        # 验证配置有效性
+        if validate_func:
+            validate_func(new_config)
+
+        # 更新内存中的配置和哈希
+        if config_type == "main":
+            self.main_config = new_config
+            self.main_config_hash = current_hash
+        else:
+            self.modules_config = new_config
+            self.modules_config_hash = current_hash
+
+        # 只在配置实际变化时输出日志
+        if config_changed:
+            self.logger.info(f"{config_type} 配置已重新加载")
+
+        return new_config
+
+    def reload_main_config(self):
+        """重新加载主配置"""
+        default_config = {
+            "token": "",
+            "admin_ids": [],
+            "log_level": "INFO",
+            "allowed_groups": {}
+        }
+        return self._reload_config(self.main_config_path, default_config,
+                                   self._validate_main_config)
+
+    def reload_modules_config(self):
+        """重新加载模块配置"""
+        default_config = {
+            "enabled_modules": [],
+            "group_modules": {},
+            "module_configs": {}  # 添加模块配置部分
+        }
+        return self._reload_config(self.modules_config_path, default_config)
+
+    def reload_all_configs(self):
+        """重新加载所有配置"""
+        self.reload_main_config()
+        self.reload_modules_config()
+        self.logger.info("所有配置已重新加载")
+
     def _validate_main_config(self, config):
         """验证主配置的有效性"""
         # 验证 token
@@ -105,98 +186,6 @@ class ConfigManager:
             # 检查是否包含示例 ID
             if 123456789 in admin_ids:
                 self.logger.warning("配置中的管理员 ID 包含示例值 123456789，请修改为真实值")
-
-    def reload_main_config(self):
-        """重新加载主配置"""
-        default_config = {
-            "token": "",
-            "admin_ids": [],
-            "log_level": "INFO",
-            "allowed_groups": {}
-        }
-
-        # 获取当前文件哈希
-        current_hash = self._get_file_hash(self.main_config_path)
-        config_changed = (current_hash != self.main_config_hash)
-
-        # 加载配置
-        new_config = self._load_json_file(self.main_config_path,
-                                          default_config)
-
-        # 检查是否需要补充缺失的配置项
-        needs_save = False
-        for key, value in default_config.items():
-            if key not in new_config:
-                new_config[key] = value
-                needs_save = True
-
-        # 如果有缺失的配置项，保存更新后的配置
-        if needs_save:
-            self._save_json_file(self.main_config_path, new_config)
-            # 更新哈希值
-            current_hash = self._get_file_hash(self.main_config_path)
-            self.logger.info("主配置已自动补充缺失项并保存")
-            config_changed = True
-
-        # 验证配置有效性
-        self._validate_main_config(new_config)
-
-        # 更新内存中的配置
-        self.main_config = new_config
-        self.main_config_hash = current_hash
-
-        # 只在配置实际变化时输出日志
-        if config_changed:
-            self.logger.info("主配置已重新加载")
-
-        return self.main_config
-
-    def reload_modules_config(self):
-        """重新加载模块配置"""
-        default_config = {
-            "enabled_modules": [],
-            "group_modules": {},
-            "module_configs": {}  # 添加模块配置部分
-        }
-
-        # 获取当前文件哈希
-        current_hash = self._get_file_hash(self.modules_config_path)
-        config_changed = (current_hash != self.modules_config_hash)
-
-        # 加载配置
-        new_config = self._load_json_file(self.modules_config_path,
-                                          default_config)
-
-        # 检查是否需要补充缺失的配置项
-        needs_save = False
-        for key, value in default_config.items():
-            if key not in new_config:
-                new_config[key] = value
-                needs_save = True
-
-        # 如果有缺失的配置项，保存更新后的配置
-        if needs_save:
-            self._save_json_file(self.modules_config_path, new_config)
-            # 更新哈希值
-            current_hash = self._get_file_hash(self.modules_config_path)
-            self.logger.info("模块配置已自动补充缺失项并保存")
-            config_changed = True
-
-        # 更新内存中的配置
-        self.modules_config = new_config
-        self.modules_config_hash = current_hash
-
-        # 只在配置实际变化时输出日志
-        if config_changed:
-            self.logger.info("模块配置已重新加载")
-
-        return self.modules_config
-
-    def reload_all_configs(self):
-        """重新加载所有配置"""
-        self.reload_main_config()
-        self.reload_modules_config()
-        self.logger.info("所有配置已重新加载")
 
     def save_main_config(self):
         """保存主配置"""

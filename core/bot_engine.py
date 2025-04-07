@@ -1,4 +1,5 @@
 # core/bot_engine.py
+
 import logging
 import os
 import importlib
@@ -15,13 +16,14 @@ from core.config_manager import ConfigManager
 from utils.logger import setup_logger
 from utils.decorators import error_handler, permission_check, group_check, module_check
 from utils.event_system import EventSystem
+from utils.text_utils import TextUtils  # 导入新的工具类
 
 
 class BotEngine:
     """Bot 引擎，负责初始化和管理整个机器人"""
 
     # 示例模块
-    EXAMPLE_MODULES = ['event_publisher', 'event_subscriber']
+    EXAMPLE_MODULES = ['echo']
 
     def __init__(self):
         # 初始化配置管理器
@@ -92,6 +94,50 @@ class BotEngine:
 
         self.logger.info("Bot 引擎初始化完成")
 
+    # 辅助方法
+    async def _check_command_args(self, update, context, min_args, usage_msg):
+        """检查命令参数
+        
+        Args:
+            update: 更新对象
+            context: 上下文对象
+            min_args: 最小参数数量
+            usage_msg: 用法提示消息
+            
+        Returns:
+            bool: 参数是否有效
+        """
+        if not context.args or len(context.args) < min_args:
+            await update.message.reply_text(usage_msg)
+            return False
+        return True
+
+    async def _send_markdown_message(self, update, message, fallback=True):
+        """发送 Markdown 格式消息，出错时尝试发送纯文本
+        
+        Args:
+            update: 更新对象
+            message: Markdown 格式消息
+            fallback: 是否在出错时尝试发送纯文本
+            
+        Returns:
+            bool: 是否成功发送
+        """
+        try:
+            # 尝试发送带有 Markdown 格式的消息
+            await update.message.reply_text(message, parse_mode="MARKDOWN")
+            return True
+        except Exception as e:
+            if not fallback:
+                raise
+
+            # 如果失败，尝试发送纯文本消息
+            self.logger.error(f"使用 Markdown 发送消息失败: {e}")
+            plain_message = TextUtils.markdown_to_plain(message)
+            await update.message.reply_text(plain_message)
+            return False
+
+    # 错误处理
     async def handle_error(self, update: object,
                            context: ContextTypes.DEFAULT_TYPE) -> None:
         """处理错误"""
@@ -101,6 +147,7 @@ class BotEngine:
         if update and isinstance(update, Update) and update.effective_message:
             await update.effective_message.reply_text("处理命令时发生错误，请查看日志获取详情。")
 
+    # 配置监控
     async def watch_config_changes(self):
         """监控配置文件变化的异步任务"""
         config_dir = self.config_manager.config_dir
@@ -121,46 +168,26 @@ class BotEngine:
         try:
             while True:
                 try:
-                    # 检查主配置文件
-                    if os.path.exists(main_config_path):
-                        current_mtime = os.path.getmtime(main_config_path)
-                        if current_mtime > self.last_config_change[
-                                main_config_path]:
-                            self.logger.debug(f"检测到配置文件变化: {main_config_path}")
-                            self.last_config_change[
-                                main_config_path] = current_mtime
+                    # 检查两个配置文件
+                    for config_path in [main_config_path, modules_config_path]:
+                        if os.path.exists(config_path):
+                            current_mtime = os.path.getmtime(config_path)
+                            if current_mtime > self.last_config_change[
+                                    config_path]:
+                                self.logger.debug(f"检测到配置文件变化: {config_path}")
+                                self.last_config_change[
+                                    config_path] = current_mtime
 
-                            # 取消之前的定时器（如果存在）
-                            if main_config_path in debounce_timers and not debounce_timers[
-                                    main_config_path].done():
-                                debounce_timers[main_config_path].cancel()
+                                # 取消之前的定时器（如果存在）
+                                if config_path in debounce_timers and not debounce_timers[
+                                        config_path].done():
+                                    debounce_timers[config_path].cancel()
 
-                            # 创建新的延迟处理任务
-                            debounce_timers[
-                                main_config_path] = asyncio.create_task(
-                                    self.debounce_config_change(
-                                        main_config_path, 1.0))
-
-                    # 检查模块配置文件
-                    if os.path.exists(modules_config_path):
-                        current_mtime = os.path.getmtime(modules_config_path)
-                        if current_mtime > self.last_config_change[
-                                modules_config_path]:
-                            self.logger.debug(
-                                f"检测到配置文件变化: {modules_config_path}")
-                            self.last_config_change[
-                                modules_config_path] = current_mtime
-
-                            # 取消之前的定时器（如果存在）
-                            if modules_config_path in debounce_timers and not debounce_timers[
-                                    modules_config_path].done():
-                                debounce_timers[modules_config_path].cancel()
-
-                            # 创建新的延迟处理任务
-                            debounce_timers[
-                                modules_config_path] = asyncio.create_task(
-                                    self.debounce_config_change(
-                                        modules_config_path, 1.0))
+                                # 创建新的延迟处理任务
+                                debounce_timers[
+                                    config_path] = asyncio.create_task(
+                                        self.debounce_config_change(
+                                            config_path, 1.0))
 
                     # 短暂休眠以减少CPU使用
                     await asyncio.sleep(1)
@@ -237,6 +264,7 @@ class BotEngine:
             except Exception as e:
                 self.logger.error(f"处理配置变更时出错: {e}", exc_info=True)
 
+    # 模块管理方法
     async def load_single_module(self, module_name):
         """加载单个模块及其依赖"""
         # 检查模块是否已加载
@@ -330,11 +358,12 @@ class BotEngine:
             elif not result:
                 self.logger.warning(f"模块 {module_name} 加载失败")
 
+    # 命令处理方法
     async def enable_module_command(self, update: Update,
                                     context: ContextTypes.DEFAULT_TYPE):
         """启用模块命令处理"""
-        if not context.args or len(context.args) < 1:
-            await update.message.reply_text("用法: /enable <模块名>")
+        if not await self._check_command_args(update, context, 1,
+                                              "用法: /enable <模块名>"):
             return
 
         module_name = context.args[0]
@@ -379,8 +408,8 @@ class BotEngine:
     async def disable_module_command(self, update: Update,
                                      context: ContextTypes.DEFAULT_TYPE):
         """禁用模块命令处理"""
-        if not context.args or len(context.args) < 1:
-            await update.message.reply_text("用法: /disable <模块名>")
+        if not await self._check_command_args(update, context, 1,
+                                              "用法: /disable <模块名>"):
             return
 
         module_name = context.args[0]
@@ -444,11 +473,8 @@ class BotEngine:
                         "metadata"]
                     desc = f" - {metadata.get('description', '')}"
                 # 转义可能导致 Markdown 解析错误的字符
-                safe_module = module.replace("_", "\\_").replace(
-                    "*", "\\*").replace("[", "\\[").replace("`", "\\`")
-                safe_desc = desc.replace("_",
-                                         "\\_").replace("*", "\\*").replace(
-                                             "[", "\\[").replace("`", "\\`")
+                safe_module = TextUtils.escape_markdown(module)
+                safe_desc = TextUtils.escape_markdown(desc)
                 message += f"- {safe_module}{safe_desc}\n"
 
         # 可启用但未启用的模块
@@ -480,21 +506,11 @@ class BotEngine:
                 message += "\n*可启用:*\n"
                 for module in available_not_enabled:
                     # 转义可能导致 Markdown 解析错误的字符
-                    safe_module = module.replace("_", "\\_").replace(
-                        "*", "\\*").replace("[", "\\[").replace("`", "\\`")
+                    safe_module = TextUtils.escape_markdown(module)
                     message += f"- {safe_module}\n"
 
-        try:
-            # 尝试发送带有 Markdown 格式的消息
-            await update.message.reply_text(message, parse_mode="MARKDOWN")
-        except Exception as e:
-            # 如果失败，尝试发送纯文本消息
-            self.logger.error(f"使用 Markdown 发送模块列表失败: {e}")
-            plain_message = message.replace("*", "").replace(
-                "\\_", "_").replace("\\*",
-                                    "*").replace("\\[",
-                                                 "[").replace("\\`", "`")
-            await update.message.reply_text(plain_message)
+        # 使用通用方法发送 Markdown 消息
+        await self._send_markdown_message(update, message)
 
     async def list_commands_command(self, update: Update,
                                     context: ContextTypes.DEFAULT_TYPE):
@@ -574,25 +590,22 @@ class BotEngine:
         if available_commands:
             message += "\n*基本命令:*\n"
             for cmd in sorted(available_commands):
-                # 转义可能导致 Markdown 解析错误的字符
-                safe_cmd = cmd.replace("_", "\\_").replace("*", "\\*").replace(
-                    "[", "\\[").replace("`", "\\`")
+                # 转义命令
+                safe_cmd = TextUtils.escape_markdown(cmd)
                 message += f"/{safe_cmd}\n"
 
         # 添加管理员命令到消息
         if admin_commands:
             message += "\n*管理员命令:*\n"
             for cmd in sorted(admin_commands):
-                safe_cmd = cmd.replace("_", "\\_").replace("*", "\\*").replace(
-                    "[", "\\[").replace("`", "\\`")
+                safe_cmd = TextUtils.escape_markdown(cmd)
                 message += f"/{safe_cmd}\n"
 
         # 添加超级管理员命令到消息
         if super_admin_commands:
             message += "\n*超级管理员命令:*\n"
             for cmd in sorted(super_admin_commands):
-                safe_cmd = cmd.replace("_", "\\_").replace("*", "\\*").replace(
-                    "[", "\\[").replace("`", "\\`")
+                safe_cmd = TextUtils.escape_markdown(cmd)
                 message += f"/{safe_cmd}\n"
 
         # 添加模块命令到消息
@@ -607,57 +620,86 @@ class BotEngine:
                     desc = metadata.get("description", "")
 
                 # 转义模块名称
-                safe_module = module_name.replace("_", "\\_").replace(
-                    "*", "\\*").replace("[", "\\[").replace("`", "\\`")
+                safe_module = TextUtils.escape_markdown(module_name)
+                safe_desc = TextUtils.escape_markdown(desc)
 
-                message += f"\n*{safe_module}* - {desc}\n"
+                message += f"\n*{safe_module}* - {safe_desc}\n"
                 for cmd in sorted(cmds):
                     # 转义命令
-                    safe_cmd = cmd.replace("_",
-                                           "\\_").replace("*", "\\*").replace(
-                                               "[", "\\[").replace("`", "\\`")
+                    safe_cmd = TextUtils.escape_markdown(cmd)
                     message += f"/{safe_cmd}\n"
 
         if not available_commands and not admin_commands and not super_admin_commands and not module_commands:
             message += "无已注册命令\n"
 
-        try:
-            # 尝试发送带有 Markdown 格式的消息
-            await update.message.reply_text(message, parse_mode="MARKDOWN")
-        except Exception as e:
-            # 如果失败，尝试发送纯文本消息
-            self.logger.error(f"使用 Markdown 发送命令列表失败: {e}")
-            plain_message = message.replace("*", "").replace(
-                "\\_", "_").replace("\\*",
-                                    "*").replace("\\[",
-                                                 "[").replace("\\`", "`")
-            await update.message.reply_text(plain_message)
+        # 使用通用方法发送 Markdown 消息
+        await self._send_markdown_message(update, message)
 
-    async def reload_config_command(self, update: Update,
-                                    context: ContextTypes.DEFAULT_TYPE):
-        """重新加载配置命令处理"""
-        try:
-            # 重新加载配置
-            self.config_manager.reload_all_configs()
+    async def get_id_command(self, update: Update,
+                             context: ContextTypes.DEFAULT_TYPE):
+        """获取用户 ID 和聊天 ID"""
+        user = update.effective_user
+        chat = update.effective_chat
 
-            # 手动更新配置监视任务的时间戳
-            if self.config_watch_task:
-                # 取消当前任务
-                self.config_watch_task.cancel()
+        # 检查是否是回复某条消息
+        if update.message.reply_to_message:
+            # 只显示被回复用户的信息
+            replied_user = update.message.reply_to_message.from_user
+            message = f"👤 *用户信息*\n"
+            message += f"用户 ID: `{replied_user.id}`\n"
+            if replied_user.username:
+                message += f"用户名: @{TextUtils.escape_markdown(replied_user.username)}\n"
+            message += f"名称: {TextUtils.escape_markdown(replied_user.full_name)}\n"
+
+            # 直接回复原消息
+            await update.message.reply_to_message.reply_text(
+                message, parse_mode="MARKDOWN")
+        else:
+            # 没有回复消息，显示自己的信息和聊天信息
+            message = f"👤 *用户信息*\n"
+            message += f"用户 ID: `{user.id}`\n"
+            if user.username:
+                message += f"用户名: @{TextUtils.escape_markdown(user.username)}\n"
+            message += f"名称: {TextUtils.escape_markdown(user.full_name)}\n\n"
+
+            message += f"💬 *聊天信息*\n"
+            message += f"聊天 ID: `{chat.id}`\n"
+            message += f"类型: {chat.type}\n"
+
+            if chat.type in ["group", "supergroup"]:
+                message += f"群组名称: {TextUtils.escape_markdown(chat.title)}\n"
+
+                # 如果是群组管理员或超级管理员，显示更多信息
+                config_manager = context.bot_data.get("config_manager")
+                is_super_admin = config_manager.is_admin(user.id)
+
                 try:
-                    await self.config_watch_task
-                except asyncio.CancelledError:
-                    pass
+                    chat_member = await context.bot.get_chat_member(
+                        chat.id, user.id)
+                    is_group_admin = chat_member.status in [
+                        "creator", "administrator"
+                    ]
+                except Exception:
+                    is_group_admin = False
 
-                # 启动新任务
-                self.config_watch_task = asyncio.create_task(
-                    self.watch_config_changes())
+                if is_super_admin or is_group_admin:
+                    message += "\n*群组管理员:*\n"
+                    try:
+                        # 获取群组管理员
+                        administrators = await context.bot.get_chat_administrators(
+                            chat.id)
+                        for admin in administrators:
+                            admin_user = admin.user
+                            admin_info = TextUtils.format_user_info(admin_user)
+                            message += f"- {admin_info} - {admin.status}\n"
+                    except Exception as e:
+                        error_msg = TextUtils.escape_markdown(str(e))
+                        message += f"获取管理员列表失败: {error_msg}\n"
 
-            await update.message.reply_text("配置已重新加载")
-        except Exception as e:
-            self.logger.error(f"重新加载配置失败: {e}")
-            await update.message.reply_text(f"重新加载配置失败: {e}")
+            # 正常回复当前消息
+            await update.message.reply_text(message, parse_mode="MARKDOWN")
 
+    # 群组管理方法
     async def handle_my_chat_member(self, update: Update,
                                     context: ContextTypes.DEFAULT_TYPE):
         """处理 Bot 的成员状态变化"""
@@ -704,81 +746,6 @@ class BotEngine:
             self.config_manager.remove_allowed_group(chat.id)
             self.logger.info(f"Bot 已从群组 {chat.id} 移除，已从白名单删除")
 
-    @staticmethod
-    def escape_markdown(text):
-        """转义 Markdown 特殊字符"""
-        if not text:
-            return ""
-        # 转义以下字符: _ * [ ] ` \
-        return text.replace('\\', '\\\\').replace('_', '\\_').replace(
-            '*', '\\*').replace('[', '\\[').replace(']',
-                                                    '\\]').replace('`', '\\`')
-
-    async def get_id_command(self, update: Update,
-                             context: ContextTypes.DEFAULT_TYPE):
-        """获取用户 ID 和聊天 ID"""
-        user = update.effective_user
-        chat = update.effective_chat
-
-        # 检查是否是回复某条消息
-        if update.message.reply_to_message:
-            # 只显示被回复用户的信息
-            replied_user = update.message.reply_to_message.from_user
-            message = f"👤 *用户信息*\n"
-            message += f"用户 ID: `{replied_user.id}`\n"
-            if replied_user.username:
-                message += f"用户名: @{BotEngine.escape_markdown(replied_user.username)}\n"
-            message += f"名称: {BotEngine.escape_markdown(replied_user.full_name)}\n"
-
-            # 直接回复原消息
-            await update.message.reply_to_message.reply_text(
-                message, parse_mode="MARKDOWN")
-        else:
-            # 没有回复消息，显示自己的信息和聊天信息
-            message = f"👤 *用户信息*\n"
-            message += f"用户 ID: `{user.id}`\n"
-            if user.username:
-                message += f"用户名: @{BotEngine.escape_markdown(user.username)}\n"
-            message += f"名称: {BotEngine.escape_markdown(user.full_name)}\n\n"
-
-            message += f"💬 *聊天信息*\n"
-            message += f"聊天 ID: `{chat.id}`\n"
-            message += f"类型: {chat.type}\n"
-
-            if chat.type in ["group", "supergroup"]:
-                message += f"群组名称: {BotEngine.escape_markdown(chat.title)}\n"
-
-                # 如果是群组管理员或超级管理员，显示更多信息
-                config_manager = context.bot_data.get("config_manager")
-                is_super_admin = config_manager.is_admin(user.id)
-
-                try:
-                    chat_member = await context.bot.get_chat_member(
-                        chat.id, user.id)
-                    is_group_admin = chat_member.status in [
-                        "creator", "administrator"
-                    ]
-                except Exception:
-                    is_group_admin = False
-
-                if is_super_admin or is_group_admin:
-                    message += "\n*群组管理员:*\n"
-                    try:
-                        # 获取群组管理员
-                        administrators = await context.bot.get_chat_administrators(
-                            chat.id)
-                        for admin in administrators:
-                            admin_user = admin.user
-                            message += f"- {BotEngine.escape_markdown(admin_user.full_name)} (ID: `{admin_user.id}`)"
-                            if admin_user.username:
-                                message += f" @{BotEngine.escape_markdown(admin_user.username)}"
-                            message += f" - {admin.status}\n"
-                    except Exception as e:
-                        message += f"获取管理员列表失败: {BotEngine.escape_markdown(str(e))}\n"
-
-            # 正常回复当前消息
-            await update.message.reply_text(message, parse_mode="MARKDOWN")
-
     async def list_allowed_groups_command(self, update: Update,
                                           context: ContextTypes.DEFAULT_TYPE):
         """列出所有允许的群组"""
@@ -797,7 +764,7 @@ class BotEngine:
             message += f"  👤 添加者: {group_info.get('added_by', '未知')}\n"
             message += f"  ⏰ 添加时间: {added_time}\n\n"
 
-        await update.message.reply_text(message, parse_mode="MARKDOWN")
+        await self._send_markdown_message(update, message)
 
     async def add_allowed_group_command(self, update: Update,
                                         context: ContextTypes.DEFAULT_TYPE):
@@ -837,8 +804,8 @@ class BotEngine:
     async def remove_allowed_group_command(self, update: Update,
                                            context: ContextTypes.DEFAULT_TYPE):
         """从白名单移除群组并退出"""
-        if not context.args or len(context.args) < 1:
-            await update.message.reply_text("用法: /removegroup <群组 ID>")
+        if not await self._check_command_args(update, context, 1,
+                                              "用法: /removegroup <群组 ID>"):
             return
 
         try:

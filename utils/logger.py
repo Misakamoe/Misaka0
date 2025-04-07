@@ -1,13 +1,33 @@
 # utils/logger.py
+
 import logging
 import os
+import glob
+import time
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 
-def setup_logger(name, log_level="INFO"):
-    """设置日志记录器"""
+def setup_logger(name,
+                 log_level="INFO",
+                 max_size=10 * 1024 * 1024,
+                 backup_count=5,
+                 cleanup_days=30):
+    """设置日志记录器
+    
+    Args:
+        name: 日志记录器名称
+        log_level: 日志级别
+        max_size: 单个日志文件最大大小（字节）
+        backup_count: 保留的日志文件数量
+        cleanup_days: 清理超过多少天的日志
+        
+    Returns:
+        logging.Logger: 配置好的日志记录器
+    """
     # 创建 logs 目录
-    os.makedirs("logs", exist_ok=True)
+    logs_dir = "logs"
+    os.makedirs(logs_dir, exist_ok=True)
 
     # 设置日志级别
     level = getattr(logging, log_level.upper(), logging.INFO)
@@ -24,9 +44,12 @@ def setup_logger(name, log_level="INFO"):
     console_handler = logging.StreamHandler()
     console_handler.setLevel(level)
 
-    # 文件处理器 - 使用日期进行轮转
-    log_file = f"logs/{name}_{datetime.now().strftime('%Y%m%d')}.log"
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    # 文件处理器 - 使用 RotatingFileHandler 实现轮转
+    log_file = os.path.join(logs_dir, f"{name}.log")
+    file_handler = RotatingFileHandler(log_file,
+                                       maxBytes=max_size,
+                                       backupCount=backup_count,
+                                       encoding='utf-8')
     file_handler.setLevel(level)
 
     # 格式化器
@@ -39,4 +62,37 @@ def setup_logger(name, log_level="INFO"):
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
 
+    # 清理旧日志
+    cleanup_old_logs(logs_dir, cleanup_days)
+
     return logger
+
+
+def cleanup_old_logs(logs_dir="logs", days=30):
+    """清理旧日志文件
+    
+    Args:
+        logs_dir: 日志目录
+        days: 保留的天数
+    """
+    if not os.path.exists(logs_dir):
+        return
+
+    # 当前时间
+    now = time.time()
+    # 最大保留时间（秒）
+    max_age = days * 86400
+
+    # 查找所有日志文件
+    log_files = glob.glob(os.path.join(logs_dir, "*.log*"))
+
+    for log_file in log_files:
+        try:
+            # 获取文件修改时间
+            file_time = os.path.getmtime(log_file)
+            # 如果文件超过保留期限，删除
+            if now - file_time > max_age:
+                os.remove(log_file)
+                print(f"已删除过期日志文件: {log_file}")
+        except Exception as e:
+            print(f"清理日志文件 {log_file} 时出错: {e}")

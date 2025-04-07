@@ -1,7 +1,9 @@
 # utils/decorators.py
+
 import functools
 import logging
 import traceback
+import inspect
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -35,6 +37,91 @@ def error_handler(func):
     return wrapper
 
 
+def _get_update_context_args(args, is_method=False):
+    """从装饰器参数中提取 update, context 和其他参数
+    
+    Args:
+        args: 参数元组
+        is_method: 是否是类方法
+        
+    Returns:
+        tuple: (self/None, update, context, other_args)
+    """
+    if is_method:
+        # 类方法: self, update, context, ...
+        if len(args) < 3:
+            logger.error(f"参数不足，期望(self, update, context)，实际参数数量: {len(args)}")
+            return None, None, None, []
+        self, update, context = args[0], args[1], args[2]
+        other_args = args[3:]
+    else:
+        # 普通函数: update, context, ...
+        if len(args) < 2:
+            logger.error(f"参数不足，期望(update, context)，实际参数数量: {len(args)}")
+            return None, None, None, []
+        self = None
+        update, context = args[0], args[1]
+        other_args = args[2:]
+
+    # 验证 update 参数
+    if not isinstance(update, Update):
+        logger.error(f"update 参数无效")
+        return None, None, None, []
+
+    return self, update, context, other_args
+
+
+def _is_admin(context, user_id, level="super_admin"):
+    """检查用户是否有指定级别的管理权限
+    
+    Args:
+        context: 上下文对象
+        user_id: 用户ID
+        level: 权限级别 ("super_admin" 或 "group_admin")
+        
+    Returns:
+        bool: 是否有权限
+    """
+    config_manager = context.bot_data.get("config_manager")
+    if not config_manager:
+        logger.error("权限检查失败: 找不到 config_manager")
+        return False
+
+    # 检查是否是超级管理员
+    if config_manager.is_admin(user_id):
+        return True
+
+    # 如果只需要超级管理员权限，此时可以返回 False
+    if level == "super_admin":
+        return False
+
+    # 检查是否是群组管理员（仅当需要群组管理员权限时）
+    return False  # 默认返回 False，实际检查在调用处进行
+
+
+async def _check_group_admin(update, context, user_id):
+    """检查用户是否是群组管理员
+    
+    Args:
+        update: 更新对象
+        context: 上下文对象
+        user_id: 用户ID
+        
+    Returns:
+        bool: 是否是群组管理员
+    """
+    chat = update.effective_chat
+    if not chat or chat.type not in ["group", "supergroup"]:
+        return False
+
+    try:
+        chat_member = await context.bot.get_chat_member(chat.id, user_id)
+        return chat_member.status in ["creator", "administrator"]
+    except Exception as e:
+        logger.error(f"检查用户 {user_id} 在群组 {chat.id} 的权限失败: {e}")
+        return False
+
+
 def permission_check(permission_level="user"):
     """权限检查装饰器
     
@@ -47,60 +134,30 @@ def permission_check(permission_level="user"):
 
     def decorator(func):
         # 检查函数签名来确定是否是类方法
-        import inspect
         sig = inspect.signature(func)
         params = list(sig.parameters.keys())
         is_method = len(params) >= 1 and params[0] == 'self'
 
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            # 确定 update 和 context 参数的位置
-            if is_method:
-                # 类方法: self, update, context, ...
-                if len(args) < 3:
-                    logger.error(
-                        f"权限检查失败: 参数不足，期望(self, update, context)，实际参数数量: {len(args)}"
-                    )
-                    return None
-                self, update, context = args[0], args[1], args[2]
-                other_args = args[3:]
-            else:
-                # 普通函数: update, context, ...
-                if len(args) < 2:
-                    logger.error(
-                        f"权限检查失败: 参数不足，期望(update, context)，实际参数数量: {len(args)}"
-                    )
-                    return None
-                self = None
-                update, context = args[0], args[1]
-                other_args = args[2:]
+            # 获取 update 和 context
+            self, update, context, other_args = _get_update_context_args(
+                args, is_method)
+            if not update or not context:
+                return None
 
-            # 确保 update 和 update.effective_user 存在
-            if not isinstance(update, Update) or not update.effective_user:
-                logger.error(f"权限检查失败: update 无效或 update.effective_user 不存在")
+            # 确保 update.effective_user 存在
+            if not update.effective_user:
+                logger.error(f"权限检查失败: update.effective_user 不存在")
                 return None
 
             user_id = update.effective_user.id
+            chat_id = update.effective_chat.id if update.effective_chat else None
 
-            # 确保 update.effective_chat 存在
-            if not update.effective_chat:
-                chat_id = None
-                logger.error(f"权限检查警告: update.effective_chat 不存在")
-            else:
-                chat_id = update.effective_chat.id
-
-            config_manager = context.bot_data.get("config_manager")
-            if not config_manager:
-                logger.error("权限检查失败: 找不到 config_manager")
-                return None
-
-            # 检查是否是超级管理员
-            is_super_admin = config_manager.is_admin(user_id)
-
-            # 检查群组权限
+            # 检查权限
             if permission_level in ["group_admin", "super_admin"]:
-                # 超级管理员通过所有权限检查
-                if is_super_admin:
+                # 检查是否是超级管理员
+                if _is_admin(context, user_id, "super_admin"):
                     if is_method:
                         return await func(self, update, context, *other_args,
                                           **kwargs)
@@ -109,34 +166,20 @@ def permission_check(permission_level="user"):
                                           **kwargs)
 
                 # 群组管理员检查
-                if permission_level == "group_admin" and chat_id and update.effective_chat.type in [
-                        "group", "supergroup"
-                ]:
-                    try:
-                        chat_member = await context.bot.get_chat_member(
-                            chat_id, user_id)
-                        is_group_admin = chat_member.status in [
-                            "creator", "administrator"
-                        ]
-                        if is_group_admin:
-                            if is_method:
-                                return await func(self, update, context,
-                                                  *other_args, **kwargs)
-                            else:
-                                return await func(update, context, *other_args,
-                                                  **kwargs)
-                    except Exception as e:
-                        logger.error(
-                            f"检查用户 {user_id} 在群组 {chat_id} 的权限失败: {e}")
+                if permission_level == "group_admin" and await _check_group_admin(
+                        update, context, user_id):
+                    if is_method:
+                        return await func(self, update, context, *other_args,
+                                          **kwargs)
+                    else:
+                        return await func(update, context, *other_args,
+                                          **kwargs)
 
-                # 确保 update.effective_message 存在
+                # 权限不足，发送提示
                 if update.effective_message:
-                    # 权限不足
                     await update.effective_message.reply_text(
                         "⚠️ 您没有执行此命令的权限。" if permission_level ==
                         "group_admin" else "⚠️ 此命令仅超级管理员可用。")
-                else:
-                    logger.error("权限检查失败: update.effective_message 不存在")
                 return None
 
             # 基本用户权限，所有人都可以使用
@@ -153,38 +196,23 @@ def permission_check(permission_level="user"):
 def group_check(func):
     """群组检查装饰器，确保命令只在允许的群组中使用"""
     # 检查函数签名来确定是否是类方法
-    import inspect
     sig = inspect.signature(func)
     params = list(sig.parameters.keys())
     is_method = len(params) >= 1 and params[0] == 'self'
 
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        # 确定 update 和 context 参数的位置
-        if is_method:
-            # 类方法: self, update, context, ...
-            if len(args) < 3:
-                logger.error(
-                    f"群组检查失败: 参数不足，期望(self, update, context)，实际参数数量: {len(args)}"
-                )
-                return None
-            self, update, context = args[0], args[1], args[2]
-            other_args = args[3:]
-        else:
-            # 普通函数: update, context, ...
-            if len(args) < 2:
-                logger.error(
-                    f"群组检查失败: 参数不足，期望(update, context)，实际参数数量: {len(args)}")
-                return None
-            self = None
-            update, context = args[0], args[1]
-            other_args = args[2:]
-
-        if not isinstance(update, Update) or not update.effective_chat:
-            logger.error(f"群组检查失败: update 无效或 update.effective_chat 不存在")
+        # 获取 update 和 context
+        self, update, context, other_args = _get_update_context_args(
+            args, is_method)
+        if not update or not context:
             return None
 
         chat = update.effective_chat
+        if not chat:
+            logger.error(f"群组检查失败: update.effective_chat 不存在")
+            return None
+
         user = update.effective_user
         config_manager = context.bot_data.get("config_manager")
 
@@ -221,9 +249,10 @@ def group_check(func):
                                           **kwargs)
 
             # 构建友好的提示信息
+            from utils.text_utils import TextUtils  # 导入转义工具
             message = f"⚠️ 此群组未获授权使用 Bot。\n\n"
             message += f"群组 ID: `{chat.id}`\n"
-            message += f"群组名称: {chat.title}\n\n"
+            message += f"群组名称: {TextUtils.escape_markdown(chat.title)}\n\n"
 
             # 如果是超级管理员，提供快速添加到白名单的提示
             if is_super_admin:
@@ -249,37 +278,20 @@ def group_check(func):
 def module_check(func):
     """模块检查装饰器，确保命令只在模块启用时使用"""
     # 检查函数签名来确定是否是类方法
-    import inspect
     sig = inspect.signature(func)
     params = list(sig.parameters.keys())
     is_method = len(params) >= 1 and params[0] == 'self'
 
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        # 确定 update 和 context 参数的位置
-        if is_method:
-            # 类方法: self, update, context, ...
-            if len(args) < 3:
-                logger.error(
-                    f"模块检查失败: 参数不足，期望(self, update, context)，实际参数数量: {len(args)}"
-                )
-                return None
-            self, update, context = args[0], args[1], args[2]
-            other_args = args[3:]
-        else:
-            # 普通函数: update, context, ...
-            if len(args) < 2:
-                logger.error(
-                    f"模块检查失败: 参数不足，期望(update, context)，实际参数数量: {len(args)}")
-                return None
-            self = None
-            update, context = args[0], args[1]
-            other_args = args[2:]
+        # 获取 update 和 context
+        self, update, context, other_args = _get_update_context_args(
+            args, is_method)
+        if not update or not context:
+            return None
 
-        if not isinstance(
-                update, Update
-        ) or not update.effective_message or not update.effective_chat:
-            logger.error(f"模块检查失败: update 无效或缺少必要属性")
+        if not update.effective_message or not update.effective_chat:
+            logger.error(f"模块检查失败: update 缺少必要属性")
             return None
 
         chat_id = update.effective_chat.id

@@ -4,8 +4,6 @@ data/
 
 # 示例模块
 modules/echo.py
-modules/event_publisher.py
-modules/event_subscriber.py
 
 # Python 相关
 __pycache__/

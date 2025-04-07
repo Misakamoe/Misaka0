@@ -1,4 +1,5 @@
 # modules/reminder.py
+
 import asyncio
 import json
 import os
@@ -9,6 +10,7 @@ import pytz
 from telegram import Update
 from telegram.ext import ContextTypes, MessageHandler, filters
 from utils.decorators import error_handler, permission_check
+from utils.text_utils import TextUtils
 
 # 模块元数据
 MODULE_NAME = "reminder"
@@ -72,14 +74,18 @@ class ReminderBase:
             return
 
         try:
+            # 使用 TextUtils 处理消息中的特殊字符
+            safe_message = TextUtils.escape_markdown(self.message)
             await context.bot.send_message(chat_id=self.chat_id,
-                                           text=f"⏰ *提醒*\n\n{self.message}",
+                                           text=f"⏰ *提醒*\n\n{safe_message}",
                                            parse_mode="MARKDOWN")
+            return True
         except Exception as e:
             module_interface = context.bot_data.get(
                 "bot_engine").module_loader.get_module_interface(MODULE_NAME)
             if module_interface:
                 module_interface.logger.error(f"发送提醒消息失败: {e}")
+            return False
 
     @classmethod
     def from_dict(cls, data):
@@ -154,7 +160,11 @@ class PeriodicReminder(ReminderBase):
                 self.enabled = reminder_data.get("enabled", True)
 
                 # 发送提醒
-                await self.send_reminder(context)
+                success = await self.send_reminder(context)
+
+                if success and module_interface:
+                    module_interface.logger.debug(
+                        f"已发送周期性提醒 {self.id} 到聊天 {self.chat_id}")
 
                 # 更新最后提醒时间
                 self.last_reminded = time.time()
@@ -246,7 +256,11 @@ class OneTimeReminder(ReminderBase):
                     return
 
                 # 发送提醒
-                await self.send_reminder(context)
+                success = await self.send_reminder(context)
+
+                if success and module_interface:
+                    module_interface.logger.debug(
+                        f"已发送一次性提醒 {self.id} 到聊天 {self.chat_id}")
 
                 # 标记为已提醒
                 self.reminded = True
@@ -268,6 +282,19 @@ class OneTimeReminder(ReminderBase):
             save_reminders()
 
 
+def _get_module_interface():
+    """获取模块接口（辅助函数）"""
+    try:
+        from telegram.ext import ApplicationBuilder
+        application = ApplicationBuilder().token("dummy").build()
+        bot_engine = application.bot_data.get("bot_engine")
+        if bot_engine:
+            return bot_engine.module_loader.get_module_interface(MODULE_NAME)
+    except:
+        pass
+    return None
+
+
 def load_reminders():
     """从文件加载提醒数据"""
     if not os.path.exists(_data_file):
@@ -277,17 +304,7 @@ def load_reminders():
         with open(_data_file, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        module_interface = None
-        try:
-            from telegram.ext import ApplicationBuilder
-            application = ApplicationBuilder().token("dummy").build()
-            bot_engine = application.bot_data.get("bot_engine")
-            if bot_engine:
-                module_interface = bot_engine.module_loader.get_module_interface(
-                    MODULE_NAME)
-        except:
-            pass
-
+        module_interface = _get_module_interface()
         if module_interface:
             module_interface.logger.error(f"加载提醒数据失败: {e}")
         return {}
@@ -309,17 +326,7 @@ def save_reminders():
                       indent=4,
                       ensure_ascii=False)
     except Exception as e:
-        module_interface = None
-        try:
-            from telegram.ext import ApplicationBuilder
-            application = ApplicationBuilder().token("dummy").build()
-            bot_engine = application.bot_data.get("bot_engine")
-            if bot_engine:
-                module_interface = bot_engine.module_loader.get_module_interface(
-                    MODULE_NAME)
-        except:
-            pass
-
+        module_interface = _get_module_interface()
         if module_interface:
             module_interface.logger.error(f"保存提醒数据失败: {e}")
 
@@ -693,7 +700,7 @@ def start_reminder_tasks(application):
         if bot_engine:
             module_interface = bot_engine.module_loader.get_module_interface(
                 MODULE_NAME)
-    except:
+    except Exception as e:
         pass
 
     if module_interface:
@@ -736,9 +743,9 @@ def start_reminder_tasks(application):
     save_reminders()
 
     if module_interface:
-        module_interface.logger.info(
-            f"已启动 {sum(len(reminders) for reminders in _state['reminder_tasks'].values())} 个提醒任务"
-        )
+        reminder_count = sum(
+            len(reminders) for reminders in _state["reminder_tasks"].values())
+        module_interface.logger.info(f"已启动 {reminder_count} 个提醒任务")
 
 
 def stop_reminder_tasks():
@@ -746,16 +753,7 @@ def stop_reminder_tasks():
     global _state
 
     # 获取模块接口
-    module_interface = None
-    try:
-        from telegram.ext import ApplicationBuilder
-        application = ApplicationBuilder().token("dummy").build()
-        bot_engine = application.bot_data.get("bot_engine")
-        if bot_engine:
-            module_interface = bot_engine.module_loader.get_module_interface(
-                MODULE_NAME)
-    except:
-        pass
+    module_interface = _get_module_interface()
 
     if module_interface:
         module_interface.logger.info("正在停止所有提醒任务...")
@@ -861,14 +859,18 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 格式化时间间隔
     interval_text = format_interval(interval_seconds)
 
+    # 使用 TextUtils 处理消息中的特殊字符
+    safe_message = TextUtils.escape_markdown(message)
+    safe_id = TextUtils.escape_markdown(reminder_id)
+
     # 发送确认消息
     await update.message.reply_text(
         f"✅ 周期性提醒已创建!\n\n"
         f"⏰ *间隔:* {interval_text}\n"
-        f"📝 *内容:* {message}\n"
-        f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
+        f"📝 *内容:* {safe_message}\n"
+        f"🆔 *提醒 ID:* `{safe_id}`\n\n"
         f"每 {interval_text} 我会发送一次提醒。\n"
-        f"如需删除，请使用 `/delreminder {reminder_id}`",
+        f"如需删除，请使用 `/delreminder {safe_id}`",
         parse_mode="MARKDOWN")
 
     module_interface.logger.info(
@@ -1024,15 +1026,21 @@ async def remind_once_command(update: Update,
     wait_seconds = target_timestamp - now_timestamp
     wait_text = format_interval(int(wait_seconds))
 
+    # 使用 TextUtils 处理消息中的特殊字符
+    safe_message = TextUtils.escape_markdown(message)
+    safe_id = TextUtils.escape_markdown(reminder_id)
+    safe_datetime = TextUtils.escape_markdown(
+        target_datetime.strftime('%Y-%m-%d %H:%M:%S'))
+
     # 发送确认消息
     await update.message.reply_text(
         f"✅ 一次性提醒已创建!\n\n"
-        f"⏰ *时间:* {target_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"⏰ *时间:* {safe_datetime}\n"
         f"⏳ *等待:* {wait_text}\n"
-        f"📝 *内容:* {message}\n"
-        f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
+        f"📝 *内容:* {safe_message}\n"
+        f"🆔 *提醒 ID:* `{safe_id}`\n\n"
         f"到时间我会发送一次提醒。\n"
-        f"如需删除，请使用 `/delreminder {reminder_id}`",
+        f"如需删除，请使用 `/delreminder {safe_id}`",
         parse_mode="MARKDOWN")
 
     module_interface.logger.info(
@@ -1078,12 +1086,16 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += "*一次性提醒:*\n"
         for reminder in one_time_reminders:
             status = "✅ 已启用" if reminder.enabled else "❌ 已禁用"
-            creator_info = f" (由 {reminder.creator_name} 创建)" if update.effective_chat.type != "private" else ""
+            creator_info = f" (由 {TextUtils.escape_markdown(reminder.creator_name)} 创建)" if update.effective_chat.type != "private" else ""
+            safe_title = TextUtils.escape_markdown(reminder.title)
+            safe_id = TextUtils.escape_markdown(reminder.id)
+            safe_time = TextUtils.escape_markdown(reminder.target_time_str)
+            safe_message = TextUtils.escape_markdown(reminder.message)
 
-            message += (f"🔹 *{reminder.title}*{creator_info}\n"
-                        f"  🆔 ID: `{reminder.id}`\n"
-                        f"  ⏰ 时间: {reminder.target_time_str}\n"
-                        f"  📝 内容: {reminder.message}\n"
+            message += (f"🔹 *{safe_title}*{creator_info}\n"
+                        f"  🆔 ID: `{safe_id}`\n"
+                        f"  ⏰ 时间: {safe_time}\n"
+                        f"  📝 内容: {safe_message}\n"
                         f"  🔄 状态: {status}\n\n")
 
     # 再显示周期性提醒
@@ -1092,12 +1104,15 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for reminder in periodic_reminders:
             status = "✅ 已启用" if reminder.enabled else "❌ 已禁用"
             interval_text = format_interval(reminder.interval)
-            creator_info = f" (由 {reminder.creator_name} 创建)" if update.effective_chat.type != "private" else ""
+            creator_info = f" (由 {TextUtils.escape_markdown(reminder.creator_name)} 创建)" if update.effective_chat.type != "private" else ""
+            safe_title = TextUtils.escape_markdown(reminder.title)
+            safe_id = TextUtils.escape_markdown(reminder.id)
+            safe_message = TextUtils.escape_markdown(reminder.message)
 
-            message += (f"🔹 *{reminder.title}*{creator_info}\n"
-                        f"  🆔 ID: `{reminder.id}`\n"
+            message += (f"🔹 *{safe_title}*{creator_info}\n"
+                        f"  🆔 ID: `{safe_id}`\n"
                         f"  ⏰ 间隔: {interval_text}\n"
-                        f"  📝 内容: {reminder.message}\n"
+                        f"  📝 内容: {safe_message}\n"
                         f"  🔄 状态: {status}\n\n")
 
     # 如果没有任何提醒可显示
@@ -1107,7 +1122,14 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message += "要删除提醒，请使用 `/delreminder ID`"
 
-    await update.message.reply_text(message, parse_mode="MARKDOWN")
+    # 使用通用方法发送 Markdown 消息
+    try:
+        await update.message.reply_text(message, parse_mode="MARKDOWN")
+    except Exception as e:
+        module_interface.logger.error(f"发送提醒列表失败: {e}")
+        # 尝试发送纯文本版本
+        plain_message = TextUtils.markdown_to_plain(message)
+        await update.message.reply_text(plain_message)
 
     module_interface.logger.debug(
         f"用户 {update.effective_user.id} 查看了聊天 {chat_id} 的提醒列表")
@@ -1171,8 +1193,9 @@ async def delete_reminder_command(update: Update,
 def get_state(module_interface):
     """获取模块状态（只存储必要的数据，不存储对象）"""
     # 将所有提醒转换为字典格式
+    module_interface.logger.debug("正在获取模块状态用于热更新")
     return {
-        "last_save_time": _state["last_save_time"],
+        "last_save_time": _state.get("last_save_time", time.time()),
         "reminders_data": get_all_reminders_dict()
     }
 
@@ -1182,6 +1205,8 @@ def set_state(module_interface, state):
     """设置模块状态"""
     global _state
 
+    module_interface.logger.debug("正在恢复模块状态")
+
     # 更新最后保存时间
     _state["last_save_time"] = state.get("last_save_time", time.time())
 
@@ -1190,6 +1215,8 @@ def set_state(module_interface, state):
 
     # 从序列化的数据中恢复提醒
     reminders_data = state.get("reminders_data", {})
+    reminders_count = 0
+
     for chat_id_str, chat_reminders in reminders_data.items():
         for reminder_id, reminder_data in chat_reminders.items():
             # 跳过禁用的提醒
@@ -1221,10 +1248,9 @@ def set_state(module_interface, state):
                 "reminder": reminder,
                 "task": task
             }
+            reminders_count += 1
 
-    module_interface.logger.info(
-        f"已恢复 {sum(len(reminders) for reminders in _state['reminder_tasks'].values())} 个提醒任务"
-    )
+    module_interface.logger.info(f"已恢复 {reminders_count} 个提醒任务")
 
 
 def setup(module_interface):
@@ -1252,11 +1278,30 @@ def setup(module_interface):
     if not _state["reminder_tasks"]:
         start_reminder_tasks(module_interface.application)
 
+    # 设置定期保存状态的任务
+    async def _periodic_save_state():
+        while True:
+            await asyncio.sleep(300)  # 每5分钟保存一次
+            try:
+                module_interface.save_state(get_state(module_interface))
+                module_interface.logger.debug("已定期保存提醒状态")
+            except Exception as e:
+                module_interface.logger.error(f"定期保存状态失败: {e}")
+
+    # 启动定期保存任务
+    module_interface.periodic_save_task = asyncio.create_task(
+        _periodic_save_state())
+
     module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
 
 def cleanup(module_interface):
     """模块清理"""
+    # 取消定期保存任务
+    if hasattr(module_interface,
+               'periodic_save_task') and module_interface.periodic_save_task:
+        module_interface.periodic_save_task.cancel()
+
     # 停止所有提醒任务
     stop_reminder_tasks()
 
