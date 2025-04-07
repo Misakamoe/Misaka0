@@ -148,8 +148,19 @@ class PeriodicReminder(ReminderBase):
 
         try:
             while True:
-                # 等待指定的时间间隔
-                await asyncio.sleep(self.interval)
+                # 计算应该等待的时间
+                now = time.time()
+                elapsed_time = now - (self.last_reminded or self.created_at)
+
+                # 如果已经过了足够的时间，立即发送提醒
+                # 否则只等待剩余的时间
+                wait_time = max(0, self.interval - elapsed_time)
+
+                if wait_time > 0:
+                    if module_interface:
+                        module_interface.logger.debug(
+                            f"提醒 {self.id} 将在 {wait_time:.1f} 秒后发送")
+                    await asyncio.sleep(wait_time)
 
                 # 重新加载数据以获取最新状态
                 reminder_data = get_reminder(self.chat_id, self.id)
