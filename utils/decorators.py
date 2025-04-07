@@ -122,12 +122,12 @@ async def _check_group_admin(update, context, user_id):
         return False
 
 
-def permission_check(permission_level="user"):
+def permission_check(admin_only="False"):
     """权限检查装饰器
     
     参数:
-        permission_level: 
-            "user" - 所有用户可用
+        admin_only: 
+            "False" - 所有用户可用
             "group_admin" - 群组管理员和超级管理员可用
             "super_admin" - 仅超级管理员可用
     """
@@ -155,7 +155,7 @@ def permission_check(permission_level="user"):
             chat_id = update.effective_chat.id if update.effective_chat else None
 
             # 检查权限
-            if permission_level in ["group_admin", "super_admin"]:
+            if admin_only in ["group_admin", "super_admin"]:
                 # 检查是否是超级管理员
                 if _is_admin(context, user_id, "super_admin"):
                     if is_method:
@@ -166,7 +166,7 @@ def permission_check(permission_level="user"):
                                           **kwargs)
 
                 # 群组管理员检查
-                if permission_level == "group_admin" and await _check_group_admin(
+                if admin_only == "group_admin" and await _check_group_admin(
                         update, context, user_id):
                     if is_method:
                         return await func(self, update, context, *other_args,
@@ -178,7 +178,7 @@ def permission_check(permission_level="user"):
                 # 权限不足，发送提示
                 if update.effective_message:
                     await update.effective_message.reply_text(
-                        "⚠️ 您没有执行此命令的权限。" if permission_level ==
+                        "⚠️ 您没有执行此命令的权限。" if admin_only ==
                         "group_admin" else "⚠️ 此命令仅超级管理员可用。")
                 return None
 
