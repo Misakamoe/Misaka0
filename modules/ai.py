@@ -5,7 +5,7 @@ import os
 import time
 import asyncio
 import aiohttp
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, MessageHandler, filters, CommandHandler, CallbackQueryHandler
 from utils.decorators import error_handler, permission_check, module_check
@@ -13,16 +13,10 @@ from utils.text_utils import TextUtils
 
 # 模块元数据
 MODULE_NAME = "ai"
-MODULE_VERSION = "1.1.0"
+MODULE_VERSION = "1.0.0"
 MODULE_DESCRIPTION = "AI 聊天小助手"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["ai", "aiconfig", "aiclear", "aiwhitelist"]
-
-# 默认系统提示
-DEFAULT_SYSTEM_PROMPT = "你是一个有用的助手。"
-
-# 默认流式响应更新间隔 (秒)
-DEFAULT_STREAMING_INTERVAL = 0.5
 
 # 模块状态
 _state = {
@@ -37,8 +31,6 @@ _state = {
         "requests_by_user": {}
     },
     "conversation_timeout": 24 * 60 * 60,  # 默认 24 小时超时
-    "streaming_enabled": True,  # 默认启用流式响应
-    "streaming_update_interval": DEFAULT_STREAMING_INTERVAL,  # 流式响应更新间隔
 }
 
 # 配置文件路径
@@ -51,6 +43,9 @@ MAX_CONTEXT_LENGTH = 10
 REQUEST_TIMEOUT = 60
 # 最大消息长度
 MAX_MESSAGE_LENGTH = 4000
+# 流式处理配置
+STREAM_CHUNK_SIZE = 15  # 每次更新的字符数
+MIN_UPDATE_INTERVAL = 0.5  # 最小更新间隔(秒)
 
 # 服务商配置模板
 PROVIDER_TEMPLATES = {
@@ -60,7 +55,7 @@ PROVIDER_TEMPLATES = {
         "api_key": "",
         "model": "gpt-3.5-turbo",
         "temperature": 0.7,
-        "system_prompt": DEFAULT_SYSTEM_PROMPT,
+        "system_prompt": "你是一个有用的助手。",
         "request_format": "openai"
     },
     "gemini": {
@@ -70,7 +65,7 @@ PROVIDER_TEMPLATES = {
         "api_key": "",
         "model": "gemini-pro",
         "temperature": 0.7,
-        "system_prompt": DEFAULT_SYSTEM_PROMPT,
+        "system_prompt": "你是一个有用的助手。",
         "request_format": "gemini"
     },
     "anthropic": {
@@ -79,7 +74,7 @@ PROVIDER_TEMPLATES = {
         "api_key": "",
         "model": "claude-3-opus-20240229",
         "temperature": 0.7,
-        "system_prompt": DEFAULT_SYSTEM_PROMPT,
+        "system_prompt": "你是一个有用的助手。",
         "request_format": "anthropic"
     },
     "custom": {
@@ -88,7 +83,7 @@ PROVIDER_TEMPLATES = {
         "api_key": "",
         "model": "",
         "temperature": 0.7,
-        "system_prompt": DEFAULT_SYSTEM_PROMPT,
+        "system_prompt": "你是一个有用的助手。",
         "request_format": "openai"
     }
 }
@@ -140,20 +135,13 @@ def format_gemini_request(provider, messages, stream=False):
                 }]
             })
 
-    request = {
+    return {
         "contents": gemini_messages,
         "generationConfig": {
             "temperature": provider["temperature"]
-        }
+        },
+        "stream": stream
     }
-
-    # 如果启用流式响应
-    if stream:
-        request["generationConfig"]["streamGenerationConfig"] = {
-            "streamContentTokens": True
-        }
-
-    return request
 
 
 def format_anthropic_request(provider, messages, stream=False):
@@ -184,7 +172,7 @@ def format_anthropic_request(provider, messages, stream=False):
         "model": provider["model"],
         "messages": anthropic_messages,
         "temperature": provider["temperature"],
-        "max_tokens": 4000,
+        "max_tokens": 4000,  # 可配置的最大令牌数
         "stream": stream
     }
 
@@ -212,43 +200,12 @@ def parse_openai_response(response_json):
         return None
 
 
-def parse_openai_stream(line):
-    """解析 OpenAI 流式响应行"""
-    try:
-        if line.startswith('data: '):
-            if line.strip() == 'data: [DONE]':
-                return None
-            data = json.loads(line[6:])
-            if 'choices' in data and len(data['choices']) > 0:
-                delta = data['choices'][0].get('delta', {})
-                if 'content' in delta and delta['content']:  # 确保有实际内容
-                    return delta['content']
-    except Exception:
-        pass
-    return None
-
-
 def parse_gemini_response(response_json):
     """解析 Gemini 响应"""
     try:
         return response_json["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError):
         return None
-
-
-def parse_gemini_stream(line):
-    """解析 Gemini 流式响应行"""
-    try:
-        data = json.loads(line)
-        if 'candidates' in data and len(data['candidates']) > 0:
-            if 'content' in data['candidates'][0] and 'parts' in data[
-                    'candidates'][0]['content']:
-                parts = data['candidates'][0]['content']['parts']
-                if parts and 'text' in parts[0] and parts[0]['text']:  # 确保有实际内容
-                    return parts[0]['text']
-    except Exception:
-        pass
-    return None
 
 
 def parse_anthropic_response(response_json):
@@ -259,20 +216,6 @@ def parse_anthropic_response(response_json):
         return None
 
 
-def parse_anthropic_stream(line):
-    """解析 Anthropic 流式响应行"""
-    try:
-        if line.startswith('data: '):
-            data = json.loads(line[6:])
-            if 'type' in data and data['type'] == 'content_block_delta':
-                delta = data.get('delta', {})
-                if 'text' in delta and delta['text']:  # 确保有实际内容
-                    return delta['text']
-    except Exception:
-        pass
-    return None
-
-
 # 响应解析器映射
 RESPONSE_PARSERS = {
     "openai": parse_openai_response,
@@ -280,20 +223,10 @@ RESPONSE_PARSERS = {
     "anthropic": parse_anthropic_response
 }
 
-# 流式响应解析器映射
-STREAM_PARSERS = {
-    "openai": parse_openai_stream,
-    "gemini": parse_gemini_stream,
-    "anthropic": parse_anthropic_stream
-}
 
-
-async def call_ai_api(provider_id,
-                      messages,
-                      module_interface,
-                      stream=False,
-                      callback=None):
-    """调用 AI API，支持流式响应"""
+async def call_ai_api_stream(provider_id, messages, module_interface,
+                             update_callback):
+    """流式调用 AI API"""
     global _state
 
     if provider_id not in _state["providers"]:
@@ -311,8 +244,8 @@ async def call_ai_api(provider_id,
     if not formatter:
         return f"错误：不支持的请求格式 {request_format}"
 
-    # 格式化请求
-    request_data = formatter(provider, messages, stream)
+    # 格式化请求 (启用流式)
+    request_data = formatter(provider, messages, stream=True)
 
     # 准备 API URL
     api_url = provider["api_url"]
@@ -333,8 +266,10 @@ async def call_ai_api(provider_id,
         headers["anthropic-version"] = "2023-06-01"
 
     try:
-        module_interface.logger.debug(f"正在调用 {provider['name']} API" +
-                                      (" (流式)" if stream else ""))
+        module_interface.logger.debug(f"正在流式调用 {provider['name']} API")
+
+        full_response = ""
+        last_update_time = time.time()
 
         async with aiohttp.ClientSession() as session:
             async with session.post(api_url,
@@ -347,58 +282,224 @@ async def call_ai_api(provider_id,
                         f"API 请求失败: {response.status} - {error_text}")
                     return f"API 请求失败: HTTP {response.status}"
 
+                # 根据不同服务商处理流式响应
+                if request_format == "openai":
+                    # OpenAI 流式响应处理
+                    async for line in response.content:
+                        line = line.strip()
+                        if not line or line == b'data: [DONE]':
+                            continue
+
+                        try:
+                            # 移除 "data: " 前缀并解析 JSON
+                            if line.startswith(b'data: '):
+                                json_data = json.loads(line[6:])
+
+                                if 'choices' in json_data and json_data[
+                                        'choices']:
+                                    delta = json_data['choices'][0].get(
+                                        'delta', {})
+                                    if 'content' in delta and delta['content']:
+                                        content = delta['content']
+                                        full_response += content
+
+                                        # 确保有内容才更新
+                                        if full_response.strip():
+                                            # 控制更新频率
+                                            current_time = time.time()
+                                            if current_time - last_update_time >= MIN_UPDATE_INTERVAL:
+                                                await update_callback(
+                                                    full_response)
+                                                last_update_time = current_time
+                        except Exception as e:
+                            module_interface.logger.error(f"解析流式响应失败: {e}")
+
+                elif request_format == "anthropic":
+                    # Anthropic 流式响应处理
+                    async for line in response.content:
+                        line = line.strip()
+                        if not line or line == b'data: [DONE]':
+                            continue
+
+                        try:
+                            # 移除 "data: " 前缀并解析 JSON
+                            if line.startswith(b'data: '):
+                                json_data = json.loads(line[6:])
+
+                                if 'type' in json_data and json_data[
+                                        'type'] == 'content_block_delta':
+                                    delta = json_data.get('delta', {})
+                                    if 'text' in delta and delta['text']:
+                                        content = delta['text']
+                                        full_response += content
+
+                                        # 确保有内容才更新
+                                        if full_response.strip():
+                                            # 控制更新频率
+                                            current_time = time.time()
+                                            if current_time - last_update_time >= MIN_UPDATE_INTERVAL:
+                                                await update_callback(
+                                                    full_response)
+                                                last_update_time = current_time
+                        except Exception as e:
+                            module_interface.logger.error(f"解析流式响应失败: {e}")
+
+                elif request_format == "gemini":
+                    # Gemini 流式响应处理
+                    buffer = b""
+
+                    async for chunk in response.content:
+                        buffer += chunk
+
+                        # 尝试解析完整的 JSON 对象
+                        if b'\n' in buffer:
+                            lines = buffer.split(b'\n')
+                            # 保留最后一个可能不完整的行
+                            buffer = lines.pop()
+
+                            for line in lines:
+                                if not line.strip():
+                                    continue
+
+                                try:
+                                    json_data = json.loads(line)
+
+                                    # 提取文本内容
+                                    if 'candidates' in json_data and json_data[
+                                            'candidates']:
+                                        candidate = json_data['candidates'][0]
+                                        if 'content' in candidate and 'parts' in candidate[
+                                                'content']:
+                                            for part in candidate['content'][
+                                                    'parts']:
+                                                if 'text' in part and part[
+                                                        'text']:
+                                                    content = part['text']
+                                                    full_response += content
+
+                                                    # 只有当有实际内容时才更新
+                                                    if full_response.strip():
+                                                        # 控制更新频率
+                                                        current_time = time.time(
+                                                        )
+                                                        if current_time - last_update_time >= MIN_UPDATE_INTERVAL:
+                                                            await update_callback(
+                                                                full_response)
+                                                            last_update_time = current_time
+                                except Exception as e:
+                                    module_interface.logger.error(
+                                        f"解析 Gemini 流式响应失败: {e} - 行: {line}")
+
+                # 确保完整响应被发送
+                if full_response:
+                    await update_callback(full_response)
+
+        # 更新使用统计
+        _state["usage_stats"]["total_requests"] += 1
+        _state["usage_stats"]["requests_by_provider"][
+            provider_id] = _state["usage_stats"]["requests_by_provider"].get(
+                provider_id, 0) + 1
+
+        return full_response
+
+    except aiohttp.ClientError as e:
+        module_interface.logger.error(f"API 请求错误: {str(e)}")
+        return f"API 请求错误: {str(e)}"
+    except asyncio.TimeoutError:
+        module_interface.logger.error("API 请求超时")
+        return "API 请求超时，请稍后再试"
+    except Exception as e:
+        module_interface.logger.error(f"调用 AI API 时发生错误: {str(e)}")
+        return f"发生错误: {str(e)}"
+
+
+async def call_ai_api(provider_id,
+                      messages,
+                      module_interface,
+                      use_stream=False):
+    """调用 AI API，可选是否使用流式模式"""
+    if use_stream:
+        # 当使用流式模式但没有回调时，创建一个空回调
+        async def dummy_callback(_):
+            pass
+
+        return await call_ai_api_stream(provider_id, messages,
+                                        module_interface, dummy_callback)
+
+    # 以下是原始的非流式实现
+    global _state
+
+    if provider_id not in _state["providers"]:
+        return "错误：未找到指定的服务商配置"
+
+    provider = _state["providers"][provider_id]
+
+    # 检查 API 密钥
+    if not provider.get("api_key"):
+        return "错误：未配置 API 密钥"
+
+    # 获取请求格式化器
+    request_format = provider.get("request_format", "openai")
+    formatter = REQUEST_FORMATTERS.get(request_format)
+    if not formatter:
+        return f"错误：不支持的请求格式 {request_format}"
+
+    # 格式化请求
+    request_data = formatter(provider, messages, stream=False)
+
+    # 准备 API URL
+    api_url = provider["api_url"]
+    if "{model}" in api_url:
+        api_url = api_url.replace("{model}", provider["model"])
+
+    # 准备请求头
+    headers = {"Content-Type": "application/json"}
+
+    # 不同服务商的认证方式
+    if request_format == "openai":
+        headers["Authorization"] = f"Bearer {provider['api_key']}"
+    elif request_format == "gemini":
+        # Gemini 使用 URL 参数传递 API 密钥
+        api_url = f"{api_url}?key={provider['api_key']}"
+    elif request_format == "anthropic":
+        headers["x-api-key"] = provider["api_key"]
+        headers["anthropic-version"] = "2023-06-01"
+
+    try:
+        module_interface.logger.debug(f"正在调用 {provider['name']} API")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url,
+                                    json=request_data,
+                                    headers=headers,
+                                    timeout=REQUEST_TIMEOUT) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    module_interface.logger.error(
+                        f"API 请求失败: {response.status} - {error_text}")
+                    return f"API 请求失败: HTTP {response.status}"
+
+                response_json = await response.json()
+
+                # 获取响应解析器
+                parser = RESPONSE_PARSERS.get(request_format)
+                if not parser:
+                    return f"错误：不支持的响应格式 {request_format}"
+
+                # 解析响应
+                result = parser(response_json)
+                if result is None:
+                    module_interface.logger.error(
+                        f"解析 API 响应失败: {response_json}")
+                    return "解析 API 响应失败"
+
                 # 更新使用统计
                 _state["usage_stats"]["total_requests"] += 1
                 _state["usage_stats"]["requests_by_provider"][
                     provider_id] = _state["usage_stats"][
                         "requests_by_provider"].get(provider_id, 0) + 1
 
-                if not stream:
-                    # 非流式响应处理
-                    response_json = await response.json()
-
-                    # 获取响应解析器
-                    parser = RESPONSE_PARSERS.get(request_format)
-                    if not parser:
-                        return f"错误：不支持的响应格式 {request_format}"
-
-                    # 解析响应
-                    result = parser(response_json)
-                    if result is None:
-                        module_interface.logger.error(
-                            f"解析 API 响应失败: {response_json}")
-                        return "解析 API 响应失败"
-
-                    return result
-                else:
-                    # 流式响应处理
-                    full_text = ""
-                    stream_parser = STREAM_PARSERS.get(request_format)
-
-                    if not stream_parser:
-                        module_interface.logger.error(
-                            f"不支持的流式响应格式: {request_format}")
-                        # 回退到非流式处理
-                        response_json = await response.json()
-                        parser = RESPONSE_PARSERS.get(request_format)
-                        result = parser(
-                            response_json) if parser else "解析 API 响应失败"
-                        return result if result else "解析 API 响应失败"
-
-                    async for line in response.content:
-                        if line.strip():
-                            try:
-                                line_text = line.decode('utf-8').strip()
-                                content = stream_parser(line_text)
-                                if content:
-                                    full_text += content
-                                    if callback:
-                                        await callback(full_text)
-                            except Exception as e:
-                                module_interface.logger.error(
-                                    f"解析流式响应行失败: {e}")
-
-                    return full_text
+                return result
 
     except aiohttp.ClientError as e:
         module_interface.logger.error(f"API 请求错误: {str(e)}")
@@ -600,20 +701,12 @@ def save_config():
     global _state
 
     config_to_save = {
-        "providers":
-        _state["providers"],
-        "whitelist":
-        _state["whitelist"],
-        "default_provider":
-        _state["default_provider"],
-        "usage_stats":
-        _state["usage_stats"],
-        "conversation_timeout":
-        _state.get("conversation_timeout", 24 * 60 * 60),
-        "streaming_enabled":
-        _state.get("streaming_enabled", True),
-        "streaming_update_interval":
-        _state.get("streaming_update_interval", DEFAULT_STREAMING_INTERVAL)
+        "providers": _state["providers"],
+        "whitelist": _state["whitelist"],
+        "default_provider": _state["default_provider"],
+        "usage_stats": _state["usage_stats"],
+        "conversation_timeout": _state.get("conversation_timeout",
+                                           24 * 60 * 60)
     }
 
     os.makedirs(os.path.dirname(_config_file), exist_ok=True)
@@ -642,9 +735,6 @@ def load_config():
             "requests_by_user": {}
         }
         _state["conversation_timeout"] = 24 * 60 * 60  # 默认 24 小时
-        _state["streaming_enabled"] = True  # 默认启用流式响应
-        _state[
-            "streaming_update_interval"] = DEFAULT_STREAMING_INTERVAL  # 默认更新间隔
 
         # 创建配置文件
         save_config()
@@ -673,14 +763,6 @@ def load_config():
             # 加载对话超时设置
             if "conversation_timeout" in config:
                 _state["conversation_timeout"] = config["conversation_timeout"]
-
-            # 加载流式响应设置
-            if "streaming_enabled" in config:
-                _state["streaming_enabled"] = config["streaming_enabled"]
-
-            if "streaming_update_interval" in config:
-                _state["streaming_update_interval"] = config[
-                    "streaming_update_interval"]
     except Exception as e:
         module_interface = _get_module_interface()
         if module_interface:
@@ -723,101 +805,6 @@ def can_use_ai(user_id, chat_type, context):
 
     # 其他用户不能使用
     return False
-
-
-async def handle_ai_message(update, context, message_text, module_interface):
-    """处理 AI 消息的通用函数"""
-    user_id = update.effective_user.id
-
-    # 检查消息长度
-    if len(message_text) > MAX_MESSAGE_LENGTH:
-        await update.message.reply_text(
-            f"⚠️ 消息太长，请将长度控制在 {MAX_MESSAGE_LENGTH} 字符以内")
-        return
-
-    # 检查默认服务商
-    provider_id = _state["default_provider"]
-    if not provider_id or provider_id not in _state["providers"]:
-        await update.message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
-        module_interface.logger.warning(f"用户 {user_id} 尝试使用 AI 但未配置默认服务商")
-        return
-
-    # 发送"正在思考"消息
-    thinking_message = await update.message.reply_text("🤔 正在思考中...")
-
-    # 添加用户消息到上下文
-    add_message_to_context(user_id, "user", message_text)
-
-    # 准备 API 请求
-    messages = format_context_for_api(provider_id, user_id)
-
-    # 获取服务商的请求格式
-    provider = _state["providers"][provider_id]
-    request_format = provider.get("request_format", "openai")
-
-    # 检查是否支持流式响应
-    supports_streaming = (_state.get("streaming_enabled", True) and
-                          request_format in ["openai", "anthropic", "gemini"])
-
-    # 用于存储上一次更新的文本，避免重复更新
-    last_text = ""
-
-    # 更新回调函数
-    async def update_message(text):
-        nonlocal thinking_message, last_text
-
-        # 检查文本是否有变化
-        if text == last_text:
-            return
-
-        try:
-            # 如果消息太长，需要分段处理
-            if len(text) > MAX_MESSAGE_LENGTH:
-                if thinking_message:
-                    await thinking_message.delete()
-                    thinking_message = None
-                    await send_long_message(update, text, module_interface)
-            elif thinking_message:
-                await thinking_message.edit_text(text)
-                last_text = text  # 更新上一次的文本
-        except Exception as e:
-            # 忽略"消息未修改"错误
-            if "Message is not modified" in str(e):
-                pass  # 安静地忽略这个错误
-            else:
-                module_interface.logger.error(f"更新消息失败: {e}")
-
-    # 调用 API
-    response = await call_ai_api(
-        provider_id,
-        messages,
-        module_interface,
-        stream=supports_streaming,
-        callback=update_message if supports_streaming else None)
-
-    # 确保最终响应已更新
-    if thinking_message:
-        try:
-            # 检查最终文本是否与上一次相同
-            if response != last_text:
-                if len(response) > MAX_MESSAGE_LENGTH:
-                    await thinking_message.delete()
-                    await send_long_message(update, response, module_interface)
-                else:
-                    await thinking_message.edit_text(response)
-        except Exception as e:
-            # 忽略"消息未修改"错误
-            if "Message is not modified" in str(e):
-                pass  # 安静地忽略这个错误
-            else:
-                module_interface.logger.error(f"更新最终响应失败: {e}")
-                await thinking_message.delete()
-                await send_long_message(update, response, module_interface)
-
-    # 添加 AI 回复到上下文
-    add_message_to_context(user_id, "assistant", response)
-
-    module_interface.logger.info(f"用户 {user_id} 使用 {provider_id} 服务商获得了 AI 回复")
 
 
 @error_handler
@@ -1042,8 +1029,17 @@ async def ai_config_command(update: Update,
         response = await call_ai_api(provider_id, test_messages,
                                      module_interface)
 
-        # 显示响应
-        await update.message.reply_text(f"📝 测试结果:\n\n{response}")
+        # 显示响应 - 使用 HTML 渲染
+        try:
+            # 使用 HTML 格式发送响应
+            html_response = TextUtils.markdown_to_html(
+                f"📝 测试结果:\n\n{response}")
+            await update.message.reply_text(html_response, parse_mode="HTML")
+        except Exception as e:
+            module_interface.logger.error(f"HTML 渲染测试结果失败: {e}")
+            # 回退到纯文本
+            await update.message.reply_text(f"📝 测试结果:\n\n{response}")
+
         module_interface.logger.info(
             f"用户 {update.effective_user.id} 测试了服务商 {provider_id}")
 
@@ -1080,69 +1076,11 @@ async def ai_config_command(update: Update,
         except ValueError:
             await update.message.reply_text("小时数必须是有效的数字")
 
-    elif operation == "streaming":
-        # 配置流式响应: /aiconfig streaming [on|off|interval <秒数>]
-        if len(context.args) < 2:
-            current_status = "启用" if _state.get("streaming_enabled",
-                                                True) else "禁用"
-            current_interval = _state.get("streaming_update_interval",
-                                          DEFAULT_STREAMING_INTERVAL)
-            await update.message.reply_text(
-                f"用法: `/aiconfig streaming on|off|interval <秒数>`\n"
-                f"当前状态: {current_status}\n"
-                f"当前更新间隔: {current_interval} 秒",
-                parse_mode="MARKDOWN")
-            return
-
-        subcommand = context.args[1].lower()
-
-        if subcommand == "on":
-            _state["streaming_enabled"] = True
-            save_config()
-            await update.message.reply_text("✅ 已启用流式响应")
-            module_interface.logger.info(
-                f"用户 {update.effective_user.id} 启用了流式响应")
-
-        elif subcommand == "off":
-            _state["streaming_enabled"] = False
-            save_config()
-            await update.message.reply_text("✅ 已禁用流式响应")
-            module_interface.logger.info(
-                f"用户 {update.effective_user.id} 禁用了流式响应")
-
-        elif subcommand == "interval":
-            if len(context.args) < 3:
-                await update.message.reply_text(
-                    "用法: `/aiconfig streaming interval <秒数>`",
-                    parse_mode="MARKDOWN")
-                return
-
-            try:
-                interval = float(context.args[2])
-                if interval <= 0:
-                    await update.message.reply_text("更新间隔必须大于 0 秒")
-                    return
-
-                _state["streaming_update_interval"] = interval
-                save_config()
-                await update.message.reply_text(f"✅ 已将流式响应更新间隔设置为 {interval} 秒"
-                                                )
-                module_interface.logger.info(
-                    f"用户 {update.effective_user.id} 将流式响应更新间隔设置为 {interval} 秒")
-            except ValueError:
-                await update.message.reply_text("更新间隔必须是有效的数字")
-
-        else:
-            await update.message.reply_text(
-                f"未知的子命令: `{subcommand}`\n"
-                "可用子命令: on, off, interval",
-                parse_mode="MARKDOWN")
-
     else:
         # 未知操作
         await update.message.reply_text(
             f"未知操作: `{operation}`\n"
-            "可用操作: provider, default, delete, new, test, stats, timeout, streaming",
+            "可用操作: provider, default, delete, new, test, stats, timeout",
             parse_mode="MARKDOWN")
 
 
@@ -1165,12 +1103,6 @@ async def show_ai_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 对话超时设置
     timeout_hours = _state.get("conversation_timeout", 24 * 60 * 60) // 3600
     config_text += f"*对话超时时间:* `{timeout_hours}` 小时\n\n"
-
-    # 流式响应设置
-    streaming_status = "启用" if _state.get("streaming_enabled", True) else "禁用"
-    streaming_interval = _state.get("streaming_update_interval",
-                                    DEFAULT_STREAMING_INTERVAL)
-    config_text += f"*流式响应:* `{streaming_status}` (更新间隔: `{streaming_interval}` 秒)\n\n"
 
     # 服务商列表
     config_text += "*已配置的服务商:*\n"
@@ -1214,8 +1146,7 @@ async def show_ai_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
             config_text += f"  🌡️ 温度: `{provider.get('temperature', 0.7)}`\n"
 
             # 系统提示 (可能很长，截断显示)
-            system_prompt = provider.get('system_prompt',
-                                         DEFAULT_SYSTEM_PROMPT)
+            system_prompt = provider.get('system_prompt', '未设置')
             if len(system_prompt) > 30:
                 system_prompt = system_prompt[:27] + "..."
             config_text += f"  💬 系统提示: `{TextUtils.escape_markdown(system_prompt)}`\n"
@@ -1231,7 +1162,6 @@ async def show_ai_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config_text += "• `/aiconfig test <ID>` - 测试服务商\n"
     config_text += "• `/aiconfig stats` - 查看使用统计\n"
     config_text += "• `/aiconfig timeout <小时数>` - 设置对话超时时间\n"
-    config_text += "• `/aiconfig streaming on|off|interval <秒数>` - 配置流式响应\n"
 
     try:
         await update.message.reply_text(config_text, parse_mode="MARKDOWN")
@@ -1485,8 +1415,104 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 获取消息内容
     message_text = " ".join(context.args)
 
-    # 处理 AI 消息
-    await handle_ai_message(update, context, message_text, module_interface)
+    # 检查消息长度
+    if len(message_text) > MAX_MESSAGE_LENGTH:
+        await update.message.reply_text(
+            f"⚠️ 消息太长，请将长度控制在 {MAX_MESSAGE_LENGTH} 字符以内")
+        return
+
+    # 检查默认服务商
+    provider_id = _state["default_provider"]
+    if not provider_id or provider_id not in _state["providers"]:
+        await update.message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
+        module_interface.logger.warning(f"用户 {user_id} 尝试使用 AI 但未配置默认服务商")
+        return
+
+    # 发送"正在思考"消息
+    thinking_message = await update.message.reply_text("🤔 正在思考中...")
+
+    # 添加用户消息到上下文
+    add_message_to_context(user_id, "user", message_text)
+
+    # 准备 API 请求
+    messages = format_context_for_api(provider_id, user_id)
+
+    # 创建流式更新回调函数
+    async def update_message_callback(text):
+        try:
+            # 确保文本不为空
+            if not text.strip():
+                return
+
+            # 存储上一次更新的文本，避免重复更新
+            if not hasattr(update_message_callback, 'last_text'):
+                update_message_callback.last_text = ""
+
+            # 如果文本与上次相同，不更新
+            if text == update_message_callback.last_text:
+                return
+
+            # 流式更新时使用纯文本
+            if len(text) <= MAX_MESSAGE_LENGTH:
+                await thinking_message.edit_text(text)
+            else:
+                # 如果消息超长，只更新最后部分
+                await thinking_message.edit_text(text[-MAX_MESSAGE_LENGTH:])
+
+            # 更新上次文本
+            update_message_callback.last_text = text
+        except Exception as e:
+            # 忽略"消息未修改"错误
+            if "Message is not modified" not in str(e):
+                module_interface.logger.error(f"更新消息失败: {e}")
+
+    # 调用流式 AI API
+    response = await call_ai_api_stream(provider_id, messages,
+                                        module_interface,
+                                        update_message_callback)
+
+    # 添加 AI 回复到上下文
+    add_message_to_context(user_id, "assistant", response)
+
+    # 处理最终响应 - 使用 HTML 格式
+    try:
+        # 删除"思考中"消息
+        await thinking_message.delete()
+
+        # 使用 HTML 格式发送响应
+        await TextUtils.send_long_message_html(update, response,
+                                               module_interface)
+    except Exception as e:
+        module_interface.logger.error(f"处理最终响应失败: {e}")
+        # 直接发送纯文本
+        try:
+            # 分段发送纯文本
+            MAX_PLAIN_LENGTH = 4000
+
+            if len(response) <= MAX_PLAIN_LENGTH:
+                await update.message.reply_text(response)
+            else:
+                # 分段发送
+                parts = []
+                for i in range(0, len(response), MAX_PLAIN_LENGTH):
+                    parts.append(response[i:i + MAX_PLAIN_LENGTH])
+
+                module_interface.logger.info(f"消息过长，将分为 {len(parts)} 段纯文本发送")
+
+                # 发送第一段
+                first_message = await update.message.reply_text(parts[0])
+
+                # 发送剩余段落
+                for part in parts[1:]:
+                    await first_message.reply_text(part)
+
+        except Exception as inner_e:
+            module_interface.logger.error(f"发送纯文本也失败: {inner_e}")
+            # 最后的回退：发送一个简单的错误消息
+            await update.message.reply_text("生成回复时出错，请重试")
+
+    module_interface.logger.info(
+        f"用户 {user_id} 使用 {provider_id} 服务商获得了 AI 流式回复")
 
 
 @error_handler
@@ -1520,8 +1546,103 @@ async def handle_private_message(update: Update,
     # 获取消息内容
     message_text = update.message.text
 
-    # 处理 AI 消息
-    await handle_ai_message(update, context, message_text, module_interface)
+    # 检查消息长度
+    if len(message_text) > MAX_MESSAGE_LENGTH:
+        await update.message.reply_text(
+            f"⚠️ 消息太长，请将长度控制在 {MAX_MESSAGE_LENGTH} 字符以内")
+        return
+
+    # 检查默认服务商
+    provider_id = _state["default_provider"]
+    if not provider_id or provider_id not in _state["providers"]:
+        await update.message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
+        module_interface.logger.warning(f"用户 {user_id} 尝试使用 AI 但未配置默认服务商")
+        return
+
+    # 发送"正在思考"消息
+    thinking_message = await update.message.reply_text("🤔 正在思考中...")
+
+    # 添加用户消息到上下文
+    add_message_to_context(user_id, "user", message_text)
+
+    # 准备 API 请求
+    messages = format_context_for_api(provider_id, user_id)
+
+    # 创建流式更新回调函数
+    async def update_message_callback(text):
+        try:
+            # 确保文本不为空
+            if not text.strip():
+                return
+
+            # 存储上一次更新的文本，避免重复更新
+            if not hasattr(update_message_callback, 'last_text'):
+                update_message_callback.last_text = ""
+
+            # 如果文本与上次相同，不更新
+            if text == update_message_callback.last_text:
+                return
+
+            # 流式更新时使用纯文本
+            if len(text) <= MAX_MESSAGE_LENGTH:
+                await thinking_message.edit_text(text)
+            else:
+                # 如果消息超长，只更新最后部分
+                await thinking_message.edit_text(text[-MAX_MESSAGE_LENGTH:])
+
+            # 更新上次文本
+            update_message_callback.last_text = text
+        except Exception as e:
+            # 忽略"消息未修改"错误
+            if "Message is not modified" not in str(e):
+                module_interface.logger.error(f"更新消息失败: {e}")
+
+    # 调用流式 AI API
+    response = await call_ai_api_stream(provider_id, messages,
+                                        module_interface,
+                                        update_message_callback)
+
+    # 添加 AI 回复到上下文
+    add_message_to_context(user_id, "assistant", response)
+
+    # 处理最终响应 - 使用 HTML 格式
+    try:
+        # 删除"思考中"消息
+        await thinking_message.delete()
+
+        # 使用 HTML 格式发送响应
+        await TextUtils.send_long_message_html(update, response,
+                                               module_interface)
+    except Exception as e:
+        module_interface.logger.error(f"处理最终响应失败: {e}")
+        # 直接发送纯文本
+        try:
+            # 分段发送纯文本
+            MAX_PLAIN_LENGTH = 4000
+
+            if len(response) <= MAX_PLAIN_LENGTH:
+                await update.message.reply_text(response)
+            else:
+                # 分段发送
+                parts = []
+                for i in range(0, len(response), MAX_PLAIN_LENGTH):
+                    parts.append(response[i:i + MAX_PLAIN_LENGTH])
+
+                module_interface.logger.info(f"消息过长，将分为 {len(parts)} 段纯文本发送")
+
+                # 发送第一段
+                first_message = await update.message.reply_text(parts[0])
+
+                # 发送剩余段落
+                for part in parts[1:]:
+                    await first_message.reply_text(part)
+
+        except Exception as inner_e:
+            module_interface.logger.error(f"发送纯文本也失败: {inner_e}")
+            # 最后的回退：发送一个简单的错误消息
+            await update.message.reply_text("生成回复时出错，请重试")
+
+    module_interface.logger.info(f"用户 {user_id} 在私聊中获得了 AI 流式回复")
 
 
 # 获取模块状态的方法（用于热更新）
@@ -1548,9 +1669,6 @@ def set_state(module_interface, state):
         "requests_by_user": {}
     })
     state.setdefault("conversation_timeout", 24 * 60 * 60)  # 默认 24 小时
-    state.setdefault("streaming_enabled", True)  # 默认启用流式响应
-    state.setdefault("streaming_update_interval",
-                     DEFAULT_STREAMING_INTERVAL)  # 默认更新间隔
 
     _state = state
     module_interface.logger.debug("已恢复 AI 模块状态")
@@ -1558,7 +1676,11 @@ def set_state(module_interface, state):
 
 def setup(module_interface):
     """模块初始化"""
-    global _state
+    global _state, re
+
+    # 确保导入了 re 模块
+    if 're' not in globals():
+        import re
 
     # 初始化状态
     _state = {
@@ -1572,9 +1694,7 @@ def setup(module_interface):
             "requests_by_provider": {},
             "requests_by_user": {}
         },
-        "conversation_timeout": 24 * 60 * 60,  # 默认 24 小时
-        "streaming_enabled": True,  # 默认启用流式响应
-        "streaming_update_interval": DEFAULT_STREAMING_INTERVAL  # 默认更新间隔
+        "conversation_timeout": 24 * 60 * 60  # 默认 24 小时
     }
 
     # 从持久化存储加载状态
