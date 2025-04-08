@@ -203,7 +203,10 @@ class CommandProcessor:
     async def _start_command(self, update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
         """启动命令处理"""
-        await update.message.reply_text("😋 何か御用でしょうか\n\n使用 /help 查看可用命令。")
+        await update.message.reply_sticker(
+            sticker=
+            'CAACAgEAAxkBAAIBmGJ1Mt3gP0VaAvccwfw1lwgt53VlAAIXCQACkSkAARB0sik1UbskECQE'
+        )
 
     @error_handler
     async def _help_command(self, update: Update,

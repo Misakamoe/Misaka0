@@ -1036,7 +1036,7 @@ async def ai_whitelist_command(update: Update,
             username = update.message.reply_to_message.from_user.username or "未知用户名"
             full_name = update.message.reply_to_message.from_user.full_name or "未知姓名"
         else:
-            # 从参数获取用户ID
+            # 从参数获取用户 ID
             try:
                 user_id = int(context.args[1])
                 username = "未知用户名"
@@ -1047,8 +1047,10 @@ async def ai_whitelist_command(update: Update,
 
         # 检查用户是否已在白名单中
         if user_id in _state["whitelist"]:
+            escaped_username = TextUtils.escape_markdown(username)
             await update.message.reply_text(
-                f"用户 `{user_id}` (@{username}) 已在白名单中", parse_mode="MARKDOWN")
+                f"用户 `{user_id}` (@{escaped_username}) 已在白名单中",
+                parse_mode="MARKDOWN")
             return
 
         # 添加到白名单
@@ -1057,8 +1059,12 @@ async def ai_whitelist_command(update: Update,
         # 保存配置
         save_config()
 
+        # 使用 TextUtils 转义用户名和全名中的特殊字符
+        escaped_username = TextUtils.escape_markdown(username)
+        escaped_full_name = TextUtils.escape_markdown(full_name)
+
         await update.message.reply_text(
-            f"✅ 已将用户 `{user_id}` (@{username}, {full_name}) 添加到白名单",
+            f"✅ 已将用户 `{user_id}` (@{escaped_username}, {escaped_full_name}) 添加到白名单",
             parse_mode="MARKDOWN")
         module_interface.logger.info(
             f"用户 {update.effective_user.id} 将用户 {user_id} 添加到 AI 白名单")
