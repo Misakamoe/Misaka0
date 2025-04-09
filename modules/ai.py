@@ -44,8 +44,7 @@ REQUEST_TIMEOUT = 60
 # 最大消息长度
 MAX_MESSAGE_LENGTH = 4000
 # 流式处理配置
-STREAM_CHUNK_SIZE = 15  # 每次更新的字符数
-MIN_UPDATE_INTERVAL = 0.5  # 最小更新间隔(秒)
+MIN_UPDATE_INTERVAL = 3  # 最小更新间隔(秒)，小于此值可能导致 flood wait
 
 # 服务商配置模板
 PROVIDER_TEMPLATES = {
@@ -1477,6 +1476,8 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 处理最终响应 - 使用 HTML 格式
     try:
         # 删除"思考中"消息
+        await thinking_message.edit_text("✨ 尝试美化格式...")
+        await asyncio.sleep(0.5)  # 短暂延时
         await thinking_message.delete()
 
         # 使用 HTML 格式发送响应
@@ -1608,6 +1609,8 @@ async def handle_private_message(update: Update,
     # 处理最终响应 - 使用 HTML 格式
     try:
         # 删除"思考中"消息
+        await thinking_message.edit_text("✨ 尝试美化格式...")
+        await asyncio.sleep(0.5)  # 短暂延时
         await thinking_message.delete()
 
         # 使用 HTML 格式发送响应
