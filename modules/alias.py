@@ -3,6 +3,8 @@
 from telegram import Update, MessageEntity
 from telegram.ext import ContextTypes, MessageHandler, filters
 from utils.decorators import error_handler
+import json
+import os
 
 # 模块元数据
 MODULE_NAME = "alias"
@@ -10,6 +12,9 @@ MODULE_VERSION = "1.0.0"
 MODULE_DESCRIPTION = "提供命令别名功能，支持中文命令"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["alias"]  # 只包含英文命令
+
+# 存储别名数据的文件路径
+_data_file = "config/aliases.json"
 
 # 模块状态
 _state = {
@@ -32,6 +37,36 @@ def _update_reverse_aliases():
     for cmd, alias_list in _state["aliases"].items():
         for alias in alias_list:
             _reverse_aliases[alias] = cmd
+
+
+def load_aliases():
+    """从文件加载别名数据"""
+    if not os.path.exists(_data_file):
+        return {"aliases": {"alias": ["别名"]}}
+
+    try:
+        with open(_data_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        if _module_interface:
+            _module_interface.logger.error(f"加载别名数据失败: {e}")
+        return {"aliases": {"alias": ["别名"]}}
+
+
+def save_aliases():
+    """保存别名数据到文件"""
+    global _state
+
+    os.makedirs(os.path.dirname(_data_file), exist_ok=True)
+
+    try:
+        with open(_data_file, 'w', encoding='utf-8') as f:
+            json.dump(_state, f, ensure_ascii=False, indent=2)
+        if _module_interface:
+            _module_interface.logger.debug(f"别名数据已保存到 {_data_file}")
+    except Exception as e:
+        if _module_interface:
+            _module_interface.logger.error(f"保存别名数据失败: {e}")
 
 
 @error_handler
@@ -139,6 +174,7 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if alias not in _state["aliases"][cmd]:
             _state["aliases"][cmd].append(alias)
             _update_reverse_aliases()
+            save_aliases()  # 保存到文件
             await update.message.reply_text(f"已为 /{cmd} 添加别名「{alias}」")
         else:
             await update.message.reply_text(f"别名「{alias}」已存在")
@@ -160,6 +196,7 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if alias in _state["aliases"][cmd]:
             _state["aliases"][cmd].remove(alias)
             _update_reverse_aliases()
+            save_aliases()  # 保存到文件
             await update.message.reply_text(f"已从 /{cmd} 移除别名「{alias}」")
         else:
             await update.message.reply_text(f"别名「{alias}」不存在")
@@ -192,10 +229,11 @@ def set_state(module_interface, state):
 
 def setup(module_interface):
     """模块初始化"""
-    global _module_interface
+    global _module_interface, _state
     _module_interface = module_interface
 
-    # 更新反向映射表
+    # 从文件加载别名数据
+    _state = load_aliases()
     _update_reverse_aliases()
 
     # 注册命令
@@ -209,20 +247,18 @@ def setup(module_interface):
         group=-100  # 使用高优先级
     )
 
-    # 加载状态
-    saved_state = module_interface.load_state(
-        default={"aliases": {
-            "alias": ["别名"]
-        }})
-    global _state
-    _state = saved_state
-    _update_reverse_aliases()
+    # 同时也保存到模块状态系统（作为备份）
+    module_interface.save_state(_state)
 
     module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
 
 def cleanup(module_interface):
     """模块清理"""
-    # 保存状态
+    # 保存别名数据到文件
+    save_aliases()
+
+    # 同时也保存到模块状态系统（作为备份）
     module_interface.save_state(_state)
+
     module_interface.logger.info(f"模块 {MODULE_NAME} 已清理")
