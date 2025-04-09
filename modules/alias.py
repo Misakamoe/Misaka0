@@ -169,6 +169,38 @@ def _is_command_exists(cmd):
     return False
 
 
+def _get_module_of_command(command):
+    """获取命令所属的模块名称"""
+    if not _module_interface:
+        return None
+
+    bot_engine = _module_interface.bot_engine
+    for module_name, module_data in bot_engine.module_loader.loaded_modules.items(
+    ):
+        if hasattr(module_data["module"], "MODULE_COMMANDS"):
+            if command in module_data["module"].MODULE_COMMANDS:
+                return module_name
+    return None
+
+
+def _is_module_enabled_for_chat(module_name, chat_id, context):
+    """检查模块是否在指定聊天中启用"""
+    if not chat_id:
+        return True  # 如果无法确定聊天 ID，则假设启用
+
+    config_manager = context.bot_data.get("config_manager")
+    if not config_manager:
+        return True  # 如果无法获取配置管理器，则假设启用
+
+    # 核心命令不需要检查
+    core_modules = ["core"]
+    if module_name in core_modules:
+        return True
+
+    # 检查模块是否在当前聊天中启用
+    return config_manager.is_module_enabled_for_chat(module_name, chat_id)
+
+
 def _check_alias_cycle(cmd, alias, visited=None):
     """检查是否会形成别名循环引用
     
@@ -209,6 +241,22 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if command in _reverse_aliases:
             aliased_command = _reverse_aliases[command]
 
+            # 检查模块是否在当前群组启用
+            chat_id = update.effective_chat.id if update.effective_chat else None
+            module_name = _get_module_of_command(aliased_command)
+
+            if module_name and not _is_module_enabled_for_chat(
+                    module_name, chat_id, context):
+                # 模块未启用，发送提示
+                chat_type = update.effective_chat.type if update.effective_chat else "unknown"
+                if chat_type in ["group", "supergroup"]:
+                    await update.effective_message.reply_text(
+                        f"模块 {module_name} 未在当前群组启用。")
+                else:
+                    await update.effective_message.reply_text(
+                        f"模块 {module_name} 未启用。")
+                return True  # 阻止消息继续传递
+
             # 检查原始命令的权限要求
             command_metadata = _get_command_metadata(aliased_command)
             admin_only = command_metadata.get("admin_only", False)
@@ -217,7 +265,6 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if admin_only:
                 # 获取用户信息
                 user_id = update.effective_user.id
-                chat_id = update.effective_chat.id if update.effective_chat else None
 
                 # 检查用户权限
                 if not await _check_permission(context, user_id, chat_id,
