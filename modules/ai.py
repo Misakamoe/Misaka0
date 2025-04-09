@@ -38,9 +38,9 @@ _config_file = "config/ai_config.json"
 # 上下文保存路径
 _context_file = "data/ai_contexts.json"
 # 最大上下文长度
-MAX_CONTEXT_LENGTH = 10
+MAX_CONTEXT_LENGTH = 15
 # 最大请求超时时间 (秒)
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = 30
 # 最大消息长度
 MAX_MESSAGE_LENGTH = 4000
 # 流式处理配置
