@@ -156,7 +156,7 @@ sudo systemctl status telegram-bot
 
 - `/listgroups` - 列出授权的群组 (超级管理员)
 
-- `/addgroup` <群组 ID> - 添加群组到白名单 (超级管理员)
+- `/addgroup` [群组 ID] - 添加群组到白名单 (超级管理员)
 
 - `/removegroup` <群组 ID> - 从白名单移除群组 (超级管理员)
 

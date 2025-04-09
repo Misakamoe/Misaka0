@@ -249,7 +249,7 @@ class CommandProcessor:
         if is_super_admin:
             help_text += "\n超级管理员命令:\n"
             help_text += "/listgroups - 列出允许的群组\n"
-            help_text += "/addgroup <群组 ID> - 添加群组到白名单\n"
+            help_text += "/addgroup [群组 ID] - 添加群组到白名单\n"
             help_text += "/removegroup <群组 ID> - 从白名单移除群组\n"
 
         await update.message.reply_text(help_text)

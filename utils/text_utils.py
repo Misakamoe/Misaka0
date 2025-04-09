@@ -45,7 +45,7 @@ class TextUtils:
     def markdown_to_html(text):
         """
         将 Markdown 格式转换为 Telegram 支持的 HTML 格式
-        基本处理代码块和常见格式，不过于严格
+        增强版：更好的代码块处理和特殊字符转义
         """
         if not text:
             return ""
@@ -55,26 +55,61 @@ class TextUtils:
         safe_text = ""
         in_code_block = False
         in_inline_code = False
+        code_block_lang = ""
         i = 0
 
         while i < len(text):
-            # 检查是否是代码块开始/结束
+            # 检查是否是代码块开始
             if text[i:i + 3] == "```" and not in_inline_code:
-                in_code_block = not in_code_block
-                safe_text += "```"
-                i += 3
-                continue
+                if not in_code_block:
+                    # 代码块开始
+                    in_code_block = True
+                    # 检查是否指定了语言
+                    end_of_first_line = text.find("\n", i + 3)
+                    if end_of_first_line > i + 3:
+                        code_block_lang = text[i + 3:end_of_first_line].strip()
+                        safe_text += "```" + code_block_lang + "\n"
+                        i = end_of_first_line + 1
+                        continue
+                    else:
+                        code_block_lang = ""
+                        safe_text += "```\n"
+                        i += 3
+                        continue
+                else:
+                    # 代码块结束
+                    in_code_block = False
+                    code_block_lang = ""
+                    safe_text += "```"
+                    i += 3
+                    continue
 
             # 检查是否是行内代码开始/结束
             if text[i] == "`" and not in_code_block:
-                in_inline_code = not in_inline_code
+                if not in_inline_code:
+                    # 行内代码开始
+                    in_inline_code = True
+                else:
+                    # 行内代码结束
+                    in_inline_code = False
                 safe_text += "`"
                 i += 1
                 continue
 
-            # 在代码块或行内代码内，不转义
+            # 在代码块或行内代码内，完全转义所有 HTML 特殊字符
             if in_code_block or in_inline_code:
-                safe_text += text[i]
+                if text[i] == "<":
+                    safe_text += "&lt;"
+                elif text[i] == ">":
+                    safe_text += "&gt;"
+                elif text[i] == "&":
+                    safe_text += "&amp;"
+                elif text[i] == '"':
+                    safe_text += "&quot;"
+                elif text[i] == "'":
+                    safe_text += "&#39;"
+                else:
+                    safe_text += text[i]
             else:
                 # 转义 HTML 特殊字符，但保留 Markdown 标记
                 if text[i] == "<":
@@ -88,19 +123,29 @@ class TextUtils:
 
             i += 1
 
+        # 确保所有代码块和行内代码都已正确闭合
+        if in_code_block:
+            safe_text += "\n```"  # 添加缺失的代码块结束标记
+        if in_inline_code:
+            safe_text += "`"  # 添加缺失的行内代码结束标记
+
         # 处理代码块 (```)
         def replace_code_block(match):
             lang = match.group(1) or ""
             code = match.group(2)
 
-            # 简单添加语言信息
+            # 确保代码中的所有内容都被完全转义
+            # 这里的代码已经在上面的循环中转义过了，所以不需要再次转义
+
+            # 添加语言信息
             lang_info = f"<b>{lang}</b>\n" if lang else ""
 
-            return f"{lang_info}<pre>{code}</pre>"
+            return f"{lang_info}<pre><code>{code}</code></pre>"
 
         # 处理行内代码 (`)
         def replace_inline_code(match):
             code = match.group(1)
+            # 代码内容已经在上面的循环中转义过了
             return f"<code>{code}</code>"
 
         # 处理加粗 (** 或 __)
@@ -140,7 +185,7 @@ class TextUtils:
 
     @staticmethod
     async def send_long_message_html(update, text, module_interface):
-        """分段发送长 HTML 格式消息"""
+        """分段发送长 HTML 格式消息，确保标签正确闭合"""
         try:
             # 首先将文本转换为 HTML 格式
             html_text = TextUtils.markdown_to_html(text)
@@ -174,8 +219,15 @@ class TextUtils:
                         parts.append(current_part)
                         current_part = para
                     else:
-                        # 单个段落太长，直接添加，后面单独处理
-                        parts.append(para)
+                        # 单个段落太长，需要进一步分割
+                        if len(para) > MAX_LENGTH:
+                            # 智能分割长段落，确保不会在标签中间切断
+                            long_para_parts = TextUtils.smart_split_text(
+                                para, MAX_LENGTH)
+                            parts.extend(long_para_parts)
+                        else:
+                            # 单个段落不超长，但转换后的 HTML 可能超长
+                            parts.append(para)
                 else:
                     current_part = test_part
 
@@ -217,9 +269,7 @@ class TextUtils:
                     return await update.message.reply_text(text)
 
                 # 分段发送
-                parts = []
-                for i in range(0, len(text), MAX_PLAIN_LENGTH):
-                    parts.append(text[i:i + MAX_PLAIN_LENGTH])
+                parts = TextUtils.smart_split_text(text, MAX_PLAIN_LENGTH)
 
                 module_interface.logger.info(f"消息过长，将分为 {len(parts)} 段纯文本发送")
 
@@ -236,3 +286,70 @@ class TextUtils:
                 # 最后的回退：发送一个简单的错误消息
                 await update.message.reply_text("生成回复时出错，请重试")
                 return None
+
+    @staticmethod
+    def smart_split_text(text, max_length):
+        """
+        智能分割文本，确保不会在 Markdown 格式标记中间切断
+        """
+        if len(text) <= max_length:
+            return [text]
+
+        parts = []
+        current_pos = 0
+
+        while current_pos < len(text):
+            # 找到一个合适的分割点
+            end_pos = current_pos + max_length
+
+            if end_pos >= len(text):
+                # 已经到达文本末尾
+                parts.append(text[current_pos:])
+                break
+
+            # 尝试在段落、句子或空格处分割
+            paragraph_break = text.rfind("\n\n", current_pos, end_pos)
+            sentence_break = text.rfind(". ", current_pos, end_pos)
+            space_break = text.rfind(" ", current_pos, end_pos)
+
+            # 选择最佳分割点
+            if paragraph_break != -1 and paragraph_break > current_pos + max_length // 2:
+                split_pos = paragraph_break + 2  # 包含换行符
+            elif sentence_break != -1 and sentence_break > current_pos + max_length // 3:
+                split_pos = sentence_break + 2  # 包含句号和空格
+            elif space_break != -1:
+                split_pos = space_break + 1  # 包含空格
+            else:
+                # 没有找到好的分割点，强制分割
+                split_pos = end_pos
+
+            # 检查是否在格式标记中间
+            # 检查代码块
+            code_block_start = text.rfind("```", current_pos, split_pos)
+            if code_block_start != -1:
+                code_block_end = text.find("```", code_block_start + 3)
+                if code_block_end == -1 or code_block_end > split_pos:
+                    # 在代码块中间，调整分割点
+                    if code_block_start > current_pos + 10:  # 确保至少有一些内容
+                        split_pos = code_block_start
+                    else:
+                        # 尝试包含整个代码块
+                        if code_block_end != -1 and code_block_end - current_pos < max_length * 1.5:
+                            split_pos = code_block_end + 3
+                        else:
+                            # 代码块太长，在代码块开始前分割
+                            split_pos = code_block_start
+
+            # 检查行内代码、粗体、斜体等
+            for marker in ['`', '**', '*', '__', '_', '~~']:
+                marker_count = text.count(marker, current_pos, split_pos)
+                if marker_count % 2 != 0:  # 奇数个标记，意味着在标记中间
+                    last_marker = text.rfind(marker, current_pos, split_pos)
+                    if last_marker > current_pos + 10:  # 确保至少有一些内容
+                        split_pos = last_marker
+
+            # 添加这一部分
+            parts.append(text[current_pos:split_pos])
+            current_pos = split_pos
+
+        return parts
