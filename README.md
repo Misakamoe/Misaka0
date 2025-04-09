@@ -180,6 +180,7 @@ sudo systemctl status telegram-bot
 ├── modules/                # 模块目录
 │   └── echo.py             # 示例模块
 ├── utils/                  # 工具函数
+│   ├── currency_data.py    # 货币数据工具
 │   ├── decorators.py       # 装饰器工具
 │   ├── event_system.py     # 事件系统
 │   ├── logger.py           # 日志工具
