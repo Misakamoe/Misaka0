@@ -2,3 +2,4 @@
 python-telegram-bot==22.0
 pytz==2025.2
 aiohttp==3.11.16
+feedparser==6.0.11

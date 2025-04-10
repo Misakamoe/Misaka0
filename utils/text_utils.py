@@ -353,3 +353,19 @@ class TextUtils:
             current_pos = split_pos
 
         return parts
+
+    @staticmethod
+    def strip_html(text):
+        """移除 HTML 标签"""
+
+        return re.sub(r'<[^>]+>', '', text)
+
+    @staticmethod
+    def normalize_whitespace(text):
+        """规范化文本中的空白字符，删除多余的空行和空格"""
+        # 将多个空行替换为一个空行
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        # 删除每行开头和结尾的空白
+        text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)
+        # 删除整个文本开头和结尾的空白
+        return text.strip()
