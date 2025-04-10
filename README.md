@@ -1,4 +1,4 @@
-# 模块化 Telegram Bot 框架
+# 模块化 Telegram Bot
 
 一个高度可扩展、模块化的 Telegram Bot 框架，支持动态加载/卸载模块，配置热重载，事件系统和状态管理。
 
@@ -180,6 +180,7 @@ sudo systemctl status telegram-bot
 ├── modules/                # 模块目录
 │   └── echo.py             # 示例模块
 ├── utils/                  # 工具函数
+│   ├── city_mapping.py     # 城市名称映射
 │   ├── currency_data.py    # 货币数据工具
 │   ├── decorators.py       # 装饰器工具
 │   ├── event_system.py     # 事件系统

@@ -12,7 +12,7 @@ from utils.text_utils import TextUtils
 # 模块元数据
 MODULE_NAME = "alias"
 MODULE_VERSION = "1.1.0"
-MODULE_DESCRIPTION = "提供命令别名功能，支持中文命令"
+MODULE_DESCRIPTION = "命令别名功能，支持中文命令"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["alias"]  # 只包含英文命令
 

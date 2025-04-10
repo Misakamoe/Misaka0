@@ -14,7 +14,7 @@ from utils.currency_data import CurrencyData, FIAT_CURRENCY_ALIASES, CRYPTO_CURR
 # 模块元数据
 MODULE_NAME = "rate"
 MODULE_VERSION = "1.2.0"
-MODULE_DESCRIPTION = "汇率转换功能，支持法币和虚拟货币"
+MODULE_DESCRIPTION = "汇率转换，支持法币/虚拟货币"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["rate", "setrate"]
 

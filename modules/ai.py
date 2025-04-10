@@ -14,7 +14,7 @@ from utils.text_utils import TextUtils
 # 模块元数据
 MODULE_NAME = "ai"
 MODULE_VERSION = "1.0.0"
-MODULE_DESCRIPTION = "AI 聊天小助手"
+MODULE_DESCRIPTION = "支持多种 AI 的聊天助手"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["ai", "aiconfig", "aiclear", "aiwhitelist"]
 
