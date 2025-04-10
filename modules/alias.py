@@ -11,7 +11,7 @@ from utils.text_utils import TextUtils
 
 # 模块元数据
 MODULE_NAME = "alias"
-MODULE_VERSION = "1.1.0"
+MODULE_VERSION = "1.3.0"
 MODULE_DESCRIPTION = "命令别名功能，支持中文命令"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["alias"]  # 只包含英文命令
@@ -230,6 +230,11 @@ def _check_alias_cycle(cmd, alias, visited=None):
 @error_handler
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理所有消息，检查是否包含中文命令别名"""
+    # 检查 alias 模块是否启用
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not _is_module_enabled_for_chat("alias", chat_id, context):
+        return None  # 如果 alias 模块被禁用，允许消息继续传递
+
     if not update.message or not update.message.text:
         return None  # 允许消息继续传递
 
@@ -295,18 +300,28 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 # 尝试执行命令
                 try:
-                    # 尝试获取对应的模块接口
-                    cmd_module = _module_interface.get_module_interface(
-                        aliased_command)
-                    if cmd_module:
-                        # 假设模块有一个与命令同名的处理函数
-                        handler_name = f"{aliased_command}_command"
-                        # 调用模块方法
-                        await _module_interface.call_module_method(
-                            aliased_command, handler_name, update, context)
+                    # 获取命令所属的模块名称
+                    module_name = _get_module_of_command(aliased_command)
+                    if module_name:
+                        # 获取模块接口
+                        cmd_module = _module_interface.get_module_interface(
+                            module_name)
+                        if cmd_module:
+                            # 命令处理函数名称
+                            handler_name = f"{aliased_command}_command"
+                            # 调用模块方法
+                            await _module_interface.call_module_method(
+                                module_name, handler_name, update, context)
+                            _module_interface.logger.debug(
+                                f"成功执行别名命令: /{aliased_command} (模块: {module_name})"
+                            )
+                            command_executed = True
+                        else:
+                            _module_interface.logger.debug(
+                                f"找不到模块接口: {module_name}")
+                    else:
                         _module_interface.logger.debug(
-                            f"成功执行别名命令: /{aliased_command}")
-                        command_executed = True
+                            f"找不到命令 /{aliased_command} 所属的模块")
                 except Exception as e:
                     _module_interface.logger.debug(f"尝试直接调用模块方法失败: {str(e)}")
 
@@ -354,8 +369,9 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 显示当前所有别名
         reply = "当前命令别名：\n"
         for cmd, aliases in _state["aliases"].items():
-            alias_str = ", ".join([f"「{a}」" for a in aliases])
-            reply += f"/{cmd} → {alias_str}\n"
+            if aliases:  # 只显示有别名的命令
+                alias_str = ", ".join([f"「{a}」" for a in aliases])
+                reply += f"/{cmd} → {alias_str}\n"
         await update.message.reply_text(reply)
         return
 
@@ -432,6 +448,13 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if alias in _state["aliases"][cmd]:
             with _state_lock:
                 _state["aliases"][cmd].remove(alias)
+                # 如果别名列表为空，考虑完全移除该命令
+                if not _state["aliases"][
+                        cmd] and cmd != "alias":  # 保留 alias 命令本身
+                    del _state["aliases"][cmd]
+                    # 如果有权限记录，也可以移除
+                    if cmd in _state.get("permissions", {}):
+                        del _state["permissions"][cmd]
                 _update_reverse_aliases()
             save_aliases()  # 保存到文件
             await update.message.reply_text(f"已从 /{cmd} 移除别名「{alias}」")

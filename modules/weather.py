@@ -813,7 +813,8 @@ def format_forecast(data, source, location, days=3):
             # 和风天气 API v7 响应结构
             if "code" in data and data["code"] == "200":
                 daily = data.get("daily", [])
-                result = f"*📅 {location} {len(daily)} 天天气预报*\n\n"
+                # 使用用户请求的天数，而不是返回数据的长度
+                result = f"*📅 {location} {days} 天天气预报*\n\n"
 
                 for day in daily[:days]:
                     date = datetime.strptime(day.get("fxDate", ""),
@@ -853,7 +854,8 @@ def format_forecast(data, source, location, days=3):
             daily = result_data.get("daily", {})
             temperature = daily.get("temperature", [])
 
-            result = f"*📅 {location} {len(temperature)} 天天气预报*\n\n"
+            # 使用用户请求的天数，而不是返回数据的长度
+            result = f"*📅 {location} {days} 天天气预报*\n\n"
 
             # 彩云天气的 skycon 转换为中文描述
             skycon_map = {
