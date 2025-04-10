@@ -1475,14 +1475,18 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 处理最终响应 - 使用 HTML 格式
     try:
-        # 删除"思考中"消息
+        # 开始处理响应（不等待删除消息完成）
+        processing_task = asyncio.create_task(
+            TextUtils.send_long_message_html(update, response,
+                                             module_interface))
+
+        # 并行处理：显示美化消息并延迟删除
         await thinking_message.edit_text("✨ 尝试美化格式...")
-        await asyncio.sleep(0.5)  # 短暂延时
+        await asyncio.sleep(0.3)  # 短暂延时
         await thinking_message.delete()
 
-        # 使用 HTML 格式发送响应
-        await TextUtils.send_long_message_html(update, response,
-                                               module_interface)
+        # 等待处理任务完成
+        await processing_task
     except Exception as e:
         module_interface.logger.error(f"处理最终响应失败: {e}")
         # 直接发送纯文本
@@ -1608,14 +1612,18 @@ async def handle_private_message(update: Update,
 
     # 处理最终响应 - 使用 HTML 格式
     try:
-        # 删除"思考中"消息
+        # 开始处理响应（不等待删除消息完成）
+        processing_task = asyncio.create_task(
+            TextUtils.send_long_message_html(update, response,
+                                             module_interface))
+
+        # 并行处理：显示美化消息并延迟删除
         await thinking_message.edit_text("✨ 尝试美化格式...")
-        await asyncio.sleep(0.5)  # 短暂延时
+        await asyncio.sleep(0.3)  # 短暂延时
         await thinking_message.delete()
 
-        # 使用 HTML 格式发送响应
-        await TextUtils.send_long_message_html(update, response,
-                                               module_interface)
+        # 等待处理任务完成
+        await processing_task
     except Exception as e:
         module_interface.logger.error(f"处理最终响应失败: {e}")
         # 直接发送纯文本
