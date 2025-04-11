@@ -83,6 +83,9 @@ class BotEngine:
         # 将自身添加到 bot_data 中
         self.application.bot_data["bot_engine"] = self
 
+        # 添加更新锁，用于协调热更新和处理更新
+        self.update_lock = asyncio.Lock()
+
         # 初始化事件系统
         self.event_system = EventSystem()
         self.application.bot_data["event_system"] = self.event_system
@@ -425,7 +428,12 @@ class BotEngine:
                 for module_name in old_modules - new_modules:
                     self.logger.info(f"检测到模块 {module_name} 已被禁用")
 
-                # 检查已加载模块的文件是否有变化，如果有，执行热更新
+                # 确保存在最后修改时间记录
+                if not hasattr(self, '_last_module_mtime'):
+                    self._last_module_mtime = {}
+
+                # 收集需要热更新的模块
+                modules_to_update = []
                 for module_name in self.module_loader.loaded_modules.keys():
                     if module_name in new_modules:  # 只处理仍然启用的模块
                         # 检查模块文件是否有变化
@@ -433,14 +441,46 @@ class BotEngine:
                             self.module_loader.modules_dir,
                             f"{module_name}.py")
                         if os.path.exists(module_path):
-                            self.logger.info(f"检查模块 {module_name} 是否需要热更新...")
-                            success = self.module_loader.hot_reload_module(
-                                module_name, self.application, self)
-                            if success:
-                                self.logger.info(f"模块 {module_name} 已成功热更新")
+                            # 检查文件是否有变化
+                            try:
+                                current_mtime = os.path.getmtime(module_path)
+                                last_mtime = self._last_module_mtime.get(
+                                    module_name, 0)
+
+                                if current_mtime > last_mtime:
+                                    self.logger.info(
+                                        f"检测到模块 {module_name} 文件变化，将进行热更新")
+                                    modules_to_update.append(module_name)
+                                    # 更新最后修改时间
+                                    self._last_module_mtime[
+                                        module_name] = current_mtime
+                            except OSError as e:
+                                self.logger.warning(
+                                    f"检查模块 {module_name} 文件时出错: {e}")
+
+                # 创建一个延迟任务来执行热更新
+                if modules_to_update:
+                    asyncio.create_task(
+                        self._delayed_hot_reload(modules_to_update))
 
             except Exception as e:
                 self.logger.error(f"处理配置变更时出错: {e}", exc_info=True)
+
+    async def _delayed_hot_reload(self, module_names):
+        """延迟执行模块热更新，确保在当前更新处理完成后进行"""
+        # 等待一小段时间，确保当前的更新处理已完成
+        await asyncio.sleep(0.5)
+
+        # 获取更新锁
+        async with self.update_lock:
+            for module_name in module_names:
+                self.logger.info(f"执行模块 {module_name} 的热更新...")
+                success = await self.module_loader.hot_reload_module(
+                    module_name, self.application, self)
+                if success:
+                    self.logger.info(f"模块 {module_name} 已成功热更新")
+                else:
+                    self.logger.warning(f"模块 {module_name} 热更新失败")
 
     # 模块管理方法
     async def load_single_module(self, module_name):

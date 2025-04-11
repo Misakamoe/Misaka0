@@ -12,7 +12,7 @@ from utils.text_utils import TextUtils
 
 # 模块元数据
 MODULE_NAME = "alias"
-MODULE_VERSION = "1.4.0"
+MODULE_VERSION = "1.5.0"
 MODULE_DESCRIPTION = "命令别名，支持中文命令和动作"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["alias"]  # 只包含英文命令
@@ -84,8 +84,6 @@ _reverse_aliases = {}
 _module_interface = None
 # 消息处理器引用
 _message_handler = None
-# 延迟任务引用
-_delayed_task = None
 # 状态锁
 _state_lock = threading.Lock()
 
@@ -562,24 +560,61 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(help_text, parse_mode="MARKDOWN")
 
 
-# 延迟注册处理器，避免在模块加载时就立即注册
 @error_handler
 async def register_message_handler():
-    """延迟注册消息处理器"""
+    """安全地注册消息处理器"""
     global _module_interface, _message_handler
 
-    # 如果已经注册了处理器，先注销
-    if _message_handler:
-        try:
-            _module_interface.unregister_all_handlers()
-            _message_handler = None
-        except Exception as e:
-            _module_interface.logger.error(f"注销消息处理器失败: {e}")
+    # 获取 bot_engine 引用
+    bot_engine = _module_interface.bot_engine
 
-    # 注册新的消息处理器
-    _message_handler = MessageHandler(filters.Regex(r'^/'), process_message)
-    _module_interface.register_handler(_message_handler, group=100)  # 使用较低的优先级
-    _module_interface.logger.info("别名消息处理器已注册")
+    # 使用更新锁确保安全
+    async with bot_engine.update_lock:
+        # 如果已经注册了处理器，先注销
+        if _message_handler:
+            try:
+                # 安全地注销处理器
+                handlers_to_remove = list(
+                    _module_interface.registered_handlers)
+                _module_interface.registered_handlers = []
+
+                for handler, group in handlers_to_remove:
+                    try:
+                        _module_interface.application.remove_handler(
+                            handler, group)
+                    except Exception as e:
+                        _module_interface.logger.warning(f"移除处理器时出错: {e}")
+
+                _message_handler = None
+            except Exception as e:
+                _module_interface.logger.error(f"注销消息处理器失败: {e}")
+
+        # 注册新的消息处理器
+        _message_handler = MessageHandler(filters.Regex(r'^/'),
+                                          process_message)
+        _module_interface.register_handler(_message_handler,
+                                           group=100)  # 使用较低的优先级
+        _module_interface.logger.info("别名消息处理器已安全注册")
+
+
+# 所有模块加载完成的事件处理
+@error_handler
+async def on_all_modules_loaded(event_type, **event_data):
+    """当所有模块加载完成时调用"""
+    global _module_interface
+
+    # 获取 bot_engine 引用
+    bot_engine = _module_interface.bot_engine
+
+    # 延迟一点时间再注册处理器，确保所有命令都已注册
+    await asyncio.sleep(1)
+
+    # 使用更新锁保护处理器注册
+    async with bot_engine.update_lock:
+        # 注册消息处理器
+        await register_message_handler()
+
+    _module_interface.logger.info("所有模块加载完成，别名系统已更新")
 
 
 # 状态管理函数
@@ -597,32 +632,17 @@ def set_state(module_interface, state):
     module_interface.logger.debug(f"模块状态已更新: {state}")
 
 
-# 所有模块加载完成的事件处理
-@error_handler
-async def on_all_modules_loaded(event_type, **event_data):
-    """当所有模块加载完成时调用"""
-    global _module_interface
-
-    # 延迟一点时间再注册处理器，确保所有命令都已注册
-    await asyncio.sleep(1)
-
-    # 注册消息处理器
-    await register_message_handler()
-
-    _module_interface.logger.info("所有模块加载完成，别名系统已更新")
-
-
 def setup(module_interface):
     """模块初始化"""
-    global _module_interface, _state, _delayed_task
+    global _module_interface, _state
     _module_interface = module_interface
 
-    # 取消之前的任务（如果存在）
-    if _delayed_task and not _delayed_task.done():
-        _delayed_task.cancel()
-
     # 从文件加载别名数据
-    _state = load_aliases()
+    loaded_state = load_aliases()
+    if loaded_state:
+        _state.update(loaded_state)
+
+    # 更新反向映射表
     _update_reverse_aliases()
 
     # 注册命令
@@ -634,17 +654,8 @@ def setup(module_interface):
     module_interface.subscribe_event("all_modules_loaded",
                                      on_all_modules_loaded)
 
-    # 备用方案：延迟注册处理器
-    async def delayed_register():
-        try:
-            await asyncio.sleep(2)
-            await register_message_handler()
-        except asyncio.CancelledError:
-            module_interface.logger.debug("延迟注册任务已取消")
-        except Exception as e:
-            module_interface.logger.error(f"延迟注册任务出错: {e}")
-
-    _delayed_task = asyncio.create_task(delayed_register())
+    # 创建一个延迟任务来安全地注册消息处理器
+    asyncio.create_task(delayed_register_handler(module_interface))
 
     # 同时也保存到模块状态系统（作为备份）
     module_interface.save_state(_state)
@@ -652,26 +663,37 @@ def setup(module_interface):
     module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
 
+async def delayed_register_handler(module_interface):
+    """安全地延迟注册消息处理器"""
+    global _message_handler, _module_interface
+
+    try:
+        # 延迟一段时间，确保所有命令都已注册
+        await asyncio.sleep(2)
+
+        # 获取 bot_engine 引用
+        bot_engine = module_interface.bot_engine
+
+        # 使用更新锁保护处理器注册
+        async with bot_engine.update_lock:
+            # 注册消息处理器
+            _message_handler = MessageHandler(filters.Regex(r'^/'),
+                                              process_message)
+            module_interface.register_handler(_message_handler,
+                                              group=100)  # 使用较低的优先级
+            module_interface.logger.info("别名消息处理器已安全注册")
+    except Exception as e:
+        module_interface.logger.error(f"延迟注册消息处理器失败: {e}")
+
+
 def cleanup(module_interface):
     """模块清理"""
-    global _message_handler, _delayed_task
-
-    # 取消延迟任务
-    if _delayed_task and not _delayed_task.done():
-        _delayed_task.cancel()
+    global _message_handler
 
     # 保存别名数据到文件
     save_aliases()
 
     # 同时也保存到模块状态系统（作为备份）
     module_interface.save_state(_state)
-
-    # 确保注销消息处理器
-    if _message_handler:
-        try:
-            module_interface.unregister_all_handlers()
-            _message_handler = None
-        except Exception as e:
-            module_interface.logger.error(f"清理时注销消息处理器失败: {e}")
 
     module_interface.logger.info(f"模块 {MODULE_NAME} 已清理")

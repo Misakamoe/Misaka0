@@ -42,18 +42,26 @@ class ModuleInterface:
 
     def unregister_all_handlers(self):
         """注销所有注册的处理器和订阅"""
-        # 注销处理器
-        for handler, group in self.registered_handlers:
+        # 创建处理器列表的副本
+        handlers_to_remove = list(self.registered_handlers)
+        self.registered_handlers = []
+
+        # 移除处理器
+        for handler, group in handlers_to_remove:
             try:
                 self.application.remove_handler(handler, group)
             except Exception as e:
-                pass
-        self.registered_handlers.clear()
+                self.logger.warning(f"移除处理器时出错: {e}")
 
         # 取消所有事件订阅
-        for subscription in self.subscriptions:
-            self.event_system.unsubscribe(subscription)
-        self.subscriptions.clear()
+        subscriptions_to_remove = list(self.subscriptions)
+        self.subscriptions = []
+
+        for subscription in subscriptions_to_remove:
+            try:
+                self.event_system.unsubscribe(subscription)
+            except Exception as e:
+                self.logger.warning(f"取消事件订阅时出错: {e}")
 
     # 添加状态管理方法
     def save_state(self, state, format="json"):
@@ -223,7 +231,7 @@ class ModuleLoader:
             force_reload: 是否强制重新加载
             
         Returns:
-            module or None: 导入的模块或None（如果导入失败）
+            module or None: 导入的模块或 None（如果导入失败）
         """
         module = None
 
@@ -361,15 +369,30 @@ class ModuleLoader:
             self.logger.error(f"加载模块 {module_name} 失败: {e}", exc_info=True)
             return None
 
-    def hot_reload_module(self,
-                          module_name,
-                          application=None,
-                          bot_engine=None):
+    async def hot_reload_module(self,
+                                module_name,
+                                application=None,
+                                bot_engine=None):
         """热更新模块，保留状态"""
         if module_name not in self.loaded_modules:
             self.logger.error(f"模块 {module_name} 未加载，无法热更新")
             return False
 
+        # 获取更新锁，确保不会在处理更新时进行热更新
+        if bot_engine and hasattr(bot_engine, 'update_lock'):
+            async with bot_engine.update_lock:
+                return await self._do_hot_reload_async(module_name,
+                                                       application, bot_engine)
+        else:
+            # 如果没有锁，直接执行热更新
+            return await self._do_hot_reload_async(module_name, application,
+                                                   bot_engine)
+
+    async def _do_hot_reload_async(self,
+                                   module_name,
+                                   application=None,
+                                   bot_engine=None):
+        """异步执行热更新逻辑"""
         try:
             # 保存当前模块状态
             old_module_data = self.loaded_modules[module_name]
@@ -382,9 +405,9 @@ class ModuleLoader:
                 module_state = self._get_module_state(old_module,
                                                       old_interface)
 
-            # 注销当前处理器，但不调用 cleanup
+            # 安全地注销当前处理器
             if old_interface:
-                old_interface.unregister_all_handlers()
+                await self._safe_unregister_handlers(old_interface)
 
             # 从 sys.modules 中移除模块，强制重新加载
             for path_template in self.import_paths:
@@ -436,6 +459,29 @@ class ModuleLoader:
         except Exception as e:
             self.logger.error(f"热更新模块 {module_name} 失败: {e}", exc_info=True)
             return False
+
+    async def _safe_unregister_handlers(self, interface):
+        """安全地注销处理器"""
+        # 创建处理器列表的副本
+        handlers_to_remove = list(interface.registered_handlers)
+        interface.registered_handlers = []
+
+        # 移除处理器
+        for handler, group in handlers_to_remove:
+            try:
+                interface.application.remove_handler(handler, group)
+            except Exception as e:
+                self.logger.warning(f"移除处理器时出错: {e}")
+
+        # 取消所有事件订阅
+        subscriptions_to_remove = list(interface.subscriptions)
+        interface.subscriptions = []
+
+        for subscription in subscriptions_to_remove:
+            try:
+                interface.event_system.unsubscribe(subscription)
+            except Exception as e:
+                self.logger.warning(f"取消事件订阅时出错: {e}")
 
     def initialize_module(self, module_name, application, bot_engine):
         """初始化已加载的模块"""
