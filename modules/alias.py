@@ -578,7 +578,7 @@ async def register_message_handler():
 
     # 注册新的消息处理器
     _message_handler = MessageHandler(filters.Regex(r'^/'), process_message)
-    _module_interface.register_handler(_message_handler, group=10)  # 使用较低的优先级
+    _module_interface.register_handler(_message_handler, group=100)  # 使用较低的优先级
     _module_interface.logger.info("别名消息处理器已注册")
 
 
