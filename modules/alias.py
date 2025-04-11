@@ -3,8 +3,8 @@
 import asyncio
 import json
 import os
-import threading
 import random
+import threading
 from telegram import Update
 from telegram.ext import ContextTypes, MessageHandler, filters
 from utils.decorators import error_handler
@@ -20,6 +20,54 @@ MODULE_COMMANDS = ["alias"]  # 只包含英文命令
 # 存储别名数据的文件路径
 _data_file = "config/aliases.json"
 
+# 内置动作模板（不会被保存到配置文件中）
+_action_templates = {
+    "default": [
+        "{user} {action}了 {target}", "{user} {action}了 {target}",
+        "{user} 想{action} {target}", "{user} 正在{action} {target}",
+        "{user} 轻轻地{action}了 {target}", "{user} 悄悄地{action}了 {target}",
+        "{user} 试着{action} {target}", "{user} 偷偷地{action}了 {target}",
+        "{user} 温柔地{action}了 {target}", "{user} 用力地{action}了 {target}",
+        "{user} 开心地{action}着 {target}", "{user} 忍不住{action}了 {target}",
+        "{user} 突然{action}了 {target}", "{user} 缓缓地{action}着 {target}"
+    ],
+    # 特定动作的专属模板
+    "抱": [
+        "{user} 紧紧地抱住了 {target}", "{user} 给了 {target} 一个温暖的拥抱",
+        "{user} 抱了抱 {target}", "{user} 张开双臂抱住了 {target}",
+        "{user} 热情地拥抱了 {target}", "{user} 给了 {target} 一个大大的拥抱"
+    ],
+    "摸": [
+        "{user} 轻轻摸了摸 {target} 的头", "{user} 摸了摸 {target}",
+        "{user} 悄悄地摸了摸 {target}", "{user} 忍不住摸了摸 {target}",
+        "{user} 温柔地摸着 {target}"
+    ],
+    "亲": [
+        "{user} 亲了亲 {target}", "{user} 轻轻地在 {target} 脸上亲了一下",
+        "{user} 偷偷地亲了 {target} 一口", "{user} 送给 {target} 一个吻"
+    ],
+    "拍": [
+        "{user} 拍了拍 {target}", "{user} 轻轻拍了拍 {target} 的肩膀",
+        "{user} 鼓励地拍了拍 {target}", "{user} 友好地拍拍 {target}"
+    ],
+    "戳": [
+        "{user} 戳了戳 {target}", "{user} 悄悄地戳了戳 {target}",
+        "{user} 用手指轻轻戳了戳 {target}", "{user} 忍不住戳了戳 {target}"
+    ],
+    "举": [
+        "{user} 一把举起了 {target}", "{user} 试图举起 {target}",
+        "{user} 轻松地举起了 {target}", "{user} 用尽全力举起了 {target}"
+    ],
+    "抓": [
+        "{user} 抓住了 {target}", "{user} 一把抓住了 {target}",
+        "{user} 紧紧抓住 {target} 不放", "{user} 悄悄地抓住了 {target}"
+    ],
+    "咬": [
+        "{user} 轻轻咬了一口 {target}", "{user} 忍不住咬了咬 {target}",
+        "{user} 假装要咬 {target}", "{user} 张嘴咬了 {target} 一小口"
+    ]
+}
+
 # 模块状态
 _state = {
     "aliases": {
@@ -27,53 +75,6 @@ _state = {
     },
     "permissions": {
         "alias": "super_admin",  # alias 命令需要超级管理员权限
-    },
-    # 内置动作模板，作为彩蛋功能
-    "action_templates": {
-        "default": [
-            "{user} {action}了 {target}", "{user} {action}了 {target}",
-            "{user} 想{action} {target}", "{user} 正在{action} {target}",
-            "{user} 轻轻地{action}了 {target}", "{user} 悄悄地{action}了 {target}",
-            "{user} 试着{action} {target}", "{user} 偷偷地{action}了 {target}",
-            "{user} 温柔地{action}了 {target}", "{user} 用力地{action}了 {target}",
-            "{user} 开心地{action}着 {target}", "{user} 忍不住{action}了 {target}",
-            "{user} 突然{action}了 {target}", "{user} 缓缓地{action}着 {target}"
-        ],
-        # 特定动作的专属模板
-        "抱": [
-            "{user} 紧紧地抱住了 {target}", "{user} 给了 {target} 一个温暖的拥抱",
-            "{user} 抱了抱 {target}", "{user} 张开双臂抱住了 {target}",
-            "{user} 热情地拥抱了 {target}", "{user} 给了 {target} 一个大大的拥抱"
-        ],
-        "摸": [
-            "{user} 轻轻摸了摸 {target} 的头", "{user} 摸了摸 {target}",
-            "{user} 悄悄地摸了摸 {target}", "{user} 忍不住摸了摸 {target}",
-            "{user} 温柔地摸着 {target}"
-        ],
-        "亲": [
-            "{user} 亲了亲 {target}", "{user} 轻轻地在 {target} 脸上亲了一下",
-            "{user} 偷偷地亲了 {target} 一口", "{user} 送给 {target} 一个吻"
-        ],
-        "拍": [
-            "{user} 拍了拍 {target}", "{user} 轻轻拍了拍 {target} 的肩膀",
-            "{user} 鼓励地拍了拍 {target}", "{user} 友好地拍拍 {target}"
-        ],
-        "戳": [
-            "{user} 戳了戳 {target}", "{user} 悄悄地戳了戳 {target}",
-            "{user} 用手指轻轻戳了戳 {target}", "{user} 忍不住戳了戳 {target}"
-        ],
-        "举": [
-            "{user} 一把举起了 {target}", "{user} 试图举起 {target}",
-            "{user} 轻松地举起了 {target}", "{user} 用尽全力举起了 {target}"
-        ],
-        "抓": [
-            "{user} 抓住了 {target}", "{user} 一把抓住了 {target}",
-            "{user} 紧紧抓住 {target} 不放", "{user} 悄悄地抓住了 {target}"
-        ],
-        "咬": [
-            "{user} 轻轻咬了一口 {target}", "{user} 忍不住咬了咬 {target}",
-            "{user} 假装要咬 {target}", "{user} 张嘴咬了 {target} 一小口"
-        ]
     }
 }
 
@@ -109,9 +110,9 @@ def load_aliases():
             # 确保有 permissions 字段
             if "permissions" not in data:
                 data["permissions"] = {"alias": "super_admin"}
-            # 确保有 action_templates 字段
-            if "action_templates" not in data:
-                data["action_templates"] = _state["action_templates"]
+            # 不从文件加载 action_templates
+            if "action_templates" in data:
+                del data["action_templates"]
             return data
     except Exception as e:
         if _module_interface:
@@ -127,8 +128,13 @@ def save_aliases():
         os.makedirs(os.path.dirname(_data_file), exist_ok=True)
 
         try:
+            # 创建一个不包含 action_templates 的副本
+            save_state = _state.copy()
+            if "action_templates" in save_state:
+                del save_state["action_templates"]
+
             with open(_data_file, 'w', encoding='utf-8') as f:
-                json.dump(_state, f, ensure_ascii=False, indent=2)
+                json.dump(save_state, f, ensure_ascii=False, indent=2)
             if _module_interface:
                 _module_interface.logger.debug(f"别名数据已保存到 {_data_file}")
         except Exception as e:
@@ -285,13 +291,12 @@ async def handle_action_command(update: Update,
         target_user = update.message.reply_to_message.from_user
         if target_user:
             target_name = target_user.full_name
-            target_mention = f'<a href="tg://user?id={target_user.id}"> {target_name} </a>'
+            target_mention = f'<a href="tg://user?id={target_user.id}">{target_name}</a>'
 
-    # 获取动作模板
-    templates = _state.get("action_templates", {}).get(
-        action,
-        _state.get("action_templates", {}).get("default",
-                                               ["{user} {action}了 {target}"]))
+    # 获取动作模板（从内置模板中获取）
+    templates = _action_templates.get(
+        action, _action_templates.get("default",
+                                      ["{user} {action}了 {target}"]))
 
     # 随机选择一个模板
     template = random.choice(templates)
