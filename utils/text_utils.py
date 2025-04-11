@@ -369,3 +369,12 @@ class TextUtils:
         text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)
         # 删除整个文本开头和结尾的空白
         return text.strip()
+
+    @staticmethod
+    def escape_html(text):
+        """转义 HTML 特殊字符"""
+        if not text:
+            return ""
+        return (text.replace("&",
+                             "&amp;").replace("<",
+                                              "&lt;").replace(">", "&gt;"))

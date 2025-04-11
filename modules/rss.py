@@ -16,7 +16,7 @@ from utils.text_utils import TextUtils
 
 # 模块元数据
 MODULE_NAME = "rss"
-MODULE_VERSION = "1.1.0"
+MODULE_VERSION = "1.3.0"
 MODULE_DESCRIPTION = "RSS 订阅，智能间隔和健康监控"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["rss"]
@@ -27,6 +27,7 @@ DEFAULT_MAX_INTERVAL = 3600  # 最大检查间隔（秒）
 DEFAULT_INTERVAL = 300  # 默认检查间隔（秒）
 HEALTH_CHECK_THRESHOLD = 5  # 连续失败次数阈值
 MAX_TIMESTAMPS = 10  # 保存的最大时间戳数量
+MAX_ENTRY_IDS = 100  # 每个源保存的最大条目 ID 数量
 
 # 模块状态
 _state = {
@@ -109,13 +110,13 @@ async def rss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示帮助信息"""
-    help_text = ("📢 *RSS 订阅管理*\n\n"
+    help_text = ("<b>📢 RSS 订阅管理</b>\n\n"
                  "可用命令：\n"
-                 "• `/rss list` - 列出当前订阅\n"
-                 "• `/rss add <url> [title]` - 添加订阅\n"
-                 "• `/rss remove <url 或序号>` - 删除订阅\n"
-                 "• `/rss health` - 查看源健康状态\n")
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+                 "• <code>/rss list</code> - 列出当前订阅\n"
+                 "• <code>/rss add &lt;url&gt; [title]</code> - 添加订阅\n"
+                 "• <code>/rss remove &lt;url 或序号&gt;</code> - 删除订阅\n"
+                 "• <code>/rss health</code> - 查看源健康状态\n")
+    await update.message.reply_text(help_text, parse_mode="HTML")
 
 
 async def list_subscriptions(update: Update,
@@ -131,17 +132,17 @@ async def list_subscriptions(update: Update,
         await update.message.reply_text("⚠️ 当前没有 RSS 订阅。")
         return
 
-    text = "📋 *RSS 订阅列表*\n\n"
+    text = "<b>📋 RSS 订阅列表</b>\n\n"
     for i, url in enumerate(subscriptions, 1):
         source_info = _config["sources"].get(url, {})
         title = source_info.get("title", url)
-        # 对标题和 URL 进行转义，防止 Markdown 解析错误
-        title = TextUtils.escape_markdown(title)
-        url = TextUtils.escape_markdown(url)
-        text += f"{i}. *{title}*\n"
-        text += f"   `{url}`\n\n"
+        # 使用 HTML 格式，避免转义问题
+        safe_title = TextUtils.escape_html(title)
+        safe_url = TextUtils.escape_html(url)
+        text += f"{i}. <b>{safe_title}</b>\n"
+        text += f"   <code>{safe_url}</code>\n\n"
 
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 @error_handler
@@ -158,11 +159,12 @@ async def rss_health_command(update: Update,
         await update.message.reply_text("⚠️ 当前没有 RSS 订阅。")
         return
 
-    text = "📊 <b>RSS 源健康状态</b>\n\n"
+    text = "<b>📊 RSS 源健康状态</b>\n\n"
 
     for url in subscriptions:
         source_info = _config["sources"].get(url, {})
         source_title = source_info.get('title', url)
+        safe_title = TextUtils.escape_html(source_title)
 
         health_info = _state["source_health"].get(
             url, {
@@ -192,7 +194,7 @@ async def rss_health_command(update: Update,
         # 检查间隔
         interval = _state["check_intervals"].get(url, DEFAULT_INTERVAL)
 
-        text += (f"{status_icon} <b>{source_title}</b>\n"
+        text += (f"{status_icon} <b>{safe_title}</b>\n"
                  f"  • 状态: {'正常' if health_info['is_healthy'] else '异常'}\n"
                  f"  • 成功率: {success_rate}\n"
                  f"  • 最后成功: {last_success}\n"
@@ -264,26 +266,28 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_config()
 
         # 更新消息，显示成功添加
-        success_text = (
-            f"✅ 成功添加 RSS 订阅\n\n"
-            f"📚 *{TextUtils.escape_markdown(_config['sources'][url]['title'])}*\n"
-            f"🔗 `{TextUtils.escape_markdown(url)}`")
-        await processing_msg.edit_text(success_text, parse_mode="Markdown")
+        safe_title = TextUtils.escape_html(_config['sources'][url]['title'])
+        safe_url = TextUtils.escape_html(url)
+        success_text = (f"✅ 成功添加 RSS 订阅\n\n"
+                        f"📚 <b>{safe_title}</b>\n"
+                        f"🔗 <code>{safe_url}</code>")
+        await processing_msg.edit_text(success_text, parse_mode="HTML")
 
         # 显示最新几条内容的预览
         preview_entries = feed.get('entries', [])[:3]  # 最多显示 3 条
         if preview_entries:
-            preview_text = f"📋 *最新内容预览*\n\n"
+            preview_text = "<b>📋 最新内容预览</b>\n\n"
             for entry in preview_entries:
                 title = entry.get('title', '无标题')
                 published = entry.get('published', '')
 
-                preview_text += f"• *{TextUtils.escape_markdown(title)}*\n"
+                # 使用 HTML 格式，避免转义问题
+                safe_title = TextUtils.escape_html(title)
+                preview_text += f"• <b>{safe_title}</b>\n"
                 if published:
-                    preview_text += f"  ⏰ {TextUtils.escape_markdown(published)}\n"
+                    preview_text += f"  ⏰ {published}\n"
 
-            await update.message.reply_text(preview_text,
-                                            parse_mode="Markdown")
+            await update.message.reply_text(preview_text, parse_mode="HTML")
 
     except Exception as e:
         await update.message.reply_text(f"❌ 添加 RSS 源失败: {str(e)}")
@@ -316,7 +320,9 @@ async def remove_subscription(update: Update,
         if 0 <= index < len(subscriptions):
             url_to_remove = subscriptions[index]
         else:
-            await update.message.reply_text("❌ 无效的序号，请使用 `/rss list` 查看可用的订阅。")
+            await update.message.reply_text(
+                "❌ 无效的序号，请使用 <code>/rss list</code> 查看可用的订阅。",
+                parse_mode="HTML")
             return
     else:
         # 假设是 URL
@@ -327,6 +333,7 @@ async def remove_subscription(update: Update,
         # 获取源标题
         source_title = _config["sources"].get(url_to_remove,
                                               {}).get("title", url_to_remove)
+        safe_title = TextUtils.escape_html(source_title)
 
         subscriptions.remove(url_to_remove)
 
@@ -359,12 +366,12 @@ async def remove_subscription(update: Update,
         # 保存配置
         save_config()
 
-        success_text = (f"✅ 成功删除 RSS 订阅\n\n"
-                        f"📚 *{TextUtils.escape_markdown(source_title)}*")
-        await update.message.reply_text(success_text, parse_mode="Markdown")
+        success_text = f"✅ 成功删除 RSS 订阅\n\n📚 <b>{safe_title}</b>"
+        await update.message.reply_text(success_text, parse_mode="HTML")
     else:
         await update.message.reply_text(
-            "❌ 未找到该 RSS 订阅，请使用 `/rss list` 查看可用的订阅。")
+            "❌ 未找到该 RSS 订阅，请使用 <code>/rss list</code> 查看可用的订阅。",
+            parse_mode="HTML")
 
 
 async def fetch_feed(url):
@@ -386,9 +393,10 @@ async def notify_source_unhealthy(url, source_info, subscribed_chats,
                                   module_interface):
     """通知订阅者源可能有问题"""
     source_title = source_info.get('title', url)
+    safe_title = TextUtils.escape_html(source_title)
     message = (
         f"⚠️ <b>RSS 源可能不可用</b>\n\n"
-        f"RSS 源 <b>{source_title}</b> 连续 {HEALTH_CHECK_THRESHOLD} 次检查失败。\n"
+        f"RSS 源 <b>{safe_title}</b> 连续 {HEALTH_CHECK_THRESHOLD} 次检查失败。\n"
         f"这可能是临时问题，也可能是源已经不再更新或地址变更。\n\n"
         f"如果问题持续存在，建议使用 <code>/rss remove</code> 命令取消订阅。")
 
@@ -405,8 +413,9 @@ async def notify_source_recovered(url, source_info, subscribed_chats,
                                   module_interface):
     """通知订阅者源已恢复"""
     source_title = source_info.get('title', url)
+    safe_title = TextUtils.escape_html(source_title)
     message = (f"✅ <b>RSS 源已恢复</b>\n\n"
-               f"之前报告有问题的 RSS 源 <b>{source_title}</b> 现在已经恢复正常。")
+               f"之前报告有问题的 RSS 源 <b>{safe_title}</b> 现在已经恢复正常。")
 
     # 发送通知给所有订阅者
     for chat_id, _ in subscribed_chats:
@@ -415,6 +424,30 @@ async def notify_source_recovered(url, source_info, subscribed_chats,
                 chat_id=chat_id, text=message, parse_mode="HTML")
         except Exception as e:
             module_interface.logger.error(f"向聊天 {chat_id} 发送源恢复通知失败: {e}")
+
+
+async def initialize_entry_ids(module_interface):
+    """启动时初始化所有源的条目 ID，将现有条目标记为已推送"""
+    module_interface.logger.info("正在初始化所有 RSS 源的条目 ID...")
+
+    for url, source_info in _config["sources"].items():
+        try:
+            feed = await fetch_feed(url)
+            if feed and feed.get('entries'):
+                # 记录所有条目的 ID
+                _state["last_entry_ids"][url] = [
+                    entry.get('id', '') or entry.get('link', '')
+                    for entry in feed.get('entries')
+                ]
+                module_interface.logger.info(
+                    f"已初始化源 '{source_info.get('title', url)}' 的 {len(_state['last_entry_ids'][url])} 个条目 ID"
+                )
+        except Exception as e:
+            module_interface.logger.error(f"初始化源 {url} 的条目 ID 时出错: {e}")
+
+    # 保存状态
+    module_interface.save_state(_state)
+    module_interface.logger.info("所有 RSS 源的条目 ID 初始化完成")
 
 
 async def check_updates(module_interface):
@@ -458,6 +491,11 @@ async def check_updates(module_interface):
 
 async def check_feed(url, source_info, module_interface):
     """检查单个 RSS 源的更新"""
+    # 如果这个源的条目 ID 列表为空，说明可能还没初始化完成，跳过检查
+    if url not in _state["last_entry_ids"] or not _state["last_entry_ids"][url]:
+        module_interface.logger.debug(f"源 {url} 的条目 ID 列表为空，跳过检查")
+        return
+
     try:
         # 更新最后检查时间
         current_time = datetime.now().timestamp()
@@ -526,31 +564,24 @@ async def check_feed(url, source_info, module_interface):
         # 获取上次推送的条目 ID
         last_entry_ids = _state["last_entry_ids"].get(url, [])
 
-        # 判断是否是首次检查
-        is_first_check = not last_entry_ids
-
         # 找出新条目
         new_entries = []
         new_entry_ids = []
 
         for entry in feed.get('entries', []):
+            # 获取条目 ID
             entry_id = entry.get('id', '')
             if not entry_id:
                 entry_id = entry.get('link', '')
 
+            # 只检查 ID，不使用时间过滤
             if entry_id and entry_id not in last_entry_ids:
                 new_entries.append(entry)
                 new_entry_ids.append(entry_id)
 
-        # 更新最后条目 ID（最多保存 50 个 ID 防止过大）
-        _state["last_entry_ids"][url] = (new_entry_ids + last_entry_ids)[:50]
-
-        # 如果是首次检查，不发送任何通知，只记录条目 ID
-        if is_first_check:
-            module_interface.logger.info(
-                f"首次检查源 '{source_info.get('title', url)}'，记录 {len(new_entry_ids)} 个条目 ID 但不发送通知"
-            )
-            new_entries = []  # 清空新条目列表，防止发送
+        # 更新最后条目 ID（最多保存 MAX_ENTRY_IDS 个 ID 防止过大）
+        _state["last_entry_ids"][url] = (new_entry_ids +
+                                         last_entry_ids)[:MAX_ENTRY_IDS]
 
         # 如果有新条目，更新时间戳并调整检查间隔
         if new_entries:
@@ -655,14 +686,18 @@ async def send_entry(entry, source_info, url, subscribed_chats,
                 image_url = img_match.group(1)
 
         # 使用 HTML 格式发送消息
-        html_content = (f"<b>📰 {title}</b>\n\n"
-                        f"{content}\n\n")
+        safe_title = TextUtils.escape_html(title)
+        safe_content = TextUtils.escape_html(content)
+        source_title = source_info.get('title', url)
+        safe_source_title = TextUtils.escape_html(source_title)
+
+        html_content = (f"<b>📰 {safe_title}</b>\n\n"
+                        f"{safe_content}\n\n")
 
         if published:
             html_content += f"⏰ {published}\n"
 
-        source_title = source_info.get('title', url)
-        html_content += f"📚 来自: <b>{source_title}</b>"
+        html_content += f"📚 来自: <b>{safe_source_title}</b>"
 
         # 创建链接按钮
         keyboard = None
@@ -746,6 +781,19 @@ def set_state(module_interface, state):
     module_interface.logger.debug(f"模块状态已更新: {state}")
 
 
+async def startup_sequence(module_interface):
+    """启动序列：先初始化所有源的条目 ID，然后启动检查任务"""
+    try:
+        # 先执行初始化
+        await initialize_entry_ids(module_interface)
+
+        # 初始化完成后，再启动检查任务
+        module_interface.logger.info("初始化完成，开始定期检查 RSS 更新")
+        await check_updates(module_interface)
+    except Exception as e:
+        module_interface.logger.error(f"RSS 启动序列出错: {e}")
+
+
 def setup(module_interface):
     """模块初始化"""
     global _check_task, _module_interface
@@ -783,8 +831,8 @@ def setup(module_interface):
                                       rss_command,
                                       admin_only="group_admin")
 
-    # 启动检查任务
-    _check_task = asyncio.create_task(check_updates(module_interface))
+    # 创建启动任务，先初始化再启动检查
+    _check_task = asyncio.create_task(startup_sequence(module_interface))
 
     module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
