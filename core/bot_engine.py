@@ -5,7 +5,10 @@ import os
 import importlib
 import shutil
 import asyncio
+import gc
+import time
 from datetime import datetime
+import telegram
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters, ChatMemberHandler
 import threading
@@ -17,6 +20,7 @@ from utils.logger import setup_logger
 from utils.decorators import error_handler, permission_check, group_check, module_check
 from utils.event_system import EventSystem
 from utils.text_utils import TextUtils
+from utils.session_manager import SessionManager
 
 
 class BotEngine:
@@ -34,6 +38,10 @@ class BotEngine:
             "BotEngine",
             self.config_manager.main_config.get("log_level", "INFO"))
 
+        # 降低网络错误的日志级别，减少日志噪音
+        logging.getLogger("telegram.request").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+
         # 获取 Token
         self.token = self.config_manager.get_token()
         if not self.token:
@@ -48,8 +56,26 @@ class BotEngine:
                 "未设置有效的管理员 ID，请在 config/config.json 中设置 admin_ids")
             raise ValueError("管理员 ID 未设置或无效")
 
+        # 从配置中获取网络设置
+        network_config = self.config_manager.main_config.get("network", {})
+        self.connect_timeout = network_config.get("connect_timeout", 20.0)
+        self.read_timeout = network_config.get("read_timeout", 20.0)
+        self.write_timeout = network_config.get("write_timeout", 20.0)
+        self.poll_interval = network_config.get("poll_interval", 1.0)
+        self.retry_delay = network_config.get("retry_delay", 5)
+
+        # 检查是否配置了代理
+        self.proxy_url = self.config_manager.main_config.get("proxy_url", None)
+
         # 初始化 Telegram Application
-        self.application = Application.builder().token(self.token).build()
+        builder = Application.builder().token(self.token)
+
+        # 如果配置了代理，应用代理设置
+        if self.proxy_url:
+            self.logger.info(f"使用代理: {self.proxy_url}")
+            builder = builder.proxy_url(self.proxy_url)
+
+        self.application = builder.build()
 
         # 将配置管理器添加到 bot_data 中以便在回调中访问
         self.application.bot_data["config_manager"] = self.config_manager
@@ -63,6 +89,10 @@ class BotEngine:
 
         # 初始化模块加载器
         self.module_loader = ModuleLoader()
+
+        # 初始化会话管理器
+        self.session_manager = SessionManager()
+        self.application.bot_data["session_manager"] = self.session_manager
 
         # 初始化命令处理器
         self.command_processor = CommandProcessor(self.application)
@@ -91,6 +121,17 @@ class BotEngine:
         self.config_watch_task = None
         self.config_change_lock = asyncio.Lock()
         self.last_config_change = {}  # 记录最后修改时间
+
+        # 资源清理任务
+        self.cleanup_task = None
+
+        # 初始化统计数据
+        self.stats = {
+            "start_time": time.time(),
+            "last_cleanup": time.time(),
+            "memory_usage": [],
+            "module_stats": {}
+        }
 
         self.logger.info("Bot 引擎初始化完成")
 
@@ -147,6 +188,119 @@ class BotEngine:
         if update and isinstance(update, Update) and update.effective_message:
             await update.effective_message.reply_text("处理命令时发生错误，请查看日志获取详情。")
 
+    # 轮询错误回调
+    def polling_error_callback(self, error):
+        """轮询错误回调"""
+        if isinstance(error, telegram.error.NetworkError):
+            # 对于网络错误，只记录警告而不是错误
+            self.logger.warning(f"网络连接暂时中断: {error}，将自动重试")
+            return
+
+        # 对于其他错误，正常记录
+        self.logger.error(f"轮询时发生错误: {error}", exc_info=True)
+
+    # 资源清理
+    async def cleanup_resources(self):
+        """定期清理资源，减少内存占用"""
+        cleanup_interval = 3600  # 每小时清理一次
+
+        while True:
+            try:
+                await asyncio.sleep(cleanup_interval)
+
+                start_time = time.time()
+                self.logger.info("开始执行资源清理...")
+
+                # 获取清理前的内存使用情况
+                before_mem = self._get_memory_usage()
+
+                # 1. 触发 Python 垃圾回收
+                collected = gc.collect()
+                self.logger.debug(f"垃圾回收完成，回收了 {collected} 个对象")
+
+                # 2. 清理未使用的模块
+                await self._cleanup_unused_modules()
+
+                # 3. 清理会话管理器中的过期会话
+                session_count = self.session_manager.cleanup()
+                if session_count > 0:
+                    self.logger.info(f"已清理 {session_count} 个过期会话")
+
+                # 获取清理后的内存使用情况
+                after_mem = self._get_memory_usage()
+                mem_diff = before_mem - after_mem
+
+                # 更新统计信息
+                self.stats["last_cleanup"] = time.time()
+                self.stats["memory_usage"].append({
+                    "time": time.time(),
+                    "before": before_mem,
+                    "after": after_mem,
+                    "diff": mem_diff
+                })
+
+                # 只保留最近的 10 条记录
+                if len(self.stats["memory_usage"]) > 10:
+                    self.stats["memory_usage"] = self.stats["memory_usage"][
+                        -10:]
+
+                elapsed = time.time() - start_time
+                self.logger.info(
+                    f"资源清理完成，耗时 {elapsed:.2f} 秒，释放了 {mem_diff:.2f} MB 内存")
+
+            except asyncio.CancelledError:
+                self.logger.info("资源清理任务已取消")
+                break
+            except Exception as e:
+                self.logger.error(f"资源清理过程中出错: {e}", exc_info=True)
+                # 出错后等待较短时间再重试
+                await asyncio.sleep(300)
+
+    def _get_memory_usage(self):
+        """获取当前进程的内存使用量（MB）"""
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            return mem_info.rss / 1024 / 1024  # 转换为 MB
+        except ImportError:
+            # 如果没有安装 psutil，返回 -1
+            return -1
+        except Exception as e:
+            self.logger.error(f"获取内存使用量时出错: {e}")
+            return -1
+
+    async def _cleanup_unused_modules(self):
+        """清理未使用的模块"""
+        # 获取全局和群组启用的所有模块
+        enabled_modules = set(self.config_manager.get_enabled_modules())
+
+        # 获取所有群组的启用模块
+        for modules in self.config_manager.modules_config.get(
+                "group_modules", {}).values():
+            enabled_modules.update(modules)
+
+        # 检查已加载但未启用的模块
+        unloaded_count = 0
+        for module_name in list(self.module_loader.loaded_modules.keys()):
+            # 跳过示例模块
+            if module_name in self.EXAMPLE_MODULES:
+                continue
+
+            # 如果模块未启用，卸载它
+            if module_name not in enabled_modules:
+                try:
+                    if await self.unload_single_module(module_name):
+                        unloaded_count += 1
+                        self.logger.info(f"已卸载未使用的模块: {module_name}")
+                except Exception as e:
+                    self.logger.error(f"卸载模块 {module_name} 时出错: {e}")
+
+        if unloaded_count > 0:
+            self.logger.info(f"共卸载了 {unloaded_count} 个未使用的模块")
+
+        return unloaded_count
+
     # 配置监控
     async def watch_config_changes(self):
         """监控配置文件变化的异步任务"""
@@ -155,45 +309,69 @@ class BotEngine:
         modules_config_path = os.path.join(config_dir, "modules.json")
 
         # 初始化文件最后修改时间
-        self.last_config_change[main_config_path] = os.path.getmtime(
-            main_config_path) if os.path.exists(main_config_path) else 0
-        self.last_config_change[modules_config_path] = os.path.getmtime(
-            modules_config_path) if os.path.exists(modules_config_path) else 0
+        self.last_config_change = {
+            main_config_path:
+            os.path.getmtime(main_config_path)
+            if os.path.exists(main_config_path) else 0,
+            modules_config_path:
+            os.path.getmtime(modules_config_path)
+            if os.path.exists(modules_config_path) else 0
+        }
 
         self.logger.info(f"开始监控配置文件变化，目录: {config_dir}")
 
         # 防抖动变量
         debounce_timers = {}
 
+        # 使用更长的检查间隔以减少资源消耗
+        check_interval = 5  # 5 秒检查一次
+        error_backoff = 1  # 出错后的回退系数
+
         try:
             while True:
                 try:
-                    # 检查两个配置文件
+                    changed_files = []
+
+                    # 检查配置文件
                     for config_path in [main_config_path, modules_config_path]:
-                        if os.path.exists(config_path):
+                        if not os.path.exists(config_path):
+                            continue
+
+                        try:
                             current_mtime = os.path.getmtime(config_path)
-                            if current_mtime > self.last_config_change[
-                                    config_path]:
+                            if current_mtime > self.last_config_change.get(
+                                    config_path, 0):
                                 self.logger.debug(f"检测到配置文件变化: {config_path}")
                                 self.last_config_change[
                                     config_path] = current_mtime
+                                changed_files.append(config_path)
+                        except (OSError, IOError) as e:
+                            self.logger.warning(f"检查文件 {config_path} 时出错: {e}")
 
-                                # 取消之前的定时器（如果存在）
-                                if config_path in debounce_timers and not debounce_timers[
-                                        config_path].done():
-                                    debounce_timers[config_path].cancel()
+                    # 处理变更的文件
+                    for config_path in changed_files:
+                        # 取消之前的定时器（如果存在）
+                        if config_path in debounce_timers and not debounce_timers[
+                                config_path].done():
+                            debounce_timers[config_path].cancel()
 
-                                # 创建新的延迟处理任务
-                                debounce_timers[
-                                    config_path] = asyncio.create_task(
-                                        self.debounce_config_change(
-                                            config_path, 1.0))
+                        # 创建新的延迟处理任务
+                        debounce_timers[config_path] = asyncio.create_task(
+                            self.debounce_config_change(config_path, 1.0))
 
-                    # 短暂休眠以减少CPU使用
-                    await asyncio.sleep(1)
+                    # 重置错误回退
+                    error_backoff = 1
+
+                    # 等待下一次检查
+                    await asyncio.sleep(check_interval)
+
                 except Exception as e:
                     self.logger.error(f"监控配置文件时出错: {e}", exc_info=True)
-                    await asyncio.sleep(5)  # 出错后等待更长时间再重试
+                    # 出错后使用指数回退策略
+                    wait_time = check_interval * error_backoff
+                    error_backoff = min(error_backoff * 2, 60)  # 最多等待5分钟
+                    await asyncio.sleep(wait_time)
+
         except asyncio.CancelledError:
             self.logger.info("配置文件监控任务已取消")
             # 取消所有未完成的防抖动任务
@@ -344,6 +522,75 @@ class BotEngine:
 
         if not all_modules:
             return
+
+        # 检查依赖冲突 - 使用轻量级方式获取元数据
+        dependency_graph = {}
+        circular_dependencies = []
+
+        # 构建依赖图
+        for module_name in all_modules:
+            try:
+                # 不完全加载模块，只提取元数据
+                module_path = os.path.join(self.module_loader.modules_dir,
+                                           f"{module_name}.py")
+                if os.path.exists(module_path):
+                    # 读取模块文件
+                    with open(module_path, 'r', encoding='utf-8') as f:
+                        module_code = f.read()
+
+                    # 提取依赖信息
+                    dependencies = []
+                    for line in module_code.split('\n'):
+                        if line.strip().startswith('MODULE_DEPENDENCIES'):
+                            try:
+                                # 使用安全的方式评估依赖列表
+                                deps_str = line.split('=')[1].strip()
+                                if deps_str.startswith(
+                                        '[') and deps_str.endswith(']'):
+                                    deps_items = deps_str[1:-1].split(',')
+                                    dependencies = [
+                                        dep.strip(' \'"[]')
+                                        for dep in deps_items if dep.strip()
+                                    ]
+                                break
+                            except Exception as e:
+                                self.logger.error(
+                                    f"解析模块 {module_name} 的依赖信息失败: {e}")
+                                dependencies = []
+
+                    dependency_graph[module_name] = dependencies
+                    self.logger.debug(f"模块 {module_name} 依赖: {dependencies}")
+            except Exception as e:
+                self.logger.error(f"读取模块 {module_name} 的依赖信息失败: {e}")
+                dependency_graph[module_name] = []
+
+        # 检测循环依赖
+        def check_circular_dependency(module, path=None):
+            if path is None:
+                path = []
+
+            if module in path:
+                # 发现循环依赖
+                cycle_path = path[path.index(module):] + [module]
+                circular_path = " -> ".join(cycle_path)
+                if circular_path not in circular_dependencies:
+                    circular_dependencies.append(circular_path)
+                    self.logger.error(f"检测到循环依赖: {circular_path}")
+                return True
+
+            path = path + [module]
+            for dep in dependency_graph.get(module, []):
+                if dep in dependency_graph and check_circular_dependency(
+                        dep, path):
+                    return True
+            return False
+
+        # 检查每个模块的依赖
+        for module in dependency_graph:
+            check_circular_dependency(module)
+
+        if circular_dependencies:
+            self.logger.warning("由于存在循环依赖，某些模块可能无法正确加载")
 
         # 创建加载任务列表并执行
         load_tasks = [
@@ -547,8 +794,9 @@ class BotEngine:
         core_commands_all = ["start", "help", "id", "modules",
                              "commands"]  # 所有用户可用
         core_commands_admin = ["enable", "disable"]  # 管理员可用
-        core_commands_super = ["listgroups", "addgroup",
-                               "removegroup"]  # 超级管理员可用
+        core_commands_super = [
+            "listgroups", "addgroup", "removegroup", "stats"
+        ]  # 超级管理员可用
 
         # 分类命令
         available_commands = []
@@ -634,6 +882,49 @@ class BotEngine:
 
         # 使用通用方法发送 Markdown 消息
         await self._send_markdown_message(update, message)
+
+    @error_handler
+    async def stats_command(self, update: Update,
+                            context: ContextTypes.DEFAULT_TYPE):
+        """显示机器人统计信息"""
+        # 计算运行时间
+        uptime_seconds = time.time() - self.stats["start_time"]
+        days, remainder = divmod(uptime_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{int(days)} 天 {int(hours)} 小时 {int(minutes)} 分钟"
+
+        # 获取内存使用情况
+        current_mem = self._get_memory_usage()
+
+        # 获取活跃会话数量
+        active_sessions = await self.session_manager.get_active_sessions_count(
+        )
+
+        # 获取已加载模块数量
+        loaded_modules = len(self.module_loader.loaded_modules)
+
+        # 构建统计信息
+        message = f"📊 *机器人统计信息*\n\n"
+        message += f"⏱️ 运行时间: {uptime_str}\n"
+        message += f"🧠 内存使用: {current_mem:.2f} MB\n"
+        message += f"👥 活跃会话: {active_sessions}\n"
+        message += f"📦 已加载模块: {loaded_modules}\n"
+
+        # 最后清理时间
+        if self.stats.get("last_cleanup", 0) > 0:
+            last_cleanup = datetime.fromtimestamp(
+                self.stats["last_cleanup"]).strftime("%Y-%m-%d %H:%M:%S")
+            message += f"🧹 最后清理: {last_cleanup}\n"
+
+        # 内存清理效果
+        if self.stats.get("memory_usage") and len(
+                self.stats["memory_usage"]) > 0:
+            last_cleanup = self.stats["memory_usage"][-1]
+            if last_cleanup.get("diff", 0) > 0:
+                message += f"📉 最近清理释放: {last_cleanup['diff']:.2f} MB\n"
+
+        await update.message.reply_text(message, parse_mode="MARKDOWN")
 
     async def get_id_command(self, update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
@@ -869,12 +1160,23 @@ class BotEngine:
 
     async def handle_all_messages(self, update: Update,
                                   context: ContextTypes.DEFAULT_TYPE):
-        """处理所有消息，用于检测超级管理员在未授权群组的活动"""
+        """处理所有消息，用于检测超级管理员在未授权群组的活动和会话状态管理"""
         if not update.message or not update.effective_chat:
             return
 
         chat = update.effective_chat
         user = update.effective_user
+        text = update.message.text if update.message.text else ""
+
+        # 检查用户是否在会话中
+        user_id = user.id
+        state = await self.session_manager.get(user_id, "state")
+
+        # 如果用户在会话中，处理会话状态
+        if state:
+            # 这里可以添加会话状态处理逻辑
+            # 例如调用相应的处理函数或模块
+            pass
 
         # 只处理群组消息
         if chat.type not in ["group", "supergroup"]:
@@ -910,13 +1212,28 @@ class BotEngine:
             self.watch_config_changes())
         self.logger.info("已启动配置文件监控任务")
 
-        # 启动轮询
+        # 启动资源清理任务
+        self.cleanup_task = asyncio.create_task(self.cleanup_resources())
+        self.logger.info("已启动资源清理任务")
+
+        # 启动会话管理器清理任务
+        await self.session_manager.start_cleanup()
+
+        # 启动轮询，设置更健壮的轮询参数
         self.logger.info("启动 Bot 轮询...")
 
         # 初始化和启动应用
         await self.application.initialize()
         await self.application.start()
-        await self.application.updater.start_polling()
+
+        # 配置更健壮的轮询参数
+        await self.application.updater.start_polling(
+            poll_interval=self.poll_interval,
+            timeout=self.read_timeout,
+            bootstrap_retries=5,
+            drop_pending_updates=False,
+            allowed_updates=None,
+            error_callback=self.polling_error_callback)
 
         self.logger.info("Bot 已成功启动，按 Ctrl+C 或发送中断信号来停止")
 
@@ -933,21 +1250,45 @@ class BotEngine:
                 pass
             self.logger.info("配置文件监控任务已停止")
 
+        # 停止资源清理任务
+        if hasattr(self, 'cleanup_task'
+                   ) and self.cleanup_task and not self.cleanup_task.done():
+            self.cleanup_task.cancel()
+            try:
+                await self.cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self.logger.info("资源清理任务已停止")
+
+        # 停止会话管理器清理任务
+        if hasattr(self, 'session_manager'):
+            await self.session_manager.stop_cleanup()
+
         # 卸载所有模块
         for module_name in list(self.module_loader.loaded_modules.keys()):
             await self.unload_single_module(module_name)
 
         # 正确顺序停止 Telegram 应用
         try:
-            # 首先停止轮询
-            if self.application.updater and self.application.updater.running:
+            # 首先检查 updater 是否在运行
+            if hasattr(self.application,
+                       'updater') and self.application.updater and getattr(
+                           self.application.updater, 'running', False):
                 await self.application.updater.stop()
 
-            # 然后停止应用
-            await self.application.stop()
+            # 然后检查应用是否在运行
+            try:
+                await self.application.stop()
+            except RuntimeError as e:
+                # 忽略 "Application is not running" 错误
+                if "not running" not in str(e).lower():
+                    raise
 
             # 最后关闭应用
-            await self.application.shutdown()
+            try:
+                await self.application.shutdown()
+            except Exception as e:
+                self.logger.warning(f"关闭应用时出现警告: {e}")
 
             self.logger.info("Bot 已成功停止")
         except Exception as e:

@@ -1,4 +1,5 @@
 # modules/weather.py
+
 from telegram import Update
 from telegram.ext import ContextTypes, CallbackQueryHandler
 from utils.decorators import error_handler, permission_check
@@ -20,7 +21,7 @@ MODULE_COMMANDS = ["weather", "forecast", "weatherset"]
 _state = {
     "user_locations": {},  # 用户默认位置
     "active_source": "openweathermap",  # 默认天气源
-    "api_keys": {}  # 各源的API密钥
+    "api_keys": {}  # 各源的 API 密钥
 }
 
 # 支持的天气源
@@ -79,6 +80,7 @@ WEATHER_ICONS = {
     "多云": "⛅",
     "局部多云": "🌤️",
     "晴间多云": "🌤️",
+    "阴": "☁️",
     "阴天": "☁️",
     "PARTLY_CLOUDY_DAY": "🌤️",
     "PARTLY_CLOUDY_NIGHT": "☁️",

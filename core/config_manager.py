@@ -187,6 +187,16 @@ class ConfigManager:
             if 123456789 in admin_ids:
                 self.logger.warning("配置中的管理员 ID 包含示例值 123456789，请修改为真实值")
 
+        # 验证网络配置
+        network = config.get("network", {})
+        if network:
+            # 只验证轮询间隔
+            poll_interval = network.get("poll_interval", 0)
+            if poll_interval and (poll_interval < 0.1 or poll_interval > 10):
+                self.logger.warning(
+                    f"网络配置中的 poll_interval 值 {poll_interval} 可能不合理，建议范围: 0.1-10 秒"
+                )
+
     def save_main_config(self):
         """保存主配置"""
         success = self._save_json_file(self.main_config_path, self.main_config)

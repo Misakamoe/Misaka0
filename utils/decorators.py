@@ -4,6 +4,7 @@ import functools
 import logging
 import traceback
 import inspect
+import telegram
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -17,6 +18,20 @@ def error_handler(func):
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
+        except telegram.error.NetworkError as e:
+            # 对网络错误只记录警告
+            logger.warning(f"网络错误: {e}")
+
+            # 向用户发送友好的错误消息
+            update = None
+            for arg in args:
+                if isinstance(arg, Update):
+                    update = arg
+                    break
+
+            if update and update.effective_message:
+                await update.effective_message.reply_text("网络连接暂时中断，请稍后再试。")
+            return None
         except Exception as e:
             # 记录详细错误信息
             logger.error(f"处理 {func.__name__} 时出错: {e}")

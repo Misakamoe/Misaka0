@@ -103,7 +103,7 @@ class ModuleInterface:
         
         Args:
             event_type: 事件类型
-            timeout: 超时时间（秒），None表示无限等待
+            timeout: 超时时间（秒），None 表示无限等待
             **event_data: 事件数据
             
         Returns:
@@ -283,9 +283,13 @@ class ModuleLoader:
             interface: 模块接口
             
         Returns:
-            任意: 模块状态或None
+            任意: 模块状态或 None
         """
         try:
+            if interface is None:
+                self.logger.debug(f"无法获取模块状态: 接口为 None")
+                return None
+
             if hasattr(module, "get_state") and callable(module.get_state):
                 return module.get_state(interface)
             return None
@@ -373,7 +377,10 @@ class ModuleLoader:
             old_interface = old_module_data.get("interface")
 
             # 保存模块状态
-            module_state = self._get_module_state(old_module, old_interface)
+            module_state = None
+            if old_interface:
+                module_state = self._get_module_state(old_module,
+                                                      old_interface)
 
             # 注销当前处理器，但不调用 cleanup
             if old_interface:
@@ -467,11 +474,46 @@ class ModuleLoader:
             # 如果模块有 cleanup 方法，调用它
             if hasattr(module, "cleanup") and callable(module.cleanup):
                 try:
+                    # 始终传递 interface 参数，因为模块的 cleanup 方法需要它
                     if interface:
                         module.cleanup(interface)
                     else:
-                        # 兼容旧接口
-                        module.cleanup(None, None)
+                        # 如果没有接口，创建一个临时的空接口
+                        class EmptyInterface:
+
+                            def __init__(self):
+                                self.logger = logging.getLogger(
+                                    "EmptyInterface")
+
+                            def save_state(self, state, format="json"):
+                                """模拟保存状态"""
+                                self.logger.debug(f"模拟保存状态: {state}")
+                                return True
+
+                            def load_state(self, default=None, format="json"):
+                                """模拟加载状态"""
+                                self.logger.debug("模拟加载状态")
+                                return default
+
+                            def delete_state(self, format="json"):
+                                """模拟删除状态"""
+                                self.logger.debug("模拟删除状态")
+                                return True
+
+                            def get_module_interface(self, module_name):
+                                """模拟获取模块接口"""
+                                return None
+
+                            def register_command(self, *args, **kwargs):
+                                """模拟注册命令"""
+                                pass
+
+                            def unregister_all_handlers(self):
+                                """模拟注销所有处理器"""
+                                pass
+
+                        empty_interface = EmptyInterface()
+                        module.cleanup(empty_interface)
                 except Exception as e:
                     self.logger.error(f"清理模块 {module_name} 失败: {e}")
 
