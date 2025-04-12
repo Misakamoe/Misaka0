@@ -143,7 +143,7 @@ class BotEngine:
         # 注册命令分页回调处理器
         self.application.add_handler(
             CallbackQueryHandler(self.handle_command_page_callback,
-                                 pattern=r"^cmd_page_\d+$|^cmd_noop$"))
+                                 pattern=r"^cmdpage:\d+:\-?\d+$|^cmdnoop$"))
 
         self.logger.info("Bot 引擎初始化完成")
 
@@ -869,17 +869,32 @@ class BotEngine:
             except Exception:
                 pass
 
+        # 收集命令并分类
+        available_commands, admin_commands, super_admin_commands, module_commands = \
+            self._collect_available_commands(chat_id, is_super_admin, is_group_admin)
+
+        # 生成页面内容
+        pages = self._generate_command_pages(available_commands,
+                                             admin_commands,
+                                             super_admin_commands,
+                                             module_commands, chat_type)
+
+        # 显示第一页
+        await self._display_command_page(update, context, pages, 0)
+
+    def _collect_available_commands(self, chat_id, is_super_admin,
+                                    is_group_admin):
+        """收集并分类可用的命令"""
         # 收集所有命令
         all_commands = self.command_processor.command_handlers.keys()
         command_metadata = self.command_processor.command_metadata
 
         # 核心命令分类
-        core_commands_all = ["start", "help", "id", "modules",
-                             "commands"]  # 所有用户可用
-        core_commands_admin = ["enable", "disable"]  # 管理员可用
+        core_commands_all = ["start", "help", "id", "modules", "commands"]
+        core_commands_admin = ["enable", "disable"]
         core_commands_super = [
             "listgroups", "addgroup", "removegroup", "stats", "health"
-        ]  # 超级管理员可用
+        ]
 
         # 分类命令
         available_commands = []
@@ -910,7 +925,7 @@ class BotEngine:
                     module_cmds = module_data["metadata"].get("commands", [])
                     if cmd in module_cmds:
                         # 检查模块是否在当前聊天中启用
-                        if config_manager.is_module_enabled_for_chat(
+                        if self.config_manager.is_module_enabled_for_chat(
                                 module_name, chat_id):
                             if module_name not in module_commands:
                                 module_commands[module_name] = {
@@ -923,8 +938,13 @@ class BotEngine:
                                 cmd)
                         break
 
-        # 准备分页数据 - 基于内容高度而不是固定的模块分页
-        # 每页最大行数（Telegram 消息的合理高度限制）
+        return available_commands, admin_commands, super_admin_commands, module_commands
+
+    def _generate_command_pages(self, available_commands, admin_commands,
+                                super_admin_commands, module_commands,
+                                chat_type):
+        """生成命令页面内容"""
+        # 每页最大行数
         MAX_LINES_PER_PAGE = 20
 
         pages = []
@@ -1045,32 +1065,22 @@ class BotEngine:
         if not pages:
             pages.append(header + "无已注册命令\n")
 
-        # 存储分页数据到用户会话
-        await self.session_manager.set(user_id, "command_pages", pages)
-        await self.session_manager.set(user_id, "current_page", 0)
+        return pages
 
-        # 显示第一页
-        await self._show_command_page(update, context, 0)
-
-    async def _show_command_page(self, update: Update,
-                                 context: ContextTypes.DEFAULT_TYPE,
-                                 page_index):
+    async def _display_command_page(self, update: Update,
+                                    context: ContextTypes.DEFAULT_TYPE, pages,
+                                    page_index):
         """显示指定页的命令列表"""
-        user_id = update.effective_user.id
-
-        # 获取分页数据
-        pages = await self.session_manager.get(user_id, "command_pages", [])
-
         if not pages:
-            # 检查是回调查询还是直接消息
+            text = "无可用命令"
             if update.callback_query:
                 await update.callback_query.answer("无可用命令")
                 try:
-                    await update.callback_query.edit_message_text("无可用命令")
+                    await update.callback_query.edit_message_text(text)
                 except Exception:
                     pass
             else:
-                await update.message.reply_text("无可用命令")
+                await update.message.reply_text(text)
             return
 
         # 确保页码有效
@@ -1079,99 +1089,110 @@ class BotEngine:
         # 获取当前页内容
         page_content = pages[page_index]
 
-        # 构建消息
-        message = page_content
-
-        # 只有当有多个页面时才添加分页按钮
+        # 构建分页键盘
+        keyboard = []
         if len(pages) > 1:
-            # 创建分页按钮
-            keyboard = []
-            buttons = []
-
+            row = []
             # 上一页按钮
-            if page_index > 0:
-                buttons.append(
-                    InlineKeyboardButton(
-                        "◁", callback_data=f"cmd_page_{page_index-1}"))
-            else:
-                buttons.append(
-                    InlineKeyboardButton(" ", callback_data="cmd_noop"))
+            prev_text = "◁" if page_index > 0 else " "
+            prev_data = f"cmdpage:{page_index-1}:{update.effective_chat.id}" if page_index > 0 else "cmdnoop"
+            row.append(InlineKeyboardButton(prev_text,
+                                            callback_data=prev_data))
 
-            # 页码指示器
-            buttons.append(
+            # 页码指示
+            row.append(
                 InlineKeyboardButton(f"{page_index+1}/{len(pages)}",
-                                     callback_data="cmd_noop"))
+                                     callback_data="cmdnoop"))
 
             # 下一页按钮
-            if page_index < len(pages) - 1:
-                buttons.append(
-                    InlineKeyboardButton(
-                        "▷", callback_data=f"cmd_page_{page_index+1}"))
-            else:
-                buttons.append(
-                    InlineKeyboardButton(" ", callback_data="cmd_noop"))
+            next_text = "▷" if page_index < len(pages) - 1 else " "
+            next_data = f"cmdpage:{page_index+1}:{update.effective_chat.id}" if page_index < len(
+                pages) - 1 else "cmdnoop"
+            row.append(InlineKeyboardButton(next_text,
+                                            callback_data=next_data))
 
-            keyboard.append(buttons)
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            keyboard.append(row)
 
-            # 发送或编辑消息
-            if update.callback_query:
-                # 使用回调查询的消息进行编辑
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+
+        # 发送或编辑消息
+        if update.callback_query:
+            try:
                 await update.callback_query.edit_message_text(
-                    text=message,
+                    text=page_content,
                     parse_mode="MARKDOWN",
                     reply_markup=reply_markup)
-            else:
-                # 直接回复新消息
-                await update.message.reply_text(text=message,
+                await update.callback_query.answer()
+            except Exception as e:
+                self.logger.error(f"更新命令页面消息时出错: {e}", exc_info=True)
+        else:
+            try:
+                await update.message.reply_text(text=page_content,
                                                 parse_mode="MARKDOWN",
                                                 reply_markup=reply_markup)
-        else:
-            # 只有一页，不需要分页按钮
-            if update.callback_query:
-                await update.callback_query.edit_message_text(
-                    text=message, parse_mode="MARKDOWN")
-            else:
-                await update.message.reply_text(text=message,
-                                                parse_mode="MARKDOWN")
-
-        # 如果是回调查询，回答它
-        if update.callback_query:
-            await update.callback_query.answer()
+            except Exception as e:
+                self.logger.error(f"发送命令页面消息时出错: {e}", exc_info=True)
 
     async def handle_command_page_callback(self, update: Update,
                                            context: ContextTypes.DEFAULT_TYPE):
         """处理命令列表分页回调"""
         query = update.callback_query
-        user_id = query.from_user.id
         data = query.data
 
-        # 解析回调数据
-        if data == "cmd_noop":
-            # 无操作按钮，只回答查询
+        # 处理无操作回调
+        if data == "cmdnoop":
             await query.answer()
             return
 
-        # 解析页码
-        try:
-            page_index = int(data.split("_")[-1])
+        # 处理分页回调
+        if data.startswith("cmdpage:"):
+            try:
+                # 解析回调数据
+                parts = data.split(":")
+                page_index = int(parts[1])
+                chat_id = int(parts[2])
 
-            # 检查会话数据是否存在
-            if not await self.session_manager.has_key(user_id,
-                                                      "command_pages"):
-                # 会话数据丢失（可能是 Bot 重启），通知用户
-                await query.answer("会话已过期，请重新使用 /commands 命令")
-                await query.edit_message_text("列表已过期，请重新使用 /commands 命令",
-                                              parse_mode="MARKDOWN")
-                return
+                # 检查聊天 ID 是否匹配
+                if chat_id != update.effective_chat.id:
+                    await query.answer("这个按钮来自另一个聊天，请重新使用 /commands 命令")
+                    return
 
-            await self._show_command_page(update, context, page_index)
+                # 重新收集命令并生成页面
+                # 检查用户权限
+                config_manager = context.bot_data.get("config_manager")
+                user_id = update.effective_user.id
+                chat_type = update.effective_chat.type
 
-            # 更新当前页码
-            await self.session_manager.set(user_id, "current_page", page_index)
-        except Exception as e:
-            self.logger.error(f"处理命令分页回调时出错: {e}", exc_info=True)
-            await query.answer("出现错误，请重试")
+                is_super_admin = config_manager.is_admin(user_id)
+                is_group_admin = False
+
+                if chat_type in ["group", "supergroup"]:
+                    try:
+                        chat_member = await context.bot.get_chat_member(
+                            chat_id, user_id)
+                        is_group_admin = chat_member.status in [
+                            "creator", "administrator"
+                        ]
+                    except Exception:
+                        pass
+
+                # 收集命令并生成页面
+                available_commands, admin_commands, super_admin_commands, module_commands = \
+                    self._collect_available_commands(chat_id, is_super_admin, is_group_admin)
+
+                pages = self._generate_command_pages(available_commands,
+                                                     admin_commands,
+                                                     super_admin_commands,
+                                                     module_commands,
+                                                     chat_type)
+
+                # 显示请求的页面
+                await self._display_command_page(update, context, pages,
+                                                 page_index)
+
+            except Exception as e:
+                self.logger.error(f"处理命令分页回调时出错: {e}", exc_info=True)
+                await query.answer("出现错误，请重新使用 /commands 命令")
 
     @error_handler
     async def stats_command(self, update: Update,
