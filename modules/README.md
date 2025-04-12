@@ -61,6 +61,9 @@ module_interface.register_command("super_cmd", handler, admin_only="super_admin"
 
 # 注册自定义处理器
 module_interface.register_handler(handler, group=0)
+
+# 注销所有处理器
+module_interface.unregister_all_handlers()
 ```
 
 ### 状态管理
@@ -80,16 +83,41 @@ module_interface.delete_state(format="json")
 
 ```py
 # 订阅事件
-subscription = module_interface.subscribe_event("event_name", callback, priority=0)
+subscription = module_interface.subscribe_event("event_name", callback, priority=0, filter_func=None)
 
 # 发布事件
 await module_interface.publish_event("event_name", key1=value1, key2=value2)
 
 # 发布事件并等待所有处理器完成
-count, success = await module_interface.publish_event_and_wait("event_name", key1=value1)
+count, success = await module_interface.publish_event_and_wait("event_name", timeout=None, key1=value1)
 
 # 取消订阅
 module_interface.unsubscribe_event(subscription)
+```
+
+### 会话管理
+
+```py
+# 获取会话数据
+value = await context.bot_data["session_manager"].get(user_id, "key", default=None)
+
+# 设置会话数据
+await context.bot_data["session_manager"].set(user_id, "key", value)
+
+# 检查会话是否包含某个键
+exists = await context.bot_data["session_manager"].has_key(user_id, "key")
+
+# 删除会话数据
+await context.bot_data["session_manager"].delete(user_id, "key")
+
+# 清除用户所有会话数据
+await context.bot_data["session_manager"].clear(user_id)
+
+# 获取用户所有会话数据
+data = await context.bot_data["session_manager"].get_all(user_id)
+
+# 获取活跃会话数量
+count = await context.bot_data["session_manager"].get_active_sessions_count()
 ```
 
 ### 模块间通信
@@ -110,6 +138,81 @@ module_interface.logger.debug("调试信息")
 module_interface.logger.info("信息")
 module_interface.logger.warning("警告")
 module_interface.logger.error("错误")
+```
+
+## 文本工具类 (TextUtils)
+
+TextUtils 提供了丰富的文本处理功能：
+
+```py
+# Markdown 转义
+safe_text = TextUtils.escape_markdown("需要转义的文本 * _ ` [ ]")
+
+# 格式化用户信息为 Markdown
+user_info = TextUtils.format_user_info(user, include_username=True)
+
+# 格式化聊天信息为 Markdown
+chat_info = TextUtils.format_chat_info(chat)
+
+# Markdown 转纯文本
+plain_text = TextUtils.markdown_to_plain("*加粗* _斜体_")
+
+# Markdown 转 HTML
+html_text = TextUtils.markdown_to_html("**加粗** _斜体_ `代码`")
+
+# 分段发送长 HTML 消息
+await TextUtils.send_long_message_html(update, long_text, module_interface)
+
+# 智能分割文本
+parts = TextUtils.smart_split_text(text, max_length)
+
+# 移除 HTML 标签
+plain_text = TextUtils.strip_html("<p>HTML文本</p>")
+
+# 规范化空白字符
+normalized = TextUtils.normalize_whitespace("多余的  空格\n\n\n和空行")
+
+# 转义 HTML 特殊字符
+safe_html = TextUtils.escape_html("<script>alert('XSS')</script>")
+
+```
+
+## 装饰器
+
+项目提供了以下装饰器用于简化常见任务：
+
+```py
+# 错误处理装饰器
+from utils.decorators import error_handler
+
+@error_handler
+async def command_handler(update, context):
+    # 此处的错误会被统一处理
+    pass
+
+# 权限检查装饰器
+from utils.decorators import permission_check
+
+@permission_check("super_admin")  # 或 "group_admin"
+async def admin_command(update, context):
+    # 只有管理员可以执行
+    pass
+
+# 群组检查装饰器
+from utils.decorators import group_check
+
+@group_check
+async def group_command(update, context):
+    # 只在允许的群组中可用
+    pass
+
+# 模块检查装饰器
+from utils.decorators import module_check
+
+@module_check
+async def module_command(update, context):
+    # 只在模块启用时可用
+    pass
 ```
 
 ## 最佳实践
@@ -148,17 +251,21 @@ module_interface.logger.error("错误")
 
 - 日志清理：旧日志文件会自动清理，避免占用过多磁盘空间
 
-### 事件通信
+### 事件系统
 
-- 松耦合设计：使用事件系统实现模块间松耦合通信
+- 模块间通知：当一个模块中发生重要变化时通知其他模块
 
-- 异步处理：事件处理函数必须是异步函数
+- 解耦复杂功能：将复杂功能分解为多个模块，通过事件协调它们
 
-- 错误隔离：事件处理中的错误不会影响发布者
+- 创建可扩展的钩子系统：允许未来添加的模块响应现有事件
 
-- 事件过滤：可以使用过滤函数只接收关心的事件
+- 事件处理函数的签名应为：
 
-- 事件优先级：可以设置事件处理的优先级
+  ```py
+  async def handle_event(event_type, **event_data):
+    # 处理事件
+    pass
+  ```
 
 ### 错误处理
 

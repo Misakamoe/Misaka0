@@ -184,9 +184,12 @@ sudo systemctl status telegram-bot
 │   ├── currency_data.py    # 货币数据工具
 │   ├── decorators.py       # 装饰器工具
 │   ├── event_system.py     # 事件系统
+│   ├── health_monitor.py   # 健康监控系统
 │   ├── logger.py           # 日志工具
+│   ├── session_manager.py  # 会话管理器
 │   ├── state_manager.py    # 状态管理器
 │   └── text_utils.py       # 文本处理工具
 └── data/                   # 数据目录 (自动创建)
-    └── module_states/      # 模块状态存储
+    ├── module_states/      # 模块状态存储
+    └── backups/            # 状态备份存储
 ```
