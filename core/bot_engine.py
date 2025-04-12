@@ -1062,7 +1062,15 @@ class BotEngine:
         pages = await self.session_manager.get(user_id, "command_pages", [])
 
         if not pages:
-            await update.message.reply_text("无可用命令")
+            # 检查是回调查询还是直接消息
+            if update.callback_query:
+                await update.callback_query.answer("无可用命令")
+                try:
+                    await update.callback_query.edit_message_text("无可用命令")
+                except Exception:
+                    pass
+            else:
+                await update.message.reply_text("无可用命令")
             return
 
         # 确保页码有效
@@ -1108,11 +1116,13 @@ class BotEngine:
 
             # 发送或编辑消息
             if update.callback_query:
+                # 使用回调查询的消息进行编辑
                 await update.callback_query.edit_message_text(
                     text=message,
                     parse_mode="MARKDOWN",
                     reply_markup=reply_markup)
             else:
+                # 直接回复新消息
                 await update.message.reply_text(text=message,
                                                 parse_mode="MARKDOWN",
                                                 reply_markup=reply_markup)
@@ -1145,6 +1155,16 @@ class BotEngine:
         # 解析页码
         try:
             page_index = int(data.split("_")[-1])
+
+            # 检查会话数据是否存在
+            if not await self.session_manager.has_key(user_id,
+                                                      "command_pages"):
+                # 会话数据丢失（可能是Bot重启），通知用户
+                await query.answer("会话已过期，请重新使用 /commands 命令")
+                await query.edit_message_text("列表已过期，请重新使用 /commands 命令",
+                                              parse_mode="MARKDOWN")
+                return
+
             await self._show_command_page(update, context, page_index)
 
             # 更新当前页码
