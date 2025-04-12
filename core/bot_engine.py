@@ -925,7 +925,7 @@ class BotEngine:
 
         # 准备分页数据 - 基于内容高度而不是固定的模块分页
         # 每页最大行数（Telegram 消息的合理高度限制）
-        MAX_LINES_PER_PAGE = 30
+        MAX_LINES_PER_PAGE = 20
 
         pages = []
         current_page = ""
@@ -1159,7 +1159,7 @@ class BotEngine:
             # 检查会话数据是否存在
             if not await self.session_manager.has_key(user_id,
                                                       "command_pages"):
-                # 会话数据丢失（可能是Bot重启），通知用户
+                # 会话数据丢失（可能是 Bot 重启），通知用户
                 await query.answer("会话已过期，请重新使用 /commands 命令")
                 await query.edit_message_text("列表已过期，请重新使用 /commands 命令",
                                               parse_mode="MARKDOWN")
