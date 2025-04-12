@@ -945,7 +945,7 @@ class BotEngine:
                                 chat_type):
         """生成命令页面内容"""
         # 每页最大行数
-        MAX_LINES_PER_PAGE = 20
+        MAX_LINES_PER_PAGE = 23
 
         pages = []
         current_page = ""
