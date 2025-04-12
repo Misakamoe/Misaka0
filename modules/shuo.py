@@ -210,18 +210,27 @@ async def list_posts(update: Update,
         content = post.get("content", "")
         tags = post.get("tags", [])
 
-        # 截取内容预览
-        if len(content) > 30:
-            content = content[:27] + "..."
+        # 使用 TextUtils.strip_html 去除 HTML 标签后再截断
+        plain_content = TextUtils.strip_html(content)
+        if len(plain_content) > 30:
+            preview_content = plain_content[:27] + "..."
+        else:
+            preview_content = plain_content
+
+        # 转义 Markdown 特殊字符
+        safe_key = TextUtils.escape_markdown(key)
+        safe_date = TextUtils.escape_markdown(date)
+        safe_preview = TextUtils.escape_markdown(preview_content)
 
         # 美化格式
-        list_text += f"*{i}. Key: {key}*\n"
-        list_text += f"📅 {date}\n"
-        list_text += f"📝 {content}\n"
+        list_text += f"*{i}. Key: {safe_key}*\n"
+        list_text += f"📅 {safe_date}\n"
+        list_text += f"📝 {safe_preview}\n"
 
         # 显示标签
         if tags:
-            tags_text = " ".join([f"#{tag}" for tag in tags])
+            safe_tags = [TextUtils.escape_markdown(tag) for tag in tags]
+            tags_text = " ".join([f"#{tag}" for tag in safe_tags])
             list_text += f"🏷 {tags_text}\n"
 
         list_text += "\n"
@@ -250,25 +259,7 @@ async def list_posts(update: Update,
     except Exception as e:
         _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
         # 回退到纯文本
-        plain_text = f"📝 说说列表 (第 {page+1}/{total_pages} 页)\n\n"
-        for i, post in enumerate(current_page_data, start_idx + 1):
-            key = post.get("key", "")
-            date = post.get("date", "")
-            content = post.get("content", "")
-            tags = post.get("tags", [])
-
-            plain_text += f"{i}. Key: {key}\n"
-            plain_text += f"📅 {date}\n"
-            plain_text += f"📝 {content}\n"
-
-            if tags:
-                tags_text = " ".join([f"#{tag}" for tag in tags])
-                plain_text += f"🏷 {tags_text}\n"
-
-            plain_text += "\n"
-
-        plain_text += "使用 /shuodel 数字 key 删除特定说说"
-
+        plain_text = TextUtils.markdown_to_plain(list_text)
         await message.edit_text(plain_text, reply_markup=keyboard)
 
 
@@ -302,18 +293,27 @@ async def show_posts_page(query, context, page=0):
         content = post.get("content", "")
         tags = post.get("tags", [])
 
-        # 截取内容预览
-        if len(content) > 30:
-            content = content[:27] + "..."
+        # 使用 TextUtils.strip_html 去除 HTML 标签后再截断
+        plain_content = TextUtils.strip_html(content)
+        if len(plain_content) > 30:
+            preview_content = plain_content[:27] + "..."
+        else:
+            preview_content = plain_content
+
+        # 转义 Markdown 特殊字符
+        safe_key = TextUtils.escape_markdown(key)
+        safe_date = TextUtils.escape_markdown(date)
+        safe_preview = TextUtils.escape_markdown(preview_content)
 
         # 美化格式
-        list_text += f"*{i}. Key: {key}*\n"
-        list_text += f"📅 {date}\n"
-        list_text += f"📝 {content}\n"
+        list_text += f"*{i}. Key: {safe_key}*\n"
+        list_text += f"📅 {safe_date}\n"
+        list_text += f"📝 {safe_preview}\n"
 
         # 显示标签
         if tags:
-            tags_text = " ".join([f"#{tag}" for tag in tags])
+            safe_tags = [TextUtils.escape_markdown(tag) for tag in tags]
+            tags_text = " ".join([f"#{tag}" for tag in safe_tags])
             list_text += f"🏷 {tags_text}\n"
 
         list_text += "\n"
@@ -342,25 +342,7 @@ async def show_posts_page(query, context, page=0):
     except Exception as e:
         _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
         # 回退到纯文本
-        plain_text = f"📝 说说列表 (第 {page+1}/{total_pages} 页)\n\n"
-        for i, post in enumerate(current_page_data, start_idx + 1):
-            key = post.get("key", "")
-            date = post.get("date", "")
-            content = post.get("content", "")
-            tags = post.get("tags", [])
-
-            plain_text += f"{i}. Key: {key}\n"
-            plain_text += f"📅 {date}\n"
-            plain_text += f"📝 {content}\n"
-
-            if tags:
-                tags_text = " ".join([f"#{tag}" for tag in tags])
-                plain_text += f"🏷 {tags_text}\n"
-
-            plain_text += "\n"
-
-        plain_text += "使用 /shuodel 数字 key 删除特定说说"
-
+        plain_text = TextUtils.markdown_to_plain(list_text)
         await query.edit_message_text(plain_text, reply_markup=keyboard)
 
 
@@ -398,15 +380,23 @@ async def delete_post(update: Update, context: ContextTypes.DEFAULT_TYPE,
     content = post.get("content", "")
     date = post.get("date", "")
 
-    # 截取内容预览
-    if len(content) > 100:
-        content = content[:97] + "..."
+    # 使用 TextUtils.strip_html 去除 HTML 标签后再截断
+    plain_content = TextUtils.strip_html(content)
+    if len(plain_content) > 100:
+        preview_content = plain_content[:97] + "..."
+    else:
+        preview_content = plain_content
+
+    # 转义 Markdown 特殊字符
+    safe_key = TextUtils.escape_markdown(post_key)
+    safe_date = TextUtils.escape_markdown(date)
+    safe_preview = TextUtils.escape_markdown(preview_content)
 
     await message.edit_text(
         f"⚠️ *确定要删除这条说说吗？*\n\n"
-        f"*Key:* {post_key}\n"
-        f"*时间:* {date}\n"
-        f"*内容:* {content}\n\n"
+        f"*Key:* {safe_key}\n"
+        f"*时间:* {safe_date}\n"
+        f"*内容:* {safe_preview}\n\n"
         f"此操作不可撤销！",
         reply_markup=keyboard,
         parse_mode="Markdown")
@@ -581,10 +571,17 @@ async def shuoconfig_command(update: Update,
 
     if not context.args or len(context.args) < 2:
         # 显示当前配置
+        # 使用 TextUtils.escape_markdown 转义可能导致问题的字符
+        repo = TextUtils.escape_markdown(
+            _config['github_repo']) if _config['github_repo'] else '未设置'
+        path = TextUtils.escape_markdown(
+            _config['json_path']) if _config['json_path'] else '未设置'
+        branch = TextUtils.escape_markdown(_config['github_branch'])
+
         config_text = ("*📝 说说模块配置*\n\n"
-                       f"*GitHub 仓库:* {_config['github_repo'] or '未设置'}\n"
-                       f"*分支:* {_config['github_branch']}\n"
-                       f"*JSON 路径:* {_config['json_path'] or '未设置'}\n"
+                       f"*GitHub 仓库:* {repo}\n"
+                       f"*分支:* {branch}\n"
+                       f"*JSON 路径:* {path}\n"
                        f"*当前 Key:* {_config['last_key']}\n\n"
                        "*配置命令:*\n"
                        "`/shuoconfig token YOUR_TOKEN` - 设置 GitHub 令牌\n"
@@ -592,7 +589,13 @@ async def shuoconfig_command(update: Update,
                        "`/shuoconfig path 文件路径` - 设置 JSON 文件路径\n"
                        "`/shuoconfig branch 分支名` - 设置分支（默认 master）")
 
-        await update.message.reply_text(config_text, parse_mode="Markdown")
+        try:
+            await update.message.reply_text(config_text, parse_mode="Markdown")
+        except Exception as e:
+            _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
+            # 如果 Markdown 解析失败，尝试使用纯文本发送
+            plain_text = TextUtils.markdown_to_plain(config_text)
+            await update.message.reply_text(plain_text)
         return
 
     key = context.args[0].lower()
@@ -642,7 +645,13 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  "`/shuoconfig` - 配置模块参数\n"
                  "`/shuodel` - 查看和删除说说")
 
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    try:
+        await update.message.reply_text(help_text, parse_mode="Markdown")
+    except Exception as e:
+        _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
+        # 回退到纯文本
+        plain_text = TextUtils.markdown_to_plain(help_text)
+        await update.message.reply_text(plain_text)
 
 
 # 状态管理函数
