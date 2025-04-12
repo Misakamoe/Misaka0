@@ -9,8 +9,8 @@ import gc
 import time
 from datetime import datetime
 import telegram
-from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters, ChatMemberHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, CallbackQueryHandler, filters, ChatMemberHandler
 import threading
 
 from core.module_loader import ModuleLoader
@@ -21,6 +21,7 @@ from utils.decorators import error_handler, permission_check, group_check, modul
 from utils.event_system import EventSystem
 from utils.text_utils import TextUtils
 from utils.session_manager import SessionManager
+from utils.health_monitor import HealthMonitor
 
 
 class BotEngine:
@@ -136,6 +137,14 @@ class BotEngine:
             "module_stats": {}
         }
 
+        # 初始化健康监控系统（在其他组件初始化之后）
+        self.health_monitor = HealthMonitor(self)
+
+        # 注册命令分页回调处理器
+        self.application.add_handler(
+            CallbackQueryHandler(self.handle_command_page_callback,
+                                 pattern=r"^cmd_page_\d+$|^cmd_noop$"))
+
         self.logger.info("Bot 引擎初始化完成")
 
     # 辅助方法
@@ -201,6 +210,45 @@ class BotEngine:
 
         # 对于其他错误，正常记录
         self.logger.error(f"轮询时发生错误: {error}", exc_info=True)
+
+    @error_handler
+    async def health_status_command(self, update: Update,
+                                    context: ContextTypes.DEFAULT_TYPE):
+        """显示机器人健康状态"""
+        if not hasattr(self, 'health_monitor'):
+            await update.message.reply_text("健康监控系统未初始化")
+            return
+
+        try:
+            status = self.health_monitor.get_health_status()
+
+            # 构建状态消息，确保所有文本都进行了转义
+            message = f"📊 *机器人健康状态*\n\n"
+            message += f"⚡ 状态: {TextUtils.escape_markdown(status['status'])}\n"
+
+            last_check = status['last_check'] or '未检查'
+            message += f"⏱️ 上次检查: {TextUtils.escape_markdown(last_check)}\n"
+
+            message += f"⚠️ 故障次数: {status['failures']}\n"
+            message += f"🔄 恢复次数: {status['recoveries']}\n"
+
+            if status.get('last_recovery'):
+                message += f"🛠️ 上次恢复: {TextUtils.escape_markdown(status['last_recovery'])}\n"
+
+            # 添加组件状态
+            message += "\n*组件状态:*\n"
+            for component, comp_status in status['components'].items():
+                status_emoji = "✅" if comp_status[
+                    'status'] == "healthy" else "❌"
+                safe_component = TextUtils.escape_markdown(component)
+                safe_status = TextUtils.escape_markdown(comp_status['status'])
+                message += f"{status_emoji} {safe_component}: {safe_status}\n"
+
+            await update.message.reply_text(message, parse_mode="MARKDOWN")
+
+        except Exception as e:
+            self.logger.error(f"生成健康状态报告时出错: {e}", exc_info=True)
+            await update.message.reply_text("生成健康状态报告时出错，请查看日志获取详情。")
 
     # 资源清理
     async def cleanup_resources(self):
@@ -801,7 +849,7 @@ class BotEngine:
 
     async def list_commands_command(self, update: Update,
                                     context: ContextTypes.DEFAULT_TYPE):
-        """列出当前聊天可用的已注册命令"""
+        """列出当前聊天可用的已注册命令（带分页）"""
         chat_id = update.effective_chat.id
         chat_type = update.effective_chat.type
         config_manager = context.bot_data.get("config_manager")
@@ -821,21 +869,16 @@ class BotEngine:
             except Exception:
                 pass
 
-        if chat_type in ["group", "supergroup"]:
-            message = "*当前群组可用命令:*\n"
-        else:
-            message = "*可用命令:*\n"
-
-        # 获取所有命令及其元数据
+        # 收集所有命令
         all_commands = self.command_processor.command_handlers.keys()
         command_metadata = self.command_processor.command_metadata
 
-        # 核心命令（按权限分类）
+        # 核心命令分类
         core_commands_all = ["start", "help", "id", "modules",
                              "commands"]  # 所有用户可用
         core_commands_admin = ["enable", "disable"]  # 管理员可用
         core_commands_super = [
-            "listgroups", "addgroup", "removegroup", "stats"
+            "listgroups", "addgroup", "removegroup", "stats", "health"
         ]  # 超级管理员可用
 
         # 分类命令
@@ -870,58 +913,245 @@ class BotEngine:
                         if config_manager.is_module_enabled_for_chat(
                                 module_name, chat_id):
                             if module_name not in module_commands:
-                                module_commands[module_name] = []
-                            module_commands[module_name].append(cmd)
+                                module_commands[module_name] = {
+                                    "description":
+                                    module_data["metadata"].get(
+                                        "description", ""),
+                                    "commands": []
+                                }
+                            module_commands[module_name]["commands"].append(
+                                cmd)
                         break
 
-        # 添加基本命令到消息
-        if available_commands:
-            message += "\n*基本命令:*\n"
-            for cmd in sorted(available_commands):
-                # 转义命令
-                safe_cmd = TextUtils.escape_markdown(cmd)
-                message += f"/{safe_cmd}\n"
+        # 准备分页数据 - 基于内容高度而不是固定的模块分页
+        # 每页最大行数（Telegram 消息的合理高度限制）
+        MAX_LINES_PER_PAGE = 30
 
-        # 添加管理员命令到消息
+        pages = []
+        current_page = ""
+        current_page_lines = 0
+
+        # 添加页头
+        if chat_type in ["group", "supergroup"]:
+            header = "*当前群组可用命令:*\n"
+        else:
+            header = "*可用命令:*\n"
+
+        current_page = header
+        current_page_lines = 1
+
+        # 添加基本命令部分
+        if available_commands:
+            basic_section = "\n*基本命令:*\n"
+            for cmd in sorted(available_commands):
+                safe_cmd = TextUtils.escape_markdown(cmd)
+                basic_section += f"/{safe_cmd}\n"
+
+            # 检查添加这部分是否会超出页面高度
+            section_lines = len(basic_section.split('\n'))
+            if current_page_lines + section_lines > MAX_LINES_PER_PAGE:
+                # 如果会超出，先保存当前页，然后开始新页
+                pages.append(current_page)
+                current_page = header + basic_section
+                current_page_lines = 1 + section_lines  # header + section
+            else:
+                # 如果不会超出，直接添加到当前页
+                current_page += basic_section
+                current_page_lines += section_lines
+
+        # 添加管理员命令部分
         if admin_commands:
-            message += "\n*管理员命令:*\n"
+            admin_section = "\n*管理员命令:*\n"
             for cmd in sorted(admin_commands):
                 safe_cmd = TextUtils.escape_markdown(cmd)
-                message += f"/{safe_cmd}\n"
+                admin_section += f"/{safe_cmd}\n"
 
-        # 添加超级管理员命令到消息
+            # 检查添加这部分是否会超出页面高度
+            section_lines = len(admin_section.split('\n'))
+            if current_page_lines + section_lines > MAX_LINES_PER_PAGE:
+                # 如果会超出，先保存当前页，然后开始新页
+                pages.append(current_page)
+                current_page = header + admin_section
+                current_page_lines = 1 + section_lines
+            else:
+                # 如果不会超出，直接添加到当前页
+                current_page += admin_section
+                current_page_lines += section_lines
+
+        # 添加超级管理员命令部分
         if super_admin_commands:
-            message += "\n*超级管理员命令:*\n"
+            super_admin_section = "\n*超级管理员命令:*\n"
             for cmd in sorted(super_admin_commands):
                 safe_cmd = TextUtils.escape_markdown(cmd)
-                message += f"/{safe_cmd}\n"
+                super_admin_section += f"/{safe_cmd}\n"
 
-        # 添加模块命令到消息
+            # 检查添加这部分是否会超出页面高度
+            section_lines = len(super_admin_section.split('\n'))
+            if current_page_lines + section_lines > MAX_LINES_PER_PAGE:
+                # 如果会超出，先保存当前页，然后开始新页
+                pages.append(current_page)
+                current_page = header + super_admin_section
+                current_page_lines = 1 + section_lines
+            else:
+                # 如果不会超出，直接添加到当前页
+                current_page += super_admin_section
+                current_page_lines += section_lines
+
+        # 添加模块命令部分 - 确保同一模块的命令都在同一页
         if module_commands:
-            message += "\n*模块命令:*\n"
-            # 按模块分组显示命令
-            for module_name, cmds in sorted(module_commands.items()):
-                # 获取模块描述
-                desc = ""
-                metadata = self.module_loader.get_module_metadata(module_name)
-                if metadata:
-                    desc = metadata.get("description", "")
+            # 先添加模块标题
+            module_title = "\n*模块命令:*\n"
+            module_title_lines = 2  # 标题占 2 行
 
-                # 转义模块名称
-                safe_module = TextUtils.escape_markdown(module_name)
-                safe_desc = TextUtils.escape_markdown(desc)
+            # 如果添加模块标题会导致当前页超出，先保存当前页
+            if current_page_lines + module_title_lines > MAX_LINES_PER_PAGE:
+                pages.append(current_page)
+                current_page = header + module_title
+                current_page_lines = 1 + module_title_lines
+            else:
+                current_page += module_title
+                current_page_lines += module_title_lines
 
-                message += f"\n*{safe_module}* - {safe_desc}\n"
+            # 逐个处理模块
+            for module_name, module_info in sorted(module_commands.items()):
+                desc = module_info["description"]
+                cmds = module_info["commands"]
+
+                # 构建这个模块的部分
+                module_section = f"\n*{TextUtils.escape_markdown(module_name)}* - {TextUtils.escape_markdown(desc)}\n"
                 for cmd in sorted(cmds):
-                    # 转义命令
                     safe_cmd = TextUtils.escape_markdown(cmd)
-                    message += f"/{safe_cmd}\n"
+                    module_section += f"/{safe_cmd}\n"
 
-        if not available_commands and not admin_commands and not super_admin_commands and not module_commands:
-            message += "无已注册命令\n"
+                # 检查添加这个模块是否会使当前页超出高度
+                section_lines = len(module_section.split('\n'))
 
-        # 使用通用方法发送 Markdown 消息
-        await self._send_markdown_message(update, message)
+                # 如果添加这个模块会导致当前页超出，先保存当前页，然后把整个模块放到新页
+                if current_page_lines + section_lines > MAX_LINES_PER_PAGE:
+                    pages.append(current_page)
+                    # 新页以页头和模块部分开始
+                    current_page = header + module_section
+                    current_page_lines = 1 + section_lines
+                else:
+                    # 如果不会超出，直接添加到当前页
+                    current_page += module_section
+                    current_page_lines += section_lines
+
+        # 保存最后一页（如果有内容）
+        if current_page != header:
+            pages.append(current_page)
+
+        # 如果没有命令，添加一个空页
+        if not pages:
+            pages.append(header + "无已注册命令\n")
+
+        # 存储分页数据到用户会话
+        await self.session_manager.set(user_id, "command_pages", pages)
+        await self.session_manager.set(user_id, "current_page", 0)
+
+        # 显示第一页
+        await self._show_command_page(update, context, 0)
+
+    async def _show_command_page(self, update: Update,
+                                 context: ContextTypes.DEFAULT_TYPE,
+                                 page_index):
+        """显示指定页的命令列表"""
+        user_id = update.effective_user.id
+
+        # 获取分页数据
+        pages = await self.session_manager.get(user_id, "command_pages", [])
+
+        if not pages:
+            await update.message.reply_text("无可用命令")
+            return
+
+        # 确保页码有效
+        page_index = max(0, min(page_index, len(pages) - 1))
+
+        # 获取当前页内容
+        page_content = pages[page_index]
+
+        # 构建消息
+        message = page_content
+
+        # 只有当有多个页面时才添加分页按钮
+        if len(pages) > 1:
+            # 创建分页按钮
+            keyboard = []
+            buttons = []
+
+            # 上一页按钮
+            if page_index > 0:
+                buttons.append(
+                    InlineKeyboardButton(
+                        "◁", callback_data=f"cmd_page_{page_index-1}"))
+            else:
+                buttons.append(
+                    InlineKeyboardButton(" ", callback_data="cmd_noop"))
+
+            # 页码指示器
+            buttons.append(
+                InlineKeyboardButton(f"{page_index+1}/{len(pages)}",
+                                     callback_data="cmd_noop"))
+
+            # 下一页按钮
+            if page_index < len(pages) - 1:
+                buttons.append(
+                    InlineKeyboardButton(
+                        "▷", callback_data=f"cmd_page_{page_index+1}"))
+            else:
+                buttons.append(
+                    InlineKeyboardButton(" ", callback_data="cmd_noop"))
+
+            keyboard.append(buttons)
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            # 发送或编辑消息
+            if update.callback_query:
+                await update.callback_query.edit_message_text(
+                    text=message,
+                    parse_mode="MARKDOWN",
+                    reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(text=message,
+                                                parse_mode="MARKDOWN",
+                                                reply_markup=reply_markup)
+        else:
+            # 只有一页，不需要分页按钮
+            if update.callback_query:
+                await update.callback_query.edit_message_text(
+                    text=message, parse_mode="MARKDOWN")
+            else:
+                await update.message.reply_text(text=message,
+                                                parse_mode="MARKDOWN")
+
+        # 如果是回调查询，回答它
+        if update.callback_query:
+            await update.callback_query.answer()
+
+    async def handle_command_page_callback(self, update: Update,
+                                           context: ContextTypes.DEFAULT_TYPE):
+        """处理命令列表分页回调"""
+        query = update.callback_query
+        user_id = query.from_user.id
+        data = query.data
+
+        # 解析回调数据
+        if data == "cmd_noop":
+            # 无操作按钮，只回答查询
+            await query.answer()
+            return
+
+        # 解析页码
+        try:
+            page_index = int(data.split("_")[-1])
+            await self._show_command_page(update, context, page_index)
+
+            # 更新当前页码
+            await self.session_manager.set(user_id, "current_page", page_index)
+        except Exception as e:
+            self.logger.error(f"处理命令分页回调时出错: {e}", exc_info=True)
+            await query.answer("出现错误，请重试")
 
     @error_handler
     async def stats_command(self, update: Update,
@@ -1259,6 +1489,10 @@ class BotEngine:
         # 启动会话管理器清理任务
         await self.session_manager.start_cleanup()
 
+        # 启动健康监控系统
+        await self.health_monitor.start_monitoring()
+        self.logger.info("已启动健康监控系统")
+
         # 启动轮询，设置更健壮的轮询参数
         self.logger.info("启动 Bot 轮询...")
 
@@ -1280,6 +1514,11 @@ class BotEngine:
     async def stop(self):
         """停止 Bot"""
         self.logger.info("正在停止 Bot...")
+
+        # 停止健康监控系统
+        if hasattr(self, 'health_monitor'):
+            await self.health_monitor.stop_monitoring()
+            self.logger.info("健康监控系统已停止")
 
         # 停止配置监视任务
         if self.config_watch_task and not self.config_watch_task.done():

@@ -194,6 +194,11 @@ class CommandProcessor:
                               bot_engine.stats_command,
                               admin_only="super_admin")
 
+        # 健康状态命令
+        self.register_command("health",
+                              bot_engine.health_status_command,
+                              admin_only="super_admin")
+
         # 群组白名单管理命令
         self.register_command("listgroups",
                               bot_engine.list_allowed_groups_command,
@@ -255,6 +260,7 @@ class CommandProcessor:
         if is_super_admin:
             help_text += "\n超级管理员命令:\n"
             help_text += "/stats - 显示机器人统计信息\n"
+            help_text += "/health - 显示机器人健康状态\n"
             help_text += "/listgroups - 列出允许的群组\n"
             help_text += "/addgroup [群组 ID] - 添加群组到白名单\n"
             help_text += "/removegroup <群组 ID> - 从白名单移除群组\n"
