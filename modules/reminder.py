@@ -19,7 +19,7 @@ MODULE_COMMANDS = ["remind", "remindonce", "reminders", "delreminder"]
 
 # 模块常量
 MIN_INTERVAL = 10  # 最小提醒间隔（秒）
-DEFAULT_TIMEZONE = 'Asia/Shanghai'  # 默认时区
+DEFAULT_TIMEZONE = 'Asia/Hong_Kong'  # 默认时区
 DATA_FILE = "config/reminders.json"  # 数据存储文件
 AUTOSAVE_INTERVAL = 300  # 自动保存间隔（秒）
 
