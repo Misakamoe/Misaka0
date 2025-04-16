@@ -4,9 +4,9 @@ import asyncio
 import logging
 import os
 import time
-import datetime
 import gc
 import telegram
+from datetime import datetime
 from telegram.ext import Application
 from core.config_manager import ConfigManager
 from core.module_manager import ModuleManager
