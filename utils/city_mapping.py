@@ -1,4 +1,4 @@
-# utils/city_mapping.py
+# utils/city_mapping.py - 天气查询模块
 """
 城市名称映射工具
 提供中文城市名到英文城市名的转换

@@ -19,9 +19,9 @@ class TextFormatter:
         if not text:
             return ""
 
-        # 转义以下字符: _ * [ ] ( ) ~ ` > # + - = | { } !
-        # 注意：不转义点号(.)，因为它在版本号中很常见
-        return re.sub(r'([_*\[\]()~`>#\+\-=|{}!\\])', r'\\\1', text)
+        # 只转义真正需要的特殊字符: _ * [ ] ( ) ~ `
+        # 不转义: - = | { } . ! > # + \
+        return re.sub(r'([_*\[\]()~`])', r'\\\1', text)
 
     @staticmethod
     def escape_html(text):

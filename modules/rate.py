@@ -1,4 +1,4 @@
-# modules/rate.py
+# modules/rate.py - 汇率转换模块
 
 import json
 import os
@@ -7,13 +7,10 @@ import aiohttp
 import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
-from utils.decorators import error_handler
-from utils.text_utils import TextUtils
-from utils.currency_data import CurrencyData, FIAT_CURRENCY_ALIASES, CRYPTO_CURRENCY_ALIASES, CURRENCY_SYMBOLS
 
 # 模块元数据
-MODULE_NAME = "rate"
-MODULE_VERSION = "1.2.0"
+MODULE_NAME = "Rate"
+MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "汇率转换，支持法币/虚拟货币"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["rate", "setrate"]
@@ -35,6 +32,7 @@ _module_interface = None
 EXCHANGERATE_API_KEY = ""
 EXCHANGERATE_API_URL = "https://v6.exchangerate-api.com/v6/{}/latest/{}"
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies={}"
+_update_task = None
 
 
 def load_config():
@@ -155,6 +153,8 @@ async def update_fiat_rates():
 
 async def update_crypto_rates():
     """更新虚拟货币汇率"""
+    from utils.currency_data import CRYPTO_CURRENCY_ALIASES
+
     # 获取所有虚拟货币 ID
     crypto_ids = list(set(CRYPTO_CURRENCY_ALIASES.values()))
     # 使用美元和人民币作为计价货币
@@ -187,6 +187,8 @@ async def convert_currency(amount, from_currency, to_currency):
     Returns:
         tuple: (转换后金额, 错误信息)，如果转换成功则错误信息为 None
     """
+    from utils.currency_data import CurrencyData
+
     # 检查数据是否已加载
     if not _state["data_loaded"]:
         # 如果数据未加载，尝试立即更新
@@ -320,7 +322,6 @@ async def convert_currency(amount, from_currency, to_currency):
     return None, "不支持的货币类型组合"
 
 
-@error_handler
 async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /rate 命令"""
     # 如果没有参数，显示帮助信息
@@ -384,6 +385,7 @@ async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 获取货币代码和类型
+    from utils.currency_data import CurrencyData
     from_code, from_type = CurrencyData.get_currency_code(from_currency)
     to_code, to_type = CurrencyData.get_currency_code(to_currency)
 
@@ -405,7 +407,6 @@ async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, parse_mode="MARKDOWN")
 
 
-@error_handler
 async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /setrate 命令，用于管理员设置汇率模块配置"""
     # 如果没有参数，显示当前配置
@@ -475,20 +476,11 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _state["update_interval"] = interval
 
                 # 重启定期更新任务
-                if hasattr(_module_interface,
-                           'update_task') and _module_interface.update_task:
-                    _module_interface.update_task.cancel()
+                global _update_task
+                if _update_task and not _update_task.done():
+                    _update_task.cancel()
 
-                async def _periodic_update():
-                    while True:
-                        await asyncio.sleep(_state["update_interval"])
-                        try:
-                            await update_exchange_rates()
-                        except Exception as e:
-                            _module_interface.logger.error(f"定期更新汇率失败: {e}")
-
-                _module_interface.update_task = asyncio.create_task(
-                    _periodic_update())
+                _update_task = asyncio.create_task(periodic_update())
 
                 await update.message.reply_text(f"✅ 更新间隔已设置为 {interval} 秒",
                                                 parse_mode="MARKDOWN")
@@ -507,21 +499,45 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     parse_mode="MARKDOWN")
 
 
+async def periodic_update():
+    """定期更新汇率数据"""
+    try:
+        while True:
+            await asyncio.sleep(_state["update_interval"])
+            try:
+                await update_exchange_rates()
+            except Exception as e:
+                if _module_interface:
+                    _module_interface.logger.error(f"定期更新汇率失败: {e}")
+    except asyncio.CancelledError:
+        if _module_interface:
+            _module_interface.logger.info("汇率更新任务已取消")
+        raise
+
+
 def get_state(module_interface):
-    """获取模块状态"""
-    return _state
+    """获取模块状态（用于热更新）"""
+    # 返回可序列化的状态
+    serializable_state = {
+        "last_update": _state["last_update"],
+        "update_interval": _state["update_interval"],
+        "fiat_rates": _state["fiat_rates"],
+        "crypto_rates": _state["crypto_rates"],
+        "data_loaded": _state["data_loaded"]
+    }
+    return serializable_state
 
 
 def set_state(module_interface, state):
-    """设置模块状态"""
+    """设置模块状态（用于热更新）"""
     global _state
-    _state = state
+    _state.update(state)
     module_interface.logger.debug(f"模块状态已更新")
 
 
-def setup(module_interface):
+async def setup(module_interface):
     """模块初始化"""
-    global _module_interface, _state
+    global _module_interface, _state, _update_task
     _module_interface = module_interface
 
     # 加载配置
@@ -529,48 +545,43 @@ def setup(module_interface):
     _state["update_interval"] = config.get("update_interval", 3600)
 
     # 注册命令
-    module_interface.register_command("rate", rate_command)
-    module_interface.register_command("setrate",
-                                      setrate_command,
-                                      admin_only="super_admin")  # 仅超级管理员可用
+    await module_interface.register_command(
+        "rate",
+        rate_command,
+        description="查询汇率",
+    )
+    await module_interface.register_command(
+        "setrate",
+        setrate_command,
+        admin_level="super_admin",
+        description="汇率模块配置",
+    )  # 仅超级管理员可用
 
     # 加载状态
     saved_state = module_interface.load_state(default=_state)
-    _state = saved_state
-
-    # 创建一个异步任务来初始化和定期更新汇率数据
-    async def init_and_update():
-        # 立即更新汇率数据
-        await update_exchange_rates()
-
-        # 记录数据加载状态
-        if _state["data_loaded"]:
-            module_interface.logger.info("汇率数据初始加载完成")
-        else:
-            module_interface.logger.warning("汇率数据初始加载未完成，可能是 API 密钥未设置或网络问题")
-
-        # 设置定期更新汇率的任务
-        while True:
-            await asyncio.sleep(_state["update_interval"])
-            try:
-                await update_exchange_rates()
-            except Exception as e:
-                module_interface.logger.error(f"定期更新汇率失败: {e}")
+    _state.update(saved_state)
 
     # 启动更新任务
-    module_interface.update_task = asyncio.create_task(init_and_update())
+    _update_task = asyncio.create_task(periodic_update())
+
+    # 立即更新汇率数据
+    asyncio.create_task(update_exchange_rates())
 
     module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
 
-def cleanup(module_interface):
+async def cleanup(module_interface):
     """模块清理"""
     # 取消更新任务
-    if hasattr(module_interface,
-               'update_task') and module_interface.update_task:
-        module_interface.update_task.cancel()
+    global _update_task
+    if _update_task and not _update_task.done():
+        _update_task.cancel()
+        try:
+            await _update_task
+        except asyncio.CancelledError:
+            pass
 
     # 保存状态
-    module_interface.save_state(_state)
+    module_interface.save_state(get_state(module_interface))
 
     module_interface.logger.info(f"模块 {MODULE_NAME} 已清理")

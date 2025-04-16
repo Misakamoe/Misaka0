@@ -1,18 +1,16 @@
-# modules/weather.py
+# modules/weather.py - 天气查询模块
 
-from telegram import Update
-from telegram.ext import ContextTypes, CallbackQueryHandler
-from utils.decorators import error_handler, permission_check
-from utils.text_utils import TextUtils
-from utils.city_mapping import translate_city_name
 import aiohttp
 import json
 import os
+import asyncio
 from datetime import datetime
+from telegram import Update
+from telegram.ext import ContextTypes
 
 # 模块元数据
-MODULE_NAME = "weather"
-MODULE_VERSION = "1.0.0"
+MODULE_NAME = "Weather"
+MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "天气查询，支持多种天气源"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["weather", "forecast", "weatherset"]
@@ -21,7 +19,9 @@ MODULE_COMMANDS = ["weather", "forecast", "weatherset"]
 _state = {
     "user_locations": {},  # 用户默认位置
     "active_source": "openweathermap",  # 默认天气源
-    "api_keys": {}  # 各源的 API 密钥
+    "api_keys": {},  # 各源的 API 密钥
+    "cache": {},  # 缓存最近的天气数据
+    "cache_time": {}  # 缓存时间
 }
 
 # 支持的天气源
@@ -146,9 +146,10 @@ WIND_ICONS = {
 
 # 配置文件路径
 CONFIG_FILE = "config/weather_config.json"
+# 缓存过期时间（分钟）
+CACHE_EXPIRY = 30
 
 
-@error_handler
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查询当前天气"""
     user_id = str(update.effective_user.id)
@@ -180,6 +181,15 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 发送等待消息
     waiting_msg = await update.message.reply_text("🔍 正在查询天气，请稍候...")
 
+    # 检查缓存
+    cache_key = f"weather:{source}:{location}"
+    if cache_key in _state["cache"] and _state["cache_time"].get(
+            cache_key, 0) > datetime.now().timestamp() - CACHE_EXPIRY * 60:
+        weather_data = _state["cache"][cache_key]
+        weather_text = format_weather(weather_data, source, location)
+        await waiting_msg.edit_text(weather_text, parse_mode="MARKDOWN")
+        return
+
     # 尝试所有可用的源，直到成功
     available_sources = []
     for source_name, info in WEATHER_SOURCES.items():
@@ -206,11 +216,16 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
 
         if weather_data:
+            # 缓存结果
+            cache_key = f"weather:{source}:{location}"
+            _state["cache"][cache_key] = weather_data
+            _state["cache_time"][cache_key] = datetime.now().timestamp()
+
             # 格式化天气信息
             weather_text = format_weather(weather_data, source, location)
 
             # 更新消息
-            await waiting_msg.edit_text(weather_text, parse_mode="Markdown")
+            await waiting_msg.edit_text(weather_text, parse_mode="MARKDOWN")
 
             # 设置为活跃源
             if source != _state["active_source"]:
@@ -225,7 +240,6 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-@error_handler
 async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查询天气预报"""
     user_id = str(update.effective_user.id)
@@ -261,6 +275,15 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 发送等待消息
     waiting_msg = await update.message.reply_text("🔍 正在查询天气预报，请稍候...")
 
+    # 检查缓存
+    cache_key = f"forecast:{source}:{location}:{days}"
+    if cache_key in _state["cache"] and _state["cache_time"].get(
+            cache_key, 0) > datetime.now().timestamp() - CACHE_EXPIRY * 60:
+        forecast_data = _state["cache"][cache_key]
+        forecast_text = format_forecast(forecast_data, source, location, days)
+        await waiting_msg.edit_text(forecast_text, parse_mode="MARKDOWN")
+        return
+
     # 尝试所有可用的源，直到成功
     available_sources = []
     for source_name, info in WEATHER_SOURCES.items():
@@ -287,12 +310,17 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
 
         if forecast_data:
+            # 缓存结果
+            cache_key = f"forecast:{source}:{location}:{days}"
+            _state["cache"][cache_key] = forecast_data
+            _state["cache_time"][cache_key] = datetime.now().timestamp()
+
             # 格式化天气预报信息
             forecast_text = format_forecast(forecast_data, source, location,
                                             days)
 
             # 更新消息
-            await waiting_msg.edit_text(forecast_text, parse_mode="Markdown")
+            await waiting_msg.edit_text(forecast_text, parse_mode="MARKDOWN")
 
             # 设置为活跃源
             if source != _state["active_source"]:
@@ -307,8 +335,6 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-@error_handler
-@permission_check(admin_only="super_admin")
 async def weather_set_command(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """天气模块设置命令"""
@@ -326,7 +352,7 @@ async def weather_set_command(update: Update,
         for source, info in WEATHER_SOURCES.items():
             help_text += f"- `{source}`: {info['name']}\n"
 
-        await update.message.reply_text(help_text, parse_mode="Markdown")
+        await update.message.reply_text(help_text, parse_mode="MARKDOWN")
         return
 
     action = context.args[0].lower()
@@ -370,7 +396,7 @@ async def weather_set_command(update: Update,
                     key) > 8 else "********"
                 info_text += f"- {WEATHER_SOURCES[source]['name']}: `{masked_key}`\n"
 
-        await update.message.reply_text(info_text, parse_mode="Markdown")
+        await update.message.reply_text(info_text, parse_mode="MARKDOWN")
 
     else:
         await update.message.reply_text("❌ 无效的命令，使用 /weatherset 查看帮助")
@@ -440,6 +466,7 @@ async def _fetch_data(source,
     # OpenWeatherMap 不支持中文城市名，尝试转换
     if source == "openweathermap" and any('\u4e00' <= char <= '\u9fff'
                                           for char in location):
+        from utils.city_mapping import translate_city_name
         english_location = translate_city_name(location)
         if english_location != location:
             location = english_location
@@ -941,18 +968,56 @@ def format_forecast(data, source, location, days=3):
 def get_state(module_interface):
     """获取模块状态"""
     module_interface.logger.debug("获取天气模块状态")
-    return _state
+    # 只返回可序列化数据
+    state_copy = _state.copy()
+    # 移除缓存相关数据，避免存储大量临时数据
+    if "cache" in state_copy:
+        del state_copy["cache"]
+    if "cache_time" in state_copy:
+        del state_copy["cache_time"]
+    return state_copy
 
 
 def set_state(module_interface, state):
     """设置模块状态"""
     global _state
-    _state = state
+    # 保留缓存相关数据
+    cache = _state.get("cache", {})
+    cache_time = _state.get("cache_time", {})
+
+    # 更新状态
+    _state.update(state)
+
+    # 恢复缓存数据
+    if "cache" not in _state:
+        _state["cache"] = cache
+    if "cache_time" not in _state:
+        _state["cache_time"] = cache_time
+
     module_interface.logger.debug(f"模块状态已更新: {state}")
 
 
+# 清理过期缓存
+def cleanup_cache():
+    """清理过期的缓存数据"""
+    now = datetime.now().timestamp()
+    expiry_time = CACHE_EXPIRY * 60  # 转换为秒
+
+    expired_keys = []
+    for key, timestamp in _state["cache_time"].items():
+        if now - timestamp > expiry_time:
+            expired_keys.append(key)
+
+    for key in expired_keys:
+        if key in _state["cache"]:
+            del _state["cache"][key]
+        del _state["cache_time"][key]
+
+    return len(expired_keys)
+
+
 # 模块接口函数
-def setup(module_interface):
+async def setup(module_interface):
     """模块初始化"""
     # 加载配置文件
     try:
@@ -971,25 +1036,57 @@ def setup(module_interface):
         module_interface.logger.error(f"加载天气配置失败: {e}")
 
     # 注册命令
-    module_interface.register_command("weather", weather_command)
-    module_interface.register_command("forecast", forecast_command)
-    module_interface.register_command("weatherset",
-                                      weather_set_command,
-                                      admin_only="super_admin")
+    await module_interface.register_command("weather",
+                                            weather_command,
+                                            description="查询当前天气")
+
+    await module_interface.register_command("forecast",
+                                            forecast_command,
+                                            description="查询天气预报")
+
+    await module_interface.register_command("weatherset",
+                                            weather_set_command,
+                                            admin_level="super_admin",
+                                            description="天气模块设置")
 
     # 加载用户位置状态
-    user_locations = module_interface.load_state(
-        default={"user_locations": {}})
-    if "user_locations" in user_locations:
-        _state["user_locations"] = user_locations["user_locations"]
+    state = module_interface.load_state(default={})
+    if state:
+        set_state(module_interface, state)
         module_interface.logger.info(
             f"已加载 {len(_state['user_locations'])} 个用户的位置信息")
+
+    # 初始化缓存
+    if "cache" not in _state:
+        _state["cache"] = {}
+    if "cache_time" not in _state:
+        _state["cache_time"] = {}
+
+    # 启动定期清理缓存的任务
+    async def cleanup_task():
+        while True:
+            await asyncio.sleep(CACHE_EXPIRY * 60)  # 每隔缓存过期时间清理一次
+            cleaned = cleanup_cache()
+            if cleaned > 0:
+                module_interface.logger.debug(f"已清理 {cleaned} 条过期天气缓存")
+
+    # 创建清理任务
+    module_interface.cleanup_task = asyncio.create_task(cleanup_task())
 
     module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
 
-def cleanup(module_interface):
+async def cleanup(module_interface):
     """模块清理"""
+    # 取消清理任务
+    if hasattr(module_interface,
+               'cleanup_task') and module_interface.cleanup_task:
+        module_interface.cleanup_task.cancel()
+        try:
+            await module_interface.cleanup_task
+        except asyncio.CancelledError:
+            pass
+
     # 保存配置文件
     try:
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
@@ -1006,8 +1103,8 @@ def cleanup(module_interface):
     except Exception as e:
         module_interface.logger.error(f"保存天气配置失败: {e}")
 
-    # 保存用户位置
-    module_interface.save_state({"user_locations": _state["user_locations"]})
+    # 保存用户位置 - 使用 get_state 获取可序列化状态
+    module_interface.save_state(get_state(module_interface))
     module_interface.logger.info(
         f"已保存 {len(_state['user_locations'])} 个用户的位置信息")
     module_interface.logger.info(f"模块 {MODULE_NAME} 已清理")

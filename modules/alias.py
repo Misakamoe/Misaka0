@@ -1,27 +1,25 @@
-# modules/alias.py
+# modules/alias.py - 命令别名模块
 
 import asyncio
 import json
 import os
 import random
-import threading
+from typing import Dict, Optional, Any
 from telegram import Update
 from telegram.ext import ContextTypes, MessageHandler, filters
-from utils.decorators import error_handler
-from utils.text_utils import TextUtils
 
 # 模块元数据
-MODULE_NAME = "alias"
-MODULE_VERSION = "1.5.0"
+MODULE_NAME = "Alias"
+MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "命令别名，支持中文命令和动作"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["alias"]  # 只包含英文命令
 
 # 存储别名数据的文件路径
-_data_file = "config/aliases.json"
+CONFIG_FILE = "config/aliases.json"
 
 # 内置动作模板（不会被保存到配置文件中）
-_action_templates = {
+ACTION_TEMPLATES = {
     "default": [
         "{user} {action}了 {target}", "{user} {action}了 {target}",
         "{user} 想{action} {target}", "{user} 正在{action} {target}",
@@ -68,6 +66,9 @@ _action_templates = {
     ]
 }
 
+# 模块接口引用
+_interface = None
+
 # 模块状态
 _state = {
     "aliases": {
@@ -80,12 +81,12 @@ _state = {
 
 # 反向映射表（自动生成）
 _reverse_aliases = {}
-# 模块接口引用
-_module_interface = None
+
+# 异步锁
+_state_lock = asyncio.Lock()
+
 # 消息处理器引用
 _message_handler = None
-# 状态锁
-_state_lock = threading.Lock()
 
 
 def _update_reverse_aliases():
@@ -97,152 +98,70 @@ def _update_reverse_aliases():
             _reverse_aliases[alias] = cmd
 
 
-def load_aliases():
+def _load_aliases() -> Dict[str, Any]:
     """从文件加载别名数据"""
-    if not os.path.exists(_data_file):
+    if not os.path.exists(CONFIG_FILE):
         return _state  # 返回默认状态
 
     try:
-        with open(_data_file, 'r', encoding='utf-8') as f:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             # 确保有 permissions 字段
             if "permissions" not in data:
                 data["permissions"] = {"alias": "super_admin"}
-            # 不从文件加载 action_templates
-            if "action_templates" in data:
-                del data["action_templates"]
             return data
     except Exception as e:
-        if _module_interface:
-            _module_interface.logger.error(f"加载别名数据失败: {e}")
+        if _interface:
+            _interface.logger.error(f"加载别名数据失败: {e}")
         return _state  # 返回默认状态
 
 
-def save_aliases():
-    """保存别名数据到文件（线程安全）"""
+async def _save_aliases():
+    """保存别名数据到文件（异步安全）"""
     global _state
 
-    with _state_lock:
-        os.makedirs(os.path.dirname(_data_file), exist_ok=True)
+    async with _state_lock:
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
 
         try:
-            # 创建一个不包含 action_templates 的副本
-            save_state = _state.copy()
-            if "action_templates" in save_state:
-                del save_state["action_templates"]
+            # 创建一个副本
+            save_state = {
+                "aliases": _state["aliases"],
+                "permissions": _state["permissions"]
+            }
 
-            with open(_data_file, 'w', encoding='utf-8') as f:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(save_state, f, ensure_ascii=False, indent=2)
-            if _module_interface:
-                _module_interface.logger.debug(f"别名数据已保存到 {_data_file}")
+            if _interface:
+                _interface.logger.debug(f"别名数据已保存到 {CONFIG_FILE}")
         except Exception as e:
-            if _module_interface:
-                _module_interface.logger.error(f"保存别名数据失败: {e}")
+            if _interface:
+                _interface.logger.error(f"保存别名数据失败: {e}")
 
 
-def _get_command_metadata(command):
+async def _get_command_metadata(command: str) -> Dict[str, Any]:
     """获取命令的元数据，包括权限要求"""
-    if not _module_interface:
-        return {}
-
-    bot_engine = _module_interface.bot_engine
-    command_processor = bot_engine.command_processor
-
-    # 尝试从命令处理器获取元数据
-    if hasattr(command_processor, "get_command_metadata"):
-        return command_processor.get_command_metadata(command)
-
-    # 如果无法从命令处理器获取，尝试从状态中获取
+    # 从状态中获取
     if "permissions" in _state and command in _state["permissions"]:
-        return {"admin_only": _state["permissions"][command]}
+        return {"admin_level": _state["permissions"][command]}
+
+    # 尝试从命令管理器获取
+    try:
+        command_manager = _interface.application.bot_data.get(
+            "command_manager")
+        if command_manager and hasattr(command_manager, "commands"):
+            cmd_info = command_manager.commands.get(command, {})
+            if cmd_info:
+                return {"admin_level": cmd_info.get("admin_level", False)}
+    except Exception as e:
+        _interface.logger.debug(f"获取命令元数据时出错: {e}")
 
     return {}
 
 
-async def _check_permission(context, user_id, chat_id, admin_only):
-    """检查用户是否有执行命令的权限
-    
-    Args:
-        context: 上下文对象
-        user_id: 用户 ID
-        chat_id: 聊天 ID
-        admin_only: 权限级别 ("super_admin" 或 "group_admin")
-        
-    Returns:
-        bool: 是否有权限
-    """
-    config_manager = context.bot_data.get("config_manager")
-    if not config_manager:
-        _module_interface.logger.error("权限检查失败: 找不到 config_manager")
-        return False
-
-    # 检查是否是超级管理员
-    if config_manager.is_admin(user_id):
-        return True
-
-    # 如果只需要超级管理员权限，此时可以返回 False
-    if admin_only == "super_admin":
-        return False
-
-    # 检查是否是群组管理员（仅当需要群组管理员权限时）
-    if admin_only == "group_admin" and chat_id:
-        try:
-            chat_member = await context.bot.get_chat_member(chat_id, user_id)
-            return chat_member.status in ["creator", "administrator"]
-        except Exception as e:
-            _module_interface.logger.error(
-                f"检查用户 {user_id} 在群组 {chat_id} 的权限失败: {e}")
-
-    return False
-
-
-def _is_command_exists(cmd):
-    """检查命令是否存在"""
-    if not _module_interface:
-        return True  # 无法验证，假设存在
-
-    bot_engine = _module_interface.bot_engine
-    for module_name, module_data in bot_engine.module_loader.loaded_modules.items(
-    ):
-        if hasattr(module_data["module"], "MODULE_COMMANDS"):
-            if cmd in module_data["module"].MODULE_COMMANDS:
-                return True
-    return False
-
-
-def _get_module_of_command(command):
-    """获取命令所属的模块名称"""
-    if not _module_interface:
-        return None
-
-    bot_engine = _module_interface.bot_engine
-    for module_name, module_data in bot_engine.module_loader.loaded_modules.items(
-    ):
-        if hasattr(module_data["module"], "MODULE_COMMANDS"):
-            if command in module_data["module"].MODULE_COMMANDS:
-                return module_name
-    return None
-
-
-def _is_module_enabled_for_chat(module_name, chat_id, context):
-    """检查模块是否在指定聊天中启用"""
-    if not chat_id:
-        return True  # 如果无法确定聊天 ID，则假设启用
-
-    config_manager = context.bot_data.get("config_manager")
-    if not config_manager:
-        return True  # 如果无法获取配置管理器，则假设启用
-
-    # 核心命令不需要检查
-    core_modules = ["core"]
-    if module_name in core_modules:
-        return True
-
-    # 检查模块是否在当前聊天中启用
-    return config_manager.is_module_enabled_for_chat(module_name, chat_id)
-
-
-def _check_alias_cycle(cmd, alias, visited=None):
+def _check_alias_cycle(cmd: str,
+                       alias: str,
+                       visited: Optional[set] = None) -> bool:
     """检查是否会形成别名循环引用
     
     Args:
@@ -268,15 +187,15 @@ def _check_alias_cycle(cmd, alias, visited=None):
     return False
 
 
-def is_chinese_command(command):
+def is_chinese_command(command: str) -> bool:
     """检查是否是中文命令"""
     # 简单检查是否包含中文字符
     return any('\u4e00' <= char <= '\u9fff' for char in command)
 
 
-@error_handler
 async def handle_action_command(update: Update,
-                                context: ContextTypes.DEFAULT_TYPE, action):
+                                context: ContextTypes.DEFAULT_TYPE,
+                                action: str):
     """处理动作命令"""
     # 获取发送者信息
     user = update.effective_user
@@ -291,10 +210,9 @@ async def handle_action_command(update: Update,
             target_name = target_user.full_name
             target_mention = f'<a href="tg://user?id={target_user.id}">{target_name}</a>'
 
-    # 获取动作模板（从内置模板中获取）
-    templates = _action_templates.get(
-        action, _action_templates.get("default",
-                                      ["{user} {action}了 {target}"]))
+    # 获取动作模板
+    templates = ACTION_TEMPLATES.get(
+        action, ACTION_TEMPLATES.get("default", ["{user} {action}了 {target}"]))
 
     # 随机选择一个模板
     template = random.choice(templates)
@@ -308,66 +226,28 @@ async def handle_action_command(update: Update,
     await update.message.reply_text(action_message, parse_mode="HTML")
 
 
-@error_handler
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理所有消息，检查是否包含中文命令别名或动作命令"""
-    # 检查 alias 模块是否启用
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if not _is_module_enabled_for_chat("alias", chat_id, context):
-        return None  # 如果 alias 模块被禁用，允许消息继续传递
-
     if not update.message or not update.message.text:
-        return None  # 允许消息继续传递
+        return
 
     message_text = update.message.text
 
     # 只处理带 "/" 开头的命令别名，如 /复读
     if message_text.startswith('/'):
         command = message_text[1:].split(' ')[0].split('@')[0]  # 提取命令部分
+
+        # 检查是否是已知别名
         if command in _reverse_aliases:
+            # 获取原始命令
             aliased_command = _reverse_aliases[command]
-
-            # 检查模块是否在当前群组启用
-            chat_id = update.effective_chat.id if update.effective_chat else None
-            module_name = _get_module_of_command(aliased_command)
-
-            if module_name and not _is_module_enabled_for_chat(
-                    module_name, chat_id, context):
-                # 模块未启用，发送提示
-                chat_type = update.effective_chat.type if update.effective_chat else "unknown"
-                if chat_type in ["group", "supergroup"]:
-                    await update.effective_message.reply_text(
-                        f"模块 {module_name} 未在当前群组启用。")
-                else:
-                    await update.effective_message.reply_text(
-                        f"模块 {module_name} 未启用。")
-                return True  # 阻止消息继续传递
-
-            # 检查原始命令的权限要求
-            command_metadata = _get_command_metadata(aliased_command)
-            admin_only = command_metadata.get("admin_only", False)
-
-            # 如果命令需要权限，进行权限检查
-            if admin_only:
-                # 获取用户信息
-                user_id = update.effective_user.id
-
-                # 检查用户权限
-                if not await _check_permission(context, user_id, chat_id,
-                                               admin_only):
-                    # 权限不足，发送提示
-                    if update.effective_message:
-                        await update.effective_message.reply_text(
-                            "⚠️ 您没有执行此命令的权限。" if admin_only ==
-                            "group_admin" else "⚠️ 此命令仅超级管理员可用。")
-                    return True  # 阻止消息继续传递
 
             # 提取参数
             args_text = message_text[len(command) + 1:].strip()
             args = args_text.split() if args_text else []
 
             # 记录命令调用
-            _module_interface.logger.debug(
+            _interface.logger.debug(
                 f"执行别名命令: /{aliased_command} (别名: {command})")
 
             # 保存原始参数
@@ -377,59 +257,25 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # 设置新参数
                 context.args = args
 
-                command_executed = False
-
                 # 尝试执行命令
-                try:
-                    # 获取命令所属的模块名称
-                    module_name = _get_module_of_command(aliased_command)
-                    if module_name:
-                        # 获取模块接口
-                        cmd_module = _module_interface.get_module_interface(
-                            module_name)
-                        if cmd_module:
-                            # 命令处理函数名称
-                            handler_name = f"{aliased_command}_command"
-                            # 调用模块方法
-                            await _module_interface.call_module_method(
-                                module_name, handler_name, update, context)
-                            _module_interface.logger.debug(
-                                f"成功执行别名命令: /{aliased_command} (模块: {module_name})"
-                            )
-                            command_executed = True
-                        else:
-                            _module_interface.logger.debug(
-                                f"找不到模块接口: {module_name}")
-                    else:
-                        _module_interface.logger.debug(
-                            f"找不到命令 /{aliased_command} 所属的模块")
-                except Exception as e:
-                    _module_interface.logger.debug(f"尝试直接调用模块方法失败: {str(e)}")
+                command_manager = _interface.application.bot_data.get(
+                    "command_manager")
+                if command_manager:
+                    # 获取命令信息
+                    cmd_info = command_manager.commands.get(aliased_command)
+                    if cmd_info:
+                        # 获取回调函数
+                        callback = cmd_info.get("callback")
+                        if callback:
+                            # 执行命令
+                            await callback(update, context)
+                            return
 
-                # 如果直接调用失败，尝试通过事件系统
-                if not command_executed:
-                    try:
-                        # 发布命令执行事件
-                        result = await _module_interface.publish_event(
-                            "execute_command",
-                            command=aliased_command,
-                            update=update,
-                            context=context)
-                        if result and result[0] > 0:
-                            _module_interface.logger.debug(
-                                f"通过事件系统执行别名命令: /{aliased_command}")
-                            command_executed = True
-                    except Exception as e:
-                        _module_interface.logger.debug(
-                            f"尝试通过事件系统执行命令失败: {str(e)}")
-
-                # 如果所有方法都失败，记录警告
-                if not command_executed:
-                    _module_interface.logger.warning(
-                        f"未找到别名命令的处理器: /{aliased_command}")
-
-                # 只有在成功执行命令时才返回 True 阻止消息继续传递
-                return command_executed
+                # 如果直接执行失败，尝试通过事件系统
+                await _interface.publish_event("execute_command",
+                                               command=aliased_command,
+                                               update=update,
+                                               context=context)
 
             finally:
                 # 恢复原始参数
@@ -443,13 +289,8 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif is_chinese_command(command) and ' ' not in command:
             # 检查是否是中文命令且不包含空格
             await handle_action_command(update, context, command)
-            return True  # 阻止消息继续传递
-
-    # 如果不是别名或处理失败，明确返回 None 允许消息继续传递
-    return None
 
 
-@error_handler
 async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理命令别名"""
     if not context.args or len(context.args) < 1:
@@ -474,20 +315,16 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         alias = context.args[2]
 
         # 检查命令是否存在
-        if not _is_command_exists(cmd):
+        command_manager = _interface.application.bot_data.get(
+            "command_manager")
+        if not command_manager or cmd not in command_manager.commands:
             await update.message.reply_text(f"⚠️ 命令 /{cmd} 不存在")
             return
 
         # 检查别名是否与现有命令冲突
-        bot_engine = context.bot_data.get("bot_engine")
-        if bot_engine:
-            for module_name, module_data in bot_engine.module_loader.loaded_modules.items(
-            ):
-                if hasattr(module_data["module"], "MODULE_COMMANDS"):
-                    if alias in module_data["module"].MODULE_COMMANDS:
-                        await update.message.reply_text(
-                            f"⚠️ 别名「{alias}」与现有命令冲突，请使用其他名称")
-                        return
+        if alias in command_manager.commands:
+            await update.message.reply_text(f"⚠️ 别名「{alias}」与现有命令冲突，请使用其他名称")
+            return
 
         # 检查是否会形成循环引用
         if _check_alias_cycle(cmd, alias):
@@ -495,14 +332,14 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # 获取命令的权限要求
-        command_metadata = _get_command_metadata(cmd)
-        admin_only = command_metadata.get("admin_only", False)
+        cmd_info = command_manager.commands.get(cmd, {})
+        admin_level = cmd_info.get("admin_level", False)
 
         # 如果命令存在权限要求，保存到状态中
-        if admin_only:
+        if admin_level:
             if "permissions" not in _state:
                 _state["permissions"] = {}
-            _state["permissions"][cmd] = admin_only
+            _state["permissions"][cmd] = admin_level
 
         # 检查命令是否在别名表中
         if cmd not in _state["aliases"]:
@@ -510,10 +347,10 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 添加别名
         if alias not in _state["aliases"][cmd]:
-            with _state_lock:
+            async with _state_lock:
                 _state["aliases"][cmd].append(alias)
                 _update_reverse_aliases()
-            save_aliases()  # 保存到文件
+            await _save_aliases()  # 保存到文件
             await update.message.reply_text(f"已为 /{cmd} 添加别名「{alias}」")
         else:
             await update.message.reply_text(f"别名「{alias}」已存在")
@@ -533,7 +370,7 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 移除别名
         if alias in _state["aliases"][cmd]:
-            with _state_lock:
+            async with _state_lock:
                 _state["aliases"][cmd].remove(alias)
                 # 如果别名列表为空，考虑完全移除该命令
                 if not _state["aliases"][
@@ -543,7 +380,7 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if cmd in _state.get("permissions", {}):
                         del _state["permissions"][cmd]
                 _update_reverse_aliases()
-            save_aliases()  # 保存到文件
+            await _save_aliases()  # 保存到文件
             await update.message.reply_text(f"已从 /{cmd} 移除别名「{alias}」")
         else:
             await update.message.reply_text(f"别名「{alias}」不存在")
@@ -560,61 +397,41 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(help_text, parse_mode="MARKDOWN")
 
 
-@error_handler
 async def register_message_handler():
     """安全地注册消息处理器"""
-    global _module_interface, _message_handler
+    global _interface, _message_handler
 
-    # 获取 bot_engine 引用
-    bot_engine = _module_interface.bot_engine
+    # 如果已经注册了处理器，先注销
+    if _message_handler:
+        try:
+            # 从接口的已注册处理器列表中移除
+            for i, (handler, group) in enumerate(_interface.handlers):
+                if handler == _message_handler:
+                    _interface.handlers.pop(i)
+                    break
 
-    # 使用更新锁确保安全
-    async with bot_engine.update_lock:
-        # 如果已经注册了处理器，先注销
-        if _message_handler:
-            try:
-                # 安全地注销处理器
-                handlers_to_remove = list(
-                    _module_interface.registered_handlers)
-                _module_interface.registered_handlers = []
+            # 从应用中移除处理器
+            _interface.application.remove_handler(_message_handler, 100)
+            _message_handler = None
+        except Exception as e:
+            _interface.logger.error(f"注销消息处理器失败: {e}")
 
-                for handler, group in handlers_to_remove:
-                    try:
-                        _module_interface.application.remove_handler(
-                            handler, group)
-                    except Exception as e:
-                        _module_interface.logger.warning(f"移除处理器时出错: {e}")
-
-                _message_handler = None
-            except Exception as e:
-                _module_interface.logger.error(f"注销消息处理器失败: {e}")
-
-        # 注册新的消息处理器
-        _message_handler = MessageHandler(filters.Regex(r'^/'),
-                                          process_message)
-        _module_interface.register_handler(_message_handler,
-                                           group=100)  # 使用较低的优先级
-        _module_interface.logger.info("别名消息处理器已安全注册")
+    # 注册新的消息处理器
+    _message_handler = MessageHandler(filters.Regex(r'^/'), process_message)
+    await _interface.register_handler(_message_handler, group=100)  # 使用较低的优先级
+    _interface.logger.info("别名消息处理器已安全注册")
 
 
 # 所有模块加载完成的事件处理
-@error_handler
 async def on_all_modules_loaded(event_type, **event_data):
     """当所有模块加载完成时调用"""
-    global _module_interface
-
-    # 获取 bot_engine 引用
-    bot_engine = _module_interface.bot_engine
-
     # 延迟一点时间再注册处理器，确保所有命令都已注册
     await asyncio.sleep(1)
 
-    # 使用更新锁保护处理器注册
-    async with bot_engine.update_lock:
-        # 注册消息处理器
-        await register_message_handler()
+    # 注册消息处理器
+    await register_message_handler()
 
-    _module_interface.logger.info("所有模块加载完成，别名系统已更新")
+    _interface.logger.info("所有模块加载完成，别名系统已更新")
 
 
 # 状态管理函数
@@ -626,19 +443,18 @@ def get_state(module_interface):
 def set_state(module_interface, state):
     """设置模块状态"""
     global _state
-    with _state_lock:
-        _state = state
-        _update_reverse_aliases()
+    _state = state
+    _update_reverse_aliases()
     module_interface.logger.debug(f"模块状态已更新: {state}")
 
 
-def setup(module_interface):
+async def setup(module_interface):
     """模块初始化"""
-    global _module_interface, _state
-    _module_interface = module_interface
+    global _interface, _state
+    _interface = module_interface
 
     # 从文件加载别名数据
-    loaded_state = load_aliases()
+    loaded_state = _load_aliases()
     if loaded_state:
         _state.update(loaded_state)
 
@@ -646,54 +462,33 @@ def setup(module_interface):
     _update_reverse_aliases()
 
     # 注册命令
-    module_interface.register_command("alias",
-                                      alias_command,
-                                      admin_only="super_admin")
+    await module_interface.register_command("alias",
+                                            alias_command,
+                                            admin_level="super_admin",
+                                            description="管理命令别名")
 
     # 订阅模块加载完成事件
-    module_interface.subscribe_event("all_modules_loaded",
-                                     on_all_modules_loaded)
+    await module_interface.subscribe_event("all_modules_loaded",
+                                           on_all_modules_loaded)
 
     # 创建一个延迟任务来安全地注册消息处理器
-    asyncio.create_task(delayed_register_handler(module_interface))
-
-    # 同时也保存到模块状态系统（作为备份）
-    module_interface.save_state(_state)
+    asyncio.create_task(delayed_register_handler())
 
     module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
 
-async def delayed_register_handler(module_interface):
+async def delayed_register_handler():
     """安全地延迟注册消息处理器"""
-    global _message_handler, _module_interface
+    # 延迟一段时间，确保所有命令都已注册
+    await asyncio.sleep(2)
 
-    try:
-        # 延迟一段时间，确保所有命令都已注册
-        await asyncio.sleep(2)
-
-        # 获取 bot_engine 引用
-        bot_engine = module_interface.bot_engine
-
-        # 使用更新锁保护处理器注册
-        async with bot_engine.update_lock:
-            # 注册消息处理器
-            _message_handler = MessageHandler(filters.Regex(r'^/'),
-                                              process_message)
-            module_interface.register_handler(_message_handler,
-                                              group=100)  # 使用较低的优先级
-            module_interface.logger.info("别名消息处理器已安全注册")
-    except Exception as e:
-        module_interface.logger.error(f"延迟注册消息处理器失败: {e}")
+    # 注册消息处理器
+    await register_message_handler()
 
 
-def cleanup(module_interface):
+async def cleanup(module_interface):
     """模块清理"""
-    global _message_handler
-
     # 保存别名数据到文件
-    save_aliases()
-
-    # 同时也保存到模块状态系统（作为备份）
-    module_interface.save_state(_state)
+    await _save_aliases()
 
     module_interface.logger.info(f"模块 {MODULE_NAME} 已清理")

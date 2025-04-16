@@ -1,4 +1,4 @@
-# modules/rss.py
+# modules/rss.py - RSS 订阅模块
 
 import asyncio
 import aiohttp
@@ -11,12 +11,10 @@ import time
 from datetime import datetime
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
-from utils.decorators import error_handler
-from utils.text_utils import TextUtils
 
 # 模块元数据
-MODULE_NAME = "rss"
-MODULE_VERSION = "1.3.0"
+MODULE_NAME = "RSS"
+MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "RSS 订阅，智能间隔和健康监控"
 MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["rss"]
@@ -87,7 +85,6 @@ def save_config():
 
 
 # RSS 命令处理函数
-@error_handler
 async def rss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理 RSS 订阅"""
     if not context.args:
@@ -137,15 +134,14 @@ async def list_subscriptions(update: Update,
         source_info = _config["sources"].get(url, {})
         title = source_info.get("title", url)
         # 使用 HTML 格式，避免转义问题
-        safe_title = TextUtils.escape_html(title)
-        safe_url = TextUtils.escape_html(url)
+        safe_title = escape_html(title)
+        safe_url = escape_html(url)
         text += f"{i}. <b>{safe_title}</b>\n"
         text += f"   <code>{safe_url}</code>\n\n"
 
     await update.message.reply_text(text, parse_mode="HTML")
 
 
-@error_handler
 async def rss_health_command(update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
     """查询 RSS 源健康状态"""
@@ -164,7 +160,7 @@ async def rss_health_command(update: Update,
     for url in subscriptions:
         source_info = _config["sources"].get(url, {})
         source_title = source_info.get('title', url)
-        safe_title = TextUtils.escape_html(source_title)
+        safe_title = escape_html(source_title)
 
         health_info = _state["source_health"].get(
             url, {
@@ -266,8 +262,8 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_config()
 
         # 更新消息，显示成功添加
-        safe_title = TextUtils.escape_html(_config['sources'][url]['title'])
-        safe_url = TextUtils.escape_html(url)
+        safe_title = escape_html(_config['sources'][url]['title'])
+        safe_url = escape_html(url)
         success_text = (f"✅ 成功添加 RSS 订阅\n\n"
                         f"📚 <b>{safe_title}</b>\n"
                         f"🔗 <code>{safe_url}</code>")
@@ -282,7 +278,7 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 published = entry.get('published', '')
 
                 # 使用 HTML 格式，避免转义问题
-                safe_title = TextUtils.escape_html(title)
+                safe_title = escape_html(title)
                 preview_text += f"• <b>{safe_title}</b>\n"
                 if published:
                     preview_text += f"  ⏰ {published}\n"
@@ -333,7 +329,7 @@ async def remove_subscription(update: Update,
         # 获取源标题
         source_title = _config["sources"].get(url_to_remove,
                                               {}).get("title", url_to_remove)
-        safe_title = TextUtils.escape_html(source_title)
+        safe_title = escape_html(source_title)
 
         subscriptions.remove(url_to_remove)
 
@@ -393,7 +389,7 @@ async def notify_source_unhealthy(url, source_info, subscribed_chats,
                                   module_interface):
     """通知订阅者源可能有问题"""
     source_title = source_info.get('title', url)
-    safe_title = TextUtils.escape_html(source_title)
+    safe_title = escape_html(source_title)
     message = (
         f"⚠️ <b>RSS 源可能不可用</b>\n\n"
         f"RSS 源 <b>{safe_title}</b> 连续 {HEALTH_CHECK_THRESHOLD} 次检查失败。\n"
@@ -413,7 +409,7 @@ async def notify_source_recovered(url, source_info, subscribed_chats,
                                   module_interface):
     """通知订阅者源已恢复"""
     source_title = source_info.get('title', url)
-    safe_title = TextUtils.escape_html(source_title)
+    safe_title = escape_html(source_title)
     message = (f"✅ <b>RSS 源已恢复</b>\n\n"
                f"之前报告有问题的 RSS 源 <b>{safe_title}</b> 现在已经恢复正常。")
 
@@ -452,41 +448,45 @@ async def initialize_entry_ids(module_interface):
 
 async def check_updates(module_interface):
     """定期检查 RSS 更新"""
-    while True:
-        try:
-            # 使用异步并发池限制同时检查的源数量
-            tasks = []
-            current_time = datetime.now().timestamp()
+    try:
+        while True:
+            try:
+                # 使用异步并发池限制同时检查的源数量
+                tasks = []
+                current_time = datetime.now().timestamp()
 
-            for url, source_info in _config["sources"].items():
-                # 获取上次检查时间
-                last_check = _state["last_check"].get(url, 0)
+                for url, source_info in _config["sources"].items():
+                    # 获取上次检查时间
+                    last_check = _state["last_check"].get(url, 0)
 
-                # 获取该源的检查间隔（如果有自定义间隔则使用，否则使用默认值）
-                check_interval = _state["check_intervals"].get(
-                    url, DEFAULT_INTERVAL)
+                    # 获取该源的检查间隔（如果有自定义间隔则使用，否则使用默认值）
+                    check_interval = _state["check_intervals"].get(
+                        url, DEFAULT_INTERVAL)
 
-                # 如果距离上次检查不到指定间隔，跳过
-                if current_time - last_check < check_interval:
-                    continue
+                    # 如果距离上次检查不到指定间隔，跳过
+                    if current_time - last_check < check_interval:
+                        continue
 
-                # 创建检查任务
-                task = asyncio.create_task(
-                    check_feed(url, source_info, module_interface))
-                tasks.append(task)
+                    # 创建检查任务
+                    task = asyncio.create_task(
+                        check_feed(url, source_info, module_interface))
+                    tasks.append(task)
 
-            # 等待所有任务完成
-            if tasks:
-                await asyncio.gather(*tasks)
+                # 等待所有任务完成
+                if tasks:
+                    await asyncio.gather(*tasks)
 
-            # 保存状态
-            module_interface.save_state(_state)
+                # 保存状态
+                module_interface.save_state(_state)
 
-        except Exception as e:
-            module_interface.logger.error(f"RSS 检查任务出错: {e}")
+            except Exception as e:
+                module_interface.logger.error(f"RSS 检查任务出错: {e}")
 
-        # 等待下一次检查周期
-        await asyncio.sleep(60)  # 每分钟检查一次待检查的源
+            # 等待下一次检查周期
+            await asyncio.sleep(60)  # 每分钟检查一次待检查的源
+    except asyncio.CancelledError:
+        module_interface.logger.info("RSS 检查任务被取消")
+        raise
 
 
 async def check_feed(url, source_info, module_interface):
@@ -652,9 +652,9 @@ async def send_entry(entry, source_info, url, subscribed_chats,
             content = entry.description
 
         # 清理 HTML 标签，保留纯文本内容
-        content = TextUtils.strip_html(content)
+        content = strip_html(content)
         # 规范化空白字符，删除多余的空行和空格
-        content = TextUtils.normalize_whitespace(content)
+        content = normalize_whitespace(content)
 
         # 限制长度，保留前 200 个字符
         if len(content) > 200:
@@ -686,10 +686,10 @@ async def send_entry(entry, source_info, url, subscribed_chats,
                 image_url = img_match.group(1)
 
         # 使用 HTML 格式发送消息
-        safe_title = TextUtils.escape_html(title)
-        safe_content = TextUtils.escape_html(content)
+        safe_title = escape_html(title)
+        safe_content = escape_html(content)
         source_title = source_info.get('title', url)
-        safe_source_title = TextUtils.escape_html(source_title)
+        safe_source_title = escape_html(source_title)
 
         html_content = (f"<b>📰 {safe_title}</b>\n\n"
                         f"{safe_content}\n\n")
@@ -709,7 +709,6 @@ async def send_entry(entry, source_info, url, subscribed_chats,
         current_time = time.time()
 
         for chat_id, chat_type in subscribed_chats:
-            # chat_id 已经在 check_feed 函数中转换为整数
             # 再次检查模块是否在该聊天中启用（可能在处理过程中被禁用）
             if not module_interface.config_manager.is_module_enabled_for_chat(
                     MODULE_NAME, chat_id):
@@ -768,35 +767,78 @@ async def send_entry(entry, source_info, url, subscribed_chats,
         module_interface.logger.error(f"发送 RSS 条目时出错: {e}")
 
 
+# 文本处理函数
+def strip_html(text):
+    """移除 HTML 标签"""
+    if not text:
+        return ""
+    return re.sub(r'<[^>]+>', '', text)
+
+
+def normalize_whitespace(text):
+    """规范化文本中的空白字符，删除多余的空行和空格"""
+    if not text:
+        return ""
+    # 将多个空行替换为一个空行
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    # 删除每行开头和结尾的空白
+    text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)
+    # 删除整个文本开头和结尾的空白
+    return text.strip()
+
+
+def escape_html(text):
+    """转义 HTML 特殊字符"""
+    if not text:
+        return ""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(
+        ">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
+
+
 # 状态管理函数
 def get_state(module_interface):
     """获取模块状态"""
-    return _state
+    # 确保只返回可序列化数据
+    serializable_state = {
+        "last_check": _state.get("last_check", {}),
+        "last_entry_ids": _state.get("last_entry_ids", {}),
+        "last_sent_time": _state.get("last_sent_time", {}),
+        "update_timestamps": _state.get("update_timestamps", {}),
+        "check_intervals": _state.get("check_intervals", {}),
+        "source_health": _state.get("source_health", {})
+    }
+    return serializable_state
 
 
 def set_state(module_interface, state):
     """设置模块状态"""
     global _state
-    _state = state
-    module_interface.logger.debug(f"模块状态已更新: {state}")
+    if state is None:
+        _state = {
+            "last_check": {},
+            "last_entry_ids": {},
+            "last_sent_time": {},
+            "update_timestamps": {},
+            "check_intervals": {},
+            "source_health": {}
+        }
+        return
+
+    # 确保所有必要的键都存在
+    _state = {
+        "last_check": state.get("last_check", {}),
+        "last_entry_ids": state.get("last_entry_ids", {}),
+        "last_sent_time": state.get("last_sent_time", {}),
+        "update_timestamps": state.get("update_timestamps", {}),
+        "check_intervals": state.get("check_intervals", {}),
+        "source_health": state.get("source_health", {})
+    }
+    module_interface.logger.debug("模块状态已更新")
 
 
-async def startup_sequence(module_interface):
-    """启动序列：先初始化所有源的条目 ID，然后启动检查任务"""
-    try:
-        # 先执行初始化
-        await initialize_entry_ids(module_interface)
-
-        # 初始化完成后，再启动检查任务
-        module_interface.logger.info("初始化完成，开始定期检查 RSS 更新")
-        await check_updates(module_interface)
-    except Exception as e:
-        module_interface.logger.error(f"RSS 启动序列出错: {e}")
-
-
-def setup(module_interface):
+async def setup(module_interface):
     """模块初始化"""
-    global _check_task, _module_interface
+    global _module_interface, _check_task
 
     # 记录模块接口
     _module_interface = module_interface
@@ -805,47 +847,36 @@ def setup(module_interface):
     load_config()
 
     # 加载状态
-    saved_state = module_interface.load_state(
-        default={
-            "last_check": {},
-            "last_entry_ids": {},
-            "last_sent_time": {},
-            "update_timestamps": {},
-            "check_intervals": {},
-            "source_health": {}
-        })
-
-    # 确保所有必需的状态字段都存在
-    for key in [
-            "last_check", "last_entry_ids", "last_sent_time",
-            "update_timestamps", "check_intervals", "source_health"
-    ]:
-        if key not in saved_state:
-            saved_state[key] = {}
-
-    global _state
-    _state = saved_state
+    saved_state = module_interface.load_state()
+    if saved_state:
+        set_state(module_interface, saved_state)
 
     # 注册命令，在群组中只允许管理员使用
-    module_interface.register_command("rss",
-                                      rss_command,
-                                      admin_only="group_admin")
+    await module_interface.register_command("rss",
+                                            rss_command,
+                                            admin_level="group_admin",
+                                            description="管理 RSS 订阅")
 
     # 创建启动任务，先初始化再启动检查
-    _check_task = asyncio.create_task(startup_sequence(module_interface))
+    await initialize_entry_ids(module_interface)
+    _check_task = asyncio.create_task(check_updates(module_interface))
 
     module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
 
-def cleanup(module_interface):
+async def cleanup(module_interface):
     """模块清理"""
     global _check_task
 
     # 取消检查任务
     if _check_task and not _check_task.done():
         _check_task.cancel()
+        try:
+            await _check_task
+        except asyncio.CancelledError:
+            pass
 
     # 保存状态
-    module_interface.save_state(_state)
+    module_interface.save_state(get_state(module_interface))
 
     module_interface.logger.info(f"模块 {MODULE_NAME} 已清理")

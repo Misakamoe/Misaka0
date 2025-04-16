@@ -1,4 +1,4 @@
-# utils/currency_data.py
+# utils/currency_data.py - 货币数据模块
 """
 货币数据模块，提供货币代码、别名和符号的映射数据。
 """
