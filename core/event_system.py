@@ -1,9 +1,7 @@
 # core/event_system.py - 事件系统
 
 import asyncio
-import logging
 from collections import defaultdict
-
 from utils.logger import setup_logger
 
 

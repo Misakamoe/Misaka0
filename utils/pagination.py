@@ -1,13 +1,7 @@
 # utils/pagination.py - 分页工具
 
 import math
-import asyncio
-import re
-from typing import List, Dict, Any, Callable, Optional, Union
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from utils.formatter import TextFormatter
 
 

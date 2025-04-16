@@ -2,14 +2,9 @@
 
 import asyncio
 import difflib
-import re
 import time
 import datetime
-from typing import Dict, List, Callable, Any, Optional, Union
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, MessageHandler, filters, CallbackQueryHandler
-
 from utils.logger import setup_logger
 from utils.formatter import TextFormatter
 from utils.pagination import PaginationHelper
