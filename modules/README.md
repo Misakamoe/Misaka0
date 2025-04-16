@@ -1,351 +1,536 @@
 # 模块开发指南
 
-## 模块结构
+本文档提供了模块化 Telegram 机器人的模块开发指南，帮助您快速创建符合标准的功能模块。
 
-每个模块应该是 `modules` 目录下的独立 Python 文件，遵循以下结构：
+## 一、模块基本结构
 
-```py
-# 必需的模块元数据
-MODULE_NAME = "模块名称"
-MODULE_VERSION = "版本号"
-MODULE_DESCRIPTION = "模块描述"
-MODULE_DEPENDENCIES = []  # 依赖的其他模块
-MODULE_COMMANDS = []  # 模块提供的命令
+每个模块都是独立的 Python 文件，放置在 `modules` 目录下。基本结构如下：
 
-# 模块状态 (用于热更新)
-_state = {}
+```python
+# modules/your_module.py
 
-# 命令处理函数
-async def command_handler(update, context):
-    """命令处理函数"""
+# 模块元数据（必需）
+MODULE_NAME = "模块名称"           # 显示名称
+MODULE_VERSION = "1.0.0"          # 版本号
+MODULE_DESCRIPTION = "模块描述"     # 简短描述
+MODULE_DEPENDENCIES = []          # 依赖的其他模块列表
+MODULE_COMMANDS = ["命令1", "命令2"] # 模块提供的命令列表
+
+# 必需的函数
+async def setup(interface):
+    """模块初始化函数（必须实现）"""
+    # 在这里注册命令和处理器
     pass
 
-# 获取和设置状态的函数 (用于热更新)
-def get_state(module_interface):
-    """获取模块状态"""
-    return _state
+async def cleanup(interface):
+    """模块清理函数（必须实现）"""
+    # 在这里进行必要的清理工作
+    pass
 
-def set_state(module_interface, state):
-    """设置模块状态"""
-    global _state
-    _state = state
-    module_interface.logger.debug(f"模块状态已更新: {state}")
+# 可选函数
+async def get_state(interface):
+    """获取模块状态（可选）"""
+    # 返回需要保存的状态数据
+    return {}
 
-# 必需的模块接口函数
-def setup(module_interface):
-    """模块初始化"""
-    # 注册命令和处理器
-    # 加载状态
-    module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
+async def set_state(interface, state):
+    """设置模块状态（可选）"""
+    # 恢复模块状态
+    pass
 
-def cleanup(module_interface):
-    """模块清理"""
-    # 清理资源
-    # 保存状态
-    module_interface.logger.info(f"模块 {MODULE_NAME} 已清理")
+# 命令处理函数
+async def your_command(update, context):
+    """处理您的命令"""
+    # 命令逻辑
+    pass
 ```
 
-## ModuleInterface 提供的方法
+## 二、ModuleInterface 接口
 
-### 命令注册
+模块通过 `interface` 对象与机器人系统交互。以下是可用的接口方法：
 
-```py
-# 所有用户可用
-module_interface.register_command("cmd", handler)
+### 1. 命令注册
 
-# 群组管理员和超级管理员可用
-module_interface.register_command("admin_cmd", handler, admin_only="group_admin")
-
-# 仅超级管理员可用
-module_interface.register_command("super_cmd", handler, admin_only="super_admin")
-
-# 注册自定义处理器
-module_interface.register_handler(handler, group=0)
-
-# 注销所有处理器
-module_interface.unregister_all_handlers()
+```python
+await interface.register_command(
+    command_name,      # 命令名称（不包含 /）
+    callback,          # 回调函数
+    admin_level=False, # 权限级别："super_admin", "group_admin" 或 False
+    description=""     # 命令描述
+)
 ```
 
-### 状态管理
+### 2. 事件系统
 
-```py
-# 保存状态
-module_interface.save_state(state, format="json")
-
-# 加载状态
-state = module_interface.load_state(default={}, format="json")
-
-# 删除状态
-module_interface.delete_state(format="json")
-```
-
-### 事件系统
-
-```py
+```python
 # 订阅事件
-subscription = module_interface.subscribe_event("event_name", callback, priority=0, filter_func=None)
+subscription = await interface.subscribe_event(
+    "event_type",  # 事件类型
+    callback       # 回调函数 async def callback(event_type, **event_data)
+)
 
 # 发布事件
-await module_interface.publish_event("event_name", key1=value1, key2=value2)
-
-# 发布事件并等待所有处理器完成
-count, success = await module_interface.publish_event_and_wait("event_name", timeout=None, key1=value1)
-
-# 取消订阅
-module_interface.unsubscribe_event(subscription)
+count = await interface.publish_event(
+    "event_type",  # 事件类型
+    **event_data   # 事件数据
+)
 ```
 
-### 会话管理
+### 3. 状态管理
 
-```py
-# 获取会话数据
-value = await context.bot_data["session_manager"].get(user_id, "key", default=None)
+```python
+# 保存状态
+interface.save_state(state_data)  # 状态数据必须可 JSON 序列化
 
-# 设置会话数据
-await context.bot_data["session_manager"].set(user_id, "key", value)
+# 加载状态
+state = interface.load_state(default=None)
 
-# 检查会话是否包含某个键
-exists = await context.bot_data["session_manager"].has_key(user_id, "key")
+# 注意：还可以通过 get_state 和 set_state 函数实现更复杂的状态管理
+```
 
-# 删除会话数据
-await context.bot_data["session_manager"].delete(user_id, "key")
+### 4. 消息处理器注册
 
-# 清除用户所有会话数据
-await context.bot_data["session_manager"].clear(user_id)
+```python
+# 注册消息处理器
+from telegram.ext import MessageHandler, filters
+handler = MessageHandler(filters.TEXT & ~filters.COMMAND, callback)
+await interface.register_handler(handler, group=0)  # group 决定优先级
+```
 
-# 获取用户所有会话数据
-data = await context.bot_data["session_manager"].get_all(user_id)
+### 5. 日志系统
 
-# 获取活跃会话数量
-count = await context.bot_data["session_manager"].get_active_sessions_count()
+```python
+# 记录日志
+interface.logger.debug("调试信息")
+interface.logger.info("信息")
+interface.logger.warning("警告")
+interface.logger.error("错误")
+```
+
+### 6. 配置访问
+
+```python
+# 检查模块是否在特定聊天中启用
+is_enabled = interface.config_manager.is_module_enabled_for_chat(interface.module_name, chat_id)
+
+# 获取管理员列表
+admin_ids = interface.config_manager.get_valid_admin_ids()
+
+# 检查用户是否是管理员
+is_admin = interface.config_manager.is_admin(user_id)
+```
+
+## 三、文本处理工具
+
+框架提供了一系列文本处理工具，帮助处理 Markdown、HTML 格式化和分页显示。
+
+### 1. TextFormatter 工具
+
+```python
+from utils.formatter import TextFormatter
+
+# Markdown 转义特殊字符
+safe_text = TextFormatter.escape_markdown("使用*星号*的文本")
+
+# HTML 转义特殊字符
+safe_html = TextFormatter.escape_html("<b>HTML内容</b>")
+
+# Markdown 转换为纯文本
+plain_text = TextFormatter.markdown_to_plain("**粗体**文本")
+
+# 规范化空白字符
+normalized = TextFormatter.normalize_whitespace("多行\n\n\n文本")
+
+# 智能分割长文本
+chunks = TextFormatter.smart_split_text(long_text, max_length=4000, mode="markdown")
+```
+
+### 2. 分页显示
+
+```python
+from utils.pagination import PaginationHelper
+
+# 创建数据列表
+items = [
+    {"name": "项目1", "desc": "描述1"},
+    {"name": "项目2", "desc": "描述2"},
+    # ...更多项目
+]
+
+# 定义格式化函数
+def format_item(item):
+    name = TextFormatter.escape_markdown(item["name"])
+    desc = TextFormatter.escape_markdown(item["desc"])
+    return f"*{name}*: {desc}"
+
+# 初始化分页助手
+pagination = PaginationHelper(
+    items=items,
+    page_size=5,                # 每页显示 5 项
+    format_item=format_item,    # 项目格式化函数
+    title="项目列表",           # 页面标题
+    callback_prefix="items_page" # 回调数据前缀
+)
+
+# 显示第一页
+await pagination.send_page(update, context, 0)
+
+# 注册回调处理器（通常在 setup 中）
+from telegram.ext import CallbackQueryHandler
+handler = CallbackQueryHandler(
+    handle_pagination_callback,
+    pattern=r"^items_page:\d+$"
+)
+await interface.register_handler(handler)
+
+# 回调处理函数
+async def handle_pagination_callback(update, context):
+    await PaginationHelper.handle_callback(update, context)
+```
+
+### 3. 发送长消息
+
+```python
+# 自动分段发送长消息
+from utils.formatter import TextFormatter
+
+long_text = "非常长的文本内容......"  # 超过 4000 字符的文本
+
+# 智能分割并发送
+chunks = TextFormatter.smart_split_text(long_text, max_length=4000)
+first_message = None
+
+for i, chunk in enumerate(chunks):
+    if i == 0:
+        first_message = await update.message.reply_text(chunk)
+    else:
+        await first_message.reply_text(chunk)  # 回复到第一条消息形成线程
+```
+
+### 4. 使用 Markdown 和 HTML 格式
+
+```python
+# 安全地发送 Markdown 格式的消息
+try:
+    message = f"*加粗文本*\n_斜体文本_\n`代码`\n"
+    message += f"[链接](https://example.com)\n"
+    message += f"用户: {TextFormatter.escape_markdown(user_name)}"
+
+    await update.message.reply_text(message, parse_mode="MARKDOWN")
+except Exception as e:
+    # 如果 Markdown 解析失败，发送纯文本
+    plain_message = TextFormatter.markdown_to_plain(message)
+    await update.message.reply_text(plain_message)
+
+# 发送 HTML 格式的消息
+try:
+    message = "<b>加粗文本</b>\n<i>斜体文本</i>\n<code>代码</code>\n"
+    message += f"<a href='https://example.com'>链接</a>\n"
+    message += f"用户: {TextFormatter.escape_html(user_name)}"
+
+    await update.message.reply_text(message, parse_mode="HTML")
+except Exception as e:
+    # 如果 HTML 解析失败，发送纯文本
+    plain_message = TextFormatter.strip_html(message)
+    await update.message.reply_text(plain_message)
+```
+
+## 四、常用功能示例
+
+### 命令处理
+
+```python
+async def setup(interface):
+    await interface.register_command(
+        "hello",
+        hello_command,
+        description="发送问候消息"
+    )
+
+async def hello_command(update, context):
+    user = update.effective_user
+    await update.message.reply_text(f"你好，{user.first_name}！")
+```
+
+### 权限控制
+
+```python
+# 只允许群组管理员使用的命令
+await interface.register_command(
+    "admin_cmd",
+    admin_command,
+    admin_level="group_admin",
+    description="管理员命令"
+)
+
+# 只允许超级管理员使用的命令
+await interface.register_command(
+    "super_cmd",
+    super_admin_command,
+    admin_level="super_admin",
+    description="超级管理员命令"
+)
+```
+
+### 处理消息
+
+```python
+from telegram.ext import MessageHandler, filters
+
+async def setup(interface):
+    # 注册消息处理器
+    handler = MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    await interface.register_handler(handler)
+
+async def handle_message(update, context):
+    text = update.message.text
+    await update.message.reply_text(f"你发送了: {text}")
 ```
 
 ### 模块间通信
 
-```py
-# 获取其他模块的接口
-other_module = module_interface.get_module_interface("other_module")
+```python
+# 模块 A：发布事件
+async def trigger_action(update, context):
+    await interface.publish_event(
+        "module_a_event",
+        user_id=update.effective_user.id,
+        chat_id=update.effective_chat.id,
+        data="一些数据"
+    )
 
-# 调用其他模块的方法
-result = await module_interface.call_module_method("other_module", "method_name", arg1, arg2, key=value)
+# 模块 B：订阅事件
+async def setup(interface):
+    await interface.subscribe_event("module_a_event", handle_event)
+
+async def handle_event(event_type, **event_data):
+    user_id = event_data.get("user_id")
+    chat_id = event_data.get("chat_id")
+    data = event_data.get("data")
+    # 处理事件...
 ```
 
-### 日志记录
+### 保存和加载状态
 
-```py
-# 不同级别的日志
-module_interface.logger.debug("调试信息")
-module_interface.logger.info("信息")
-module_interface.logger.warning("警告")
-module_interface.logger.error("错误")
+```python
+# 有状态模块
+counter = 0
+
+async def setup(interface):
+    global counter
+    # 加载保存的状态
+    state = interface.load_state(default={"counter": 0})
+    counter = state.get("counter", 0)
+
+    await interface.register_command("count", count_command)
+
+async def count_command(update, context):
+    global counter
+    counter += 1
+    await update.message.reply_text(f"计数: {counter}")
+
+    # 保存状态
+    interface.save_state({"counter": counter})
+
+async def get_state(interface):
+    global counter
+    return {"counter": counter}
+
+async def set_state(interface, state):
+    global counter
+    counter = state.get("counter", 0)
 ```
 
-## 文本工具类 (TextUtils)
+### 使用会话
 
-TextUtils 提供了丰富的文本处理功能：
+```python
+async def start_survey(update, context):
+    # 获取会话管理器
+    session_manager = context.bot_data["session_manager"]
+    user_id = update.effective_user.id
 
-```py
-# Markdown 转义
-safe_text = TextUtils.escape_markdown("需要转义的文本 * _ ` [ ]")
+    # 设置会话状态
+    await session_manager.set(user_id, "waiting_for_name", True)
+    await update.message.reply_text("请输入您的名字:")
 
-# 格式化用户信息为 Markdown
-user_info = TextUtils.format_user_info(user, include_username=True)
+async def handle_message(update, context):
+    session_manager = context.bot_data["session_manager"]
+    user_id = update.effective_user.id
 
-# 格式化聊天信息为 Markdown
-chat_info = TextUtils.format_chat_info(chat)
+    # 检查会话状态
+    waiting_for_name = await session_manager.get(user_id, "waiting_for_name", False)
 
-# Markdown 转纯文本
-plain_text = TextUtils.markdown_to_plain("*加粗* _斜体_")
-
-# Markdown 转 HTML
-html_text = TextUtils.markdown_to_html("**加粗** _斜体_ `代码`")
-
-# 分段发送长 HTML 消息
-await TextUtils.send_long_message_html(update, long_text, module_interface)
-
-# 智能分割文本
-parts = TextUtils.smart_split_text(text, max_length)
-
-# 移除 HTML 标签
-plain_text = TextUtils.strip_html("<p>HTML文本</p>")
-
-# 规范化空白字符
-normalized = TextUtils.normalize_whitespace("多余的  空格\n\n\n和空行")
-
-# 转义 HTML 特殊字符
-safe_html = TextUtils.escape_html("<script>alert('XSS')</script>")
-
+    if waiting_for_name:
+        name = update.message.text
+        await session_manager.set(user_id, "name", name)
+        await session_manager.delete(user_id, "waiting_for_name")
+        await update.message.reply_text(f"谢谢，{name}！")
 ```
 
-## 装饰器
+### 发送文件和图片
 
-项目提供了以下装饰器用于简化常见任务：
+```python
+from telegram import InputFile
+import os
 
-```py
-# 错误处理装饰器
-from utils.decorators import error_handler
+async def send_image_command(update, context):
+    # 从本地文件发送图片
+    with open("path/to/image.jpg", "rb") as file:
+        await update.message.reply_photo(
+            photo=file,
+            caption="这是一张图片"
+        )
 
-@error_handler
-async def command_handler(update, context):
-    # 此处的错误会被统一处理
-    pass
+    # 使用文件 ID 发送图片（图片已上传到 Telegram）
+    file_id = "已知的文件 ID"
+    await update.message.reply_photo(
+        photo=file_id,
+        caption="这是另一张图片"
+    )
 
-# 权限检查装饰器
-from utils.decorators import permission_check
-
-@permission_check("super_admin")  # 或 "group_admin"
-async def admin_command(update, context):
-    # 只有管理员可以执行
-    pass
-
-# 群组检查装饰器
-from utils.decorators import group_check
-
-@group_check
-async def group_command(update, context):
-    # 只在允许的群组中可用
-    pass
-
-# 模块检查装饰器
-from utils.decorators import module_check
-
-@module_check
-async def module_command(update, context):
-    # 只在模块启用时可用
-    pass
+    # 发送文档文件
+    with open("path/to/document.pdf", "rb") as file:
+        await update.message.reply_document(
+            document=file,
+            caption="这是一个文档"
+        )
 ```
 
-## 最佳实践
+## 五、模块开发最佳实践
 
-### 代码规范
+1. **命名规范**
 
-- 使用装饰器：使用 `@error_handler` 装饰命令处理函数
+   - 模块名使用小写字母和下划线
+   - 命令名使用小写字母，避免下划线
+   - 常量使用大写字母和下划线
 
-- 中英文空格：确保显示文字中英文之间有空格
+2. **文档与注释**
 
-- 异步函数：命令处理函数必须是 `async def` 定义的异步函数
+   - 为所有函数添加文档字符串
+   - 为复杂逻辑添加注释
+   - 清楚标注参数类型和返回值
 
-- 参数获取：通过 `context.args` 获取命令参数
+3. **错误处理**
 
-- 使用工具类：使用 `TextUtils` 处理文本格式化和转义
+   - 使用 try-except 捕获可预见的异常
+   - 记录错误信息到日志
+   - 向用户提供友好的错误消息
 
-### 状态管理
+4. **资源管理**
 
-- 持久化状态：使用 `module_interface.save_state()` 和 `load_state()` 持久化状态
+   - 在 `cleanup` 中释放所有资源
+   - 不要在模块级别创建长期运行的任务
+   - 使用 `interface` 提供的方法而不是直接访问底层组件
 
-- 热更新支持：实现 `get_state()` 和 `set_state()` 函数支持热更新
+5. **性能考虑**
 
-- 定期保存：对于重要数据，定期保存而不仅在 `cleanup()` 时保存
+   - 避免阻塞操作
+   - 对耗时操作使用异步
+   - 合理使用缓存减少重复计算
 
-- 状态备份：状态变更前会自动创建备份，可通过 `StateManager.get_backup_info()` 查看
+6. **格式化与中英文**
 
-### 日志记录
+   - 中英文和数字之间添加空格，如：`你发送了 Hello 123 消息`
+   - 使用 Markdown 格式化消息时注意转义特殊字符
+   - 长文本应当分段发送，避免单条消息过长
 
-- 统一日志：使用 `module_interface.logger` 而不是 `print` 记录日志
+7. **输出消息标准**
+   - 使用 Markdown 时，确保转义特殊字符
+   - 为复杂格式提供降级方案，在格式无法显示时 fallback 到纯文本
+   - 避免过度使用格式，保持消息清晰易读
 
-- 日志级别：根据重要性选择 `DEBUG/INFO/WARNING/ERROR` 级别
+## 六、示例模块
 
-- 标准格式：初始化和清理时使用标准日志格式
+以下是一个完整的示例模块：
 
-- 日志轮转：日志文件会自动轮转，控制大小和数量
+```python
+# modules/counter.py - 计数器模块
 
-- 日志清理：旧日志文件会自动清理，避免占用过多磁盘空间
+MODULE_NAME = "counter"
+MODULE_VERSION = "1.0.0"
+MODULE_DESCRIPTION = "为每个用户跟踪计数，支持增加和重置"
+MODULE_DEPENDENCIES = []
+MODULE_COMMANDS = ["count", "reset"]
 
-### 事件系统
-
-- 模块间通知：当一个模块中发生重要变化时通知其他模块
-
-- 解耦复杂功能：将复杂功能分解为多个模块，通过事件协调它们
-
-- 创建可扩展的钩子系统：允许未来添加的模块响应现有事件
-
-- 事件处理函数的签名应为：
-
-  ```py
-  async def handle_event(event_type, **event_data):
-    # 处理事件
-    pass
-  ```
-
-### 错误处理
-
-- 统一处理：使用 `@error_handler` 装饰器统一处理异常
-
-- 友好提示：向用户展示友好的错误消息
-
-- 详细日志：在日志中记录详细的错误信息和堆栈跟踪
-
-- 防御性编程：检查参数有效性，使用辅助方法验证输入
-
-### 安全与权限
-
-- 权限检查：使用 `@permission_check` 装饰器控制命令访问权限
-
-- 群组白名单：只允许授权的群组使用机器人
-
-- 模块启用检查：使用 `@module_check` 确保只有启用的模块可用
-
-- 安全转义：使用 `TextUtils.escape_markdown` 转义特殊字符
-
-## 示例模块
-
-### Echo 模块
-
-```py
-# modules/echo.py
 from telegram import Update
 from telegram.ext import ContextTypes
-from utils.decorators import error_handler
-from utils.text_utils import TextUtils
+from utils.formatter import TextFormatter
 
-# 模块元数据
-MODULE_NAME = "echo"
-MODULE_VERSION = "1.1.0"
-MODULE_DESCRIPTION = "回显用户输入的文本"
-MODULE_DEPENDENCIES = []
-MODULE_COMMANDS = ["echo"]
+# 用户计数器
+user_counters = {}
 
-# 模块状态
-_state = {"usage_count": 0}
+async def setup(interface):
+    """模块初始化"""
+    global user_counters
 
-@error_handler
-async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """回显用户输入的文本"""
-    global _state
+    interface.logger.info("计数器模块已加载")
 
-    if not context.args:
-        await update.message.reply_text("请输入要回显的文本")
-        return
+    # 加载保存的状态
+    state = interface.load_state(default={"counters": {}})
+    user_counters = state.get("counters", {})
 
-    # 更新使用次数
-    _state["usage_count"] += 1
-
-    # 获取并回显文本
-    text = " ".join(context.args)
-    await update.message.reply_text(text)
-
-# 状态管理函数
-def get_state(module_interface):
-    return _state
-
-def set_state(module_interface, state):
-    global _state
-    _state = state
-    module_interface.logger.debug(f"模块状态已更新: {state}")
-
-def setup(module_interface):
     # 注册命令
-    module_interface.register_command("echo", echo_command)
+    await interface.register_command(
+        "count",
+        count_command,
+        description="增加你的计数"
+    )
 
-    # 加载状态
-    saved_state = module_interface.load_state(default={"usage_count": 0})
-    global _state
-    _state = saved_state
+    await interface.register_command(
+        "reset",
+        reset_command,
+        description="重置你的计数"
+    )
 
-    module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
+async def cleanup(interface):
+    """模块清理"""
+    interface.logger.info("计数器模块已卸载")
 
-def cleanup(module_interface):
+async def get_state(interface):
+    """获取模块状态"""
+    return {"counters": user_counters}
+
+async def set_state(interface, state):
+    """恢复模块状态"""
+    global user_counters
+    user_counters = state.get("counters", {})
+
+async def count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /count 命令"""
+    user_id = str(update.effective_user.id)
+    user_name = TextFormatter.escape_markdown(update.effective_user.first_name)
+
+    # 获取并增加计数
+    current_count = user_counters.get(user_id, 0)
+    current_count += 1
+    user_counters[user_id] = current_count
+
+    # 回复用户
+    message = f"*{user_name}* 的计数: `{current_count}`"
+
+    try:
+        await update.message.reply_text(message, parse_mode="MARKDOWN")
+    except Exception:
+        # 降级到纯文本
+        plain_message = f"{update.effective_user.first_name} 的计数: {current_count}"
+        await update.message.reply_text(plain_message)
+
     # 保存状态
-    module_interface.save_state(_state)
-    module_interface.logger.info(f"模块 {MODULE_NAME} 已清理")
+    context.bot_data["state_manager"].save_state("counter", {"counters": user_counters})
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /reset 命令"""
+    user_id = str(update.effective_user.id)
+
+    # 重置计数
+    old_count = user_counters.get(user_id, 0)
+    user_counters[user_id] = 0
+
+    # 回复用户
+    await update.message.reply_text(
+        f"你的计数已从 {old_count} 重置为 0"
+    )
+
+    # 保存状态
+    context.bot_data["state_manager"].save_state("counter", {"counters": user_counters})
 ```

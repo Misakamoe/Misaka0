@@ -4,13 +4,16 @@
 
 ## 特性
 
-- 🧩 **模块化架构**：支持动态加载/卸载/热更新模块
+- 🧩 **模块化架构**：支持动态加载/卸载/热更新模块，完善的依赖管理
 - 🔄 **配置热重载**：无需重启即可更新配置和模块
 - 🛡️ **多级权限管理**：支持超级管理员、群组管理员和普通用户
 - 🔒 **群组白名单**：只允许授权的群组使用机器人
 - 📊 **状态管理**：模块状态持久化和自动备份
-- 📡 **事件系统**：模块间松耦合通信
+- 📡 **事件系统**：模块间松耦合通信和事件流控制
+- 🔤 **文本格式化**：智能处理 Markdown 和 HTML，自动降级
 - 📋 **完善的日志系统**：支持日志轮转和自动清理
+- 📱 **会话管理**：持久化的用户会话支持
+- 📄 **分页显示**：自动处理长列表的分页导航
 - 🐳 **Docker 支持**：轻松部署和维护
 
 ## AI 生成项目声明
@@ -40,14 +43,19 @@
      "token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
      "admin_ids": [123456789],
      "log_level": "INFO",
-     "allowed_groups": {}
+     "allowed_groups": {},
+     "network": {
+       "connect_timeout": 20.0,
+       "read_timeout": 20.0,
+       "write_timeout": 20.0,
+       "poll_interval": 1.0
+     }
    }
    ```
 
 3. 如果使用环境变量配置，需要设置以下变量：
 
 - `TELEGRAM_BOT_TOKEN`：您的 Telegram Bot Token
-
 - `ADMIN_IDS`：超级管理员 ID，多个 ID 用逗号分隔
 
 使用 Docker 部署时，配置的优先级为：环境变量 > 配置文件
@@ -139,57 +147,75 @@ sudo systemctl status telegram-bot
 **基本命令**
 
 - `/start` - 启动机器人
-
 - `/help` - 显示帮助信息
-
 - `/id` - 显示用户和聊天 ID
-
 - `/modules` - 列出可用模块
-
 - `/commands` - 列出所有可用命令
 
 **管理员命令**
 
-- `/enable` <模块名> - 启用模块
-
-- `/disable` <模块名> - 禁用模块
-
-- `/listgroups` - 列出授权的群组 (超级管理员)
-
-- `/addgroup` [群组 ID] - 添加群组到白名单 (超级管理员)
-
-- `/removegroup` <群组 ID> - 从白名单移除群组 (超级管理员)
+- `/enable <模块名>` - 启用模块
+- `/disable <模块名>` - 禁用模块
+- `/reload <模块名>` - 重新加载模块（热更新）
+- `/stats` - 显示机器人统计信息（超级管理员）
+- `/listgroups` - 列出授权的群组（超级管理员）
+- `/addgroup [群组 ID]` - 添加群组到白名单（超级管理员）
+- `/removegroup <群组 ID>` - 从白名单移除群组（超级管理员）
 
 ### 开发模块
 
-请参阅 `modules/README.md` 了解如何开发新模块。
+我们提供了详细的模块开发文档，请参阅 `modules/README.md` 了解如何开发新模块。该文档涵盖：
+
+- 模块基本结构和元数据
+- ModuleInterface 接口使用
+- 命令注册和权限管理
+- 事件系统使用方法
+- 状态管理和持久化
+- 文本处理和格式化
+- 分页列表实现
+- 最佳实践和示例模块
 
 ### 项目结构
 
-```bash
-.
-├── bot.py                  # 主入口点
-├── config/                 # 配置目录
-│   ├── config.json         # 主配置
-│   └── modules.json        # 模块配置
-├── core/                   # 核心组件
-│   ├── bot_engine.py       # Bot 引擎
-│   ├── command_handler.py  # 命令处理器
-│   ├── config_manager.py   # 配置管理器
-│   └── module_loader.py    # 模块加载器
-├── modules/                # 模块目录
-│   └── echo.py             # 示例模块
-├── utils/                  # 工具函数
-│   ├── city_mapping.py     # 城市名称映射
-│   ├── currency_data.py    # 货币数据工具
-│   ├── decorators.py       # 装饰器工具
-│   ├── event_system.py     # 事件系统
-│   ├── health_monitor.py   # 健康监控系统
-│   ├── logger.py           # 日志工具
-│   ├── session_manager.py  # 会话管理器
-│   ├── state_manager.py    # 状态管理器
-│   └── text_utils.py       # 文本处理工具
-└── data/                   # 数据目录 (自动创建)
-    ├── module_states/      # 模块状态存储
-    └── backups/            # 状态备份存储
 ```
+.
+├── bot.py                    # 主入口点
+├── config/                   # 配置目录
+│   ├── config.json           # 主配置
+│   └── modules.json          # 模块配置
+├── core/                     # 核心组件
+│   ├── bot_engine.py         # 核心引擎
+│   ├── module_manager.py     # 模块管理器
+│   ├── command_manager.py    # 命令管理器
+│   ├── config_manager.py     # 配置管理器
+│   └── event_system.py       # 事件系统
+├── modules/                  # 模块目录
+│   ├── README.md             # 模块开发文档
+│   └── echo.py               # 示例模块
+├── utils/                    # 工具函数
+│   ├── decorators.py         # 装饰器工具
+│   ├── formatter.py          # 文本格式工具
+│   ├── logger.py             # 日志工具
+│   ├── pagination.py         # 分页工具
+│   ├── session_manager.py    # 会话管理器
+│   └── state_manager.py      # 状态管理器
+└── data/                     # 数据目录
+    ├── module_states/        # 模块状态存储
+    ├── sessions/             # 会话数据存储
+    └── backups/              # 状态备份存储
+```
+
+## 稳定性和可靠性
+
+本框架经过精心设计，以提供高度的稳定性和可靠性：
+
+- 细粒度的锁机制，防止资源竞争
+- 优雅的错误处理和异常恢复
+- 模块隔离，防止单个模块崩溃影响系统
+- 定期资源清理，防止内存泄漏
+- 自动状态备份和恢复
+- 完善的依赖管理，避免模块冲突
+
+## 许可证
+
+本项目采用 MIT 许可证，详见 LICENSE 文件。

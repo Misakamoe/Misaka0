@@ -2,5 +2,11 @@
   "token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
   "admin_ids": [123456789],
   "log_level": "INFO",
-  "allowed_groups": {}
+  "allowed_groups": {},
+  "network": {
+    "connect_timeout": 20.0,
+    "read_timeout": 20.0,
+    "write_timeout": 20.0,
+    "poll_interval": 1.0
+  }
 }
