@@ -1243,10 +1243,8 @@ async def ai_config_command(update: Update,
         # 保存配置
         save_config()
 
-        safe_param = param.replace('_', '\\_')
         await update.message.reply_text(
-            f"✅ 已更新服务商 `{provider_id}` 的 `{safe_param}` 参数",
-            parse_mode="MARKDOWN")
+            f"✅ 已更新服务商 `{provider_id}` 的 `{param}` 参数", parse_mode="MARKDOWN")
         _interface.logger.info(
             f"用户 {update.effective_user.id} 更新了服务商 {provider_id} 的 {param} 参数")
 
