@@ -163,3 +163,155 @@ class TextFormatter:
         text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)
         # 删除整个文本开头和结尾的空白
         return text.strip()
+
+    @staticmethod
+    def markdown_to_html(markdown_text):
+        """将 Markdown 文本转换为 Telegram 支持的 HTML
+        
+        Args:
+            markdown_text: Markdown 格式的文本
+            
+        Returns:
+            str: HTML 格式的文本
+        """
+        if not markdown_text:
+            return ""
+
+        # 替换 HTML 特殊字符
+        text = markdown_text.replace("&", "&amp;").replace("<",
+                                                           "&lt;").replace(
+                                                               ">", "&gt;")
+
+        # 处理代码块
+        import re
+
+        # 首先处理代码块 (```)
+        def replace_code_block(match):
+            code = match.group(2)
+            return f"<pre>{code}</pre>"
+
+        text = re.sub(r'```(?:(\w+)\n)?([\s\S]+?)```', replace_code_block,
+                      text)
+
+        # 处理行内代码 (`)
+        text = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', text)
+
+        # 处理加粗 (** 或 __)
+        text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+        text = re.sub(r'__(.*?)__', r'<b>\1</b>', text)
+
+        # 处理斜体 (* 或 _)
+        text = re.sub(r'\*([^\*]+?)\*', r'<i>\1</i>', text)
+        text = re.sub(r'_([^_]+?)_', r'<i>\1</i>', text)
+
+        # 处理删除线 (~~)
+        text = re.sub(r'~~(.*?)~~', r'<s>\1</s>', text)
+
+        # 替换URL链接
+        text = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2">\1</a>', text)
+
+        return text
+
+    @staticmethod
+    def smart_split_html(html_text, max_length=4000):
+        """智能分割 HTML 文本，确保标签完整性
+        
+        Args:
+            html_text: HTML 文本
+            max_length: 每段最大长度
+            
+        Returns:
+            list: 分段后的 HTML 文本列表
+        """
+        if len(html_text) <= max_length:
+            return [html_text]
+
+        parts = []
+        current_pos = 0
+
+        while current_pos < len(html_text):
+            # 找到一个合适的分割点
+            end_pos = current_pos + max_length
+
+            if end_pos >= len(html_text):
+                # 已经到达文本末尾
+                parts.append(html_text[current_pos:])
+                break
+
+            # 尝试找一个有意义的分割点 (在换行符后)
+            br_pos = html_text.rfind('\n', current_pos, end_pos)
+            if br_pos != -1 and br_pos > current_pos + max_length // 2:
+                split_pos = br_pos + 1  # 包含换行符
+            else:
+                # 尝试在段落处分割
+                para_pos = html_text.rfind('</pre>', current_pos, end_pos)
+                if para_pos != -1 and para_pos > current_pos + max_length // 2:
+                    split_pos = para_pos + 6  # </pre> 的长度
+                else:
+                    # 尝试在有意义的地方分割
+                    candidates = [
+                        html_text.rfind('</code>', current_pos, end_pos),
+                        html_text.rfind('</b>', current_pos, end_pos),
+                        html_text.rfind('</i>', current_pos, end_pos),
+                        html_text.rfind('</s>', current_pos, end_pos),
+                        html_text.rfind('</a>', current_pos, end_pos),
+                        html_text.rfind('. ', current_pos, end_pos),
+                        html_text.rfind('? ', current_pos, end_pos),
+                        html_text.rfind('! ', current_pos, end_pos),
+                        html_text.rfind('; ', current_pos, end_pos),
+                    ]
+
+                    # 选择最远的有效分割点
+                    best_pos = max([
+                        p for p in candidates
+                        if p != -1 and p > current_pos + max_length // 4
+                    ] or [-1])
+
+                    if best_pos != -1:
+                        split_pos = best_pos + 2  # 包括标点和空格
+                    else:
+                        # 如果没有好的分割点，在空格处分割
+                        space_pos = html_text.rfind(
+                            ' ', current_pos + max_length // 2, end_pos)
+                        if space_pos != -1:
+                            split_pos = space_pos + 1
+                        else:
+                            # 最后手段：强制分割
+                            split_pos = end_pos
+
+            # 确保我们不会切断 HTML 标签
+            # 检查是否在标签内
+            tag_start = html_text.rfind('<', current_pos, split_pos)
+            if tag_start != -1:
+                tag_end = html_text.find('>', tag_start)
+                if tag_end != -1 and tag_end >= split_pos:
+                    # 我们在标签内部，移动到标签之前
+                    split_pos = tag_start
+
+            # 检查是否有未闭合的标签
+            open_tags = []
+            for match in re.finditer(r'<(/?)([a-z]+)[^>]*>',
+                                     html_text[current_pos:split_pos],
+                                     re.IGNORECASE):
+                if match.group(1) == '':  # 开始标签
+                    open_tags.append(match.group(2))
+                else:  # 结束标签
+                    if open_tags and open_tags[-1] == match.group(2):
+                        open_tags.pop()
+
+            # 如果有未闭合的标签，添加闭合标签
+            closing_tags = ''
+            for tag in reversed(open_tags):
+                closing_tags += f'</{tag}>'
+
+            # 添加这一部分，包括必要的闭合标签
+            parts.append(html_text[current_pos:split_pos] + closing_tags)
+
+            # 下一部分开始时，添加之前未闭合的标签
+            opening_tags = ''
+            for tag in open_tags:
+                opening_tags += f'<{tag}>'
+
+            current_pos = split_pos
+
+        return parts

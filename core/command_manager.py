@@ -41,58 +41,83 @@ class CommandManager:
                 pattern=r"^(mod_page|cmd_page):\d+:\d+$|^noop$"))
 
     async def register_core_commands(self, bot_engine):
-        """注册核心命令
-        
-        Args:
-            bot_engine: 机器人引擎实例
-        """
+        """注册核心命令"""
         # 注册核心命令
-        core_commands = [{
-            "name": "start",
-            "callback": self._start_command,
-            "admin_level": False,
-            "description": "启动机器人"
-        }, {
-            "name": "help",
-            "callback": self._help_command,
-            "admin_level": False,
-            "description": "显示帮助信息"
-        }, {
-            "name": "id",
-            "callback": self._id_command,
-            "admin_level": False,
-            "description": "显示用户和聊天 ID 信息"
-        }, {
-            "name": "modules",
-            "callback": self._list_modules_command,
-            "admin_level": False,
-            "description": "列出可用模块"
-        }, {
-            "name": "commands",
-            "callback": self._list_commands_command,
-            "admin_level": False,
-            "description": "列出可用命令"
-        }, {
-            "name": "enable",
-            "callback": self._enable_module_command,
-            "admin_level": "group_admin",
-            "description": "启用模块"
-        }, {
-            "name": "disable",
-            "callback": self._disable_module_command,
-            "admin_level": "group_admin",
-            "description": "禁用模块"
-        }, {
-            "name": "reload",
-            "callback": self._reload_module_command,
-            "admin_level": "super_admin",
-            "description": "重新加载模块"
-        }, {
-            "name": "stats",
-            "callback": self._stats_command,
-            "admin_level": "super_admin",
-            "description": "显示机器人统计信息"
-        }]
+        core_commands = [
+            {
+                "name": "start",
+                "callback": self._start_command,
+                "admin_level": False,
+                "description": "启动机器人"
+            },
+            {
+                "name": "help",
+                "callback": self._help_command,
+                "admin_level": False,
+                "description": "显示帮助信息"
+            },
+            {
+                "name": "id",
+                "callback": self._id_command,
+                "admin_level": False,
+                "description": "显示用户和聊天 ID 信息"
+            },
+            {
+                "name": "modules",
+                "callback": self._list_modules_command,
+                "admin_level": False,
+                "description": "列出可用模块"
+            },
+            {
+                "name": "commands",
+                "callback": self._list_commands_command,
+                "admin_level": False,
+                "description": "列出可用命令"
+            },
+            {
+                "name": "enable",
+                "callback": self._enable_module_command,
+                "admin_level": "group_admin",
+                "description": "启用模块"
+            },
+            {
+                "name": "disable",
+                "callback": self._disable_module_command,
+                "admin_level": "group_admin",
+                "description": "禁用模块"
+            },
+            {
+                "name": "reload",
+                "callback": self._reload_module_command,
+                "admin_level": "super_admin",
+                "description": "重新加载模块"
+            },
+            {
+                "name": "stats",
+                "callback": self._stats_command,
+                "admin_level": "super_admin",
+                "description": "显示机器人统计信息"
+            },
+            # 添加群组管理命令
+            {
+                "name": "listgroups",
+                "callback": bot_engine._list_allowed_groups_command,
+                "admin_level": "super_admin",
+                "description": "列出允许的群组"
+            },
+            {
+                "name": "addgroup",
+                "callback": bot_engine._add_allowed_group_command,
+                "admin_level": "super_admin",
+                "description": "添加群组到白名单"
+            },
+            {
+                "name": "removegroup",
+                "callback": bot_engine._remove_allowed_group_command,
+                "admin_level": "super_admin",
+                "description": "从白名单移除群组"
+            }
+        ]
 
         # 注册命令
         for cmd in core_commands:
@@ -306,7 +331,23 @@ class CommandManager:
             # 检查是否是超级管理员
             is_super_admin = self.config_manager.is_admin(user.id)
 
+            # 获取当前命令 - 提取完整的命令名
+            command = None
+            if update.message and update.message.text and update.message.text.startswith(
+                    '/'):
+                command = update.message.text.split()[0][1:].split('@')[0]
+
+            # 超级管理员的特权命令列表
+            special_commands = ["addgroup", "listgroups", "removegroup"]
+
+            # 如果是超级管理员且正在使用特权命令，允许执行
+            if is_super_admin and command in special_commands:
+                self.logger.info(
+                    f"超级管理员 {user.id} 在非白名单群组 {chat.id} 中使用特权命令: /{command}")
+                return True
+
             # 构建提示消息
+            from utils.formatter import TextFormatter  # 导入转义工具
             message = f"⚠️ 此群组未获授权使用 Bot。\n\n"
             message += f"群组 ID: `{chat.id}`\n"
             message += f"群组名称: {TextFormatter.escape_markdown(chat.title)}\n\n"

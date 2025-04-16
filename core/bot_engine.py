@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+import datetime
 import gc
 import telegram
 from telegram.ext import Application
@@ -119,6 +120,12 @@ class BotEngine:
                                             self.event_system,
                                             self.state_manager)
         self.application.bot_data["module_manager"] = self.module_manager
+
+        # 注册群组成员变更处理器
+        from telegram.ext import ChatMemberHandler
+        self.application.add_handler(
+            ChatMemberHandler(self._handle_my_chat_member,
+                              ChatMemberHandler.MY_CHAT_MEMBER))
 
         # 注册错误处理器
         self.application.add_error_handler(self.handle_error)
@@ -312,3 +319,182 @@ class BotEngine:
         except asyncio.CancelledError:
             self.logger.info("配置文件监控任务已取消")
             raise
+
+    async def _handle_my_chat_member(self, update, context):
+        """处理 Bot 的成员状态变化"""
+        chat_member = update.my_chat_member
+        chat = chat_member.chat
+        user = chat_member.from_user  # 谁改变了 Bot 的状态
+
+        # 只处理群组
+        if chat.type not in ["group", "supergroup"]:
+            return
+
+        # 确保配置中存在 allowed_groups
+        if "allowed_groups" not in self.config_manager.main_config:
+            self.config_manager.main_config["allowed_groups"] = {}
+            self.config_manager.save_main_config()
+
+        # 检查 Bot 是否被添加到群组
+        if (chat_member.old_chat_member.status in ["left", "kicked"]
+                and chat_member.new_chat_member.status
+                in ["member", "administrator"]):
+
+            # 检查添加者是否是超级管理员
+            if self.config_manager.is_admin(user.id):
+                # 添加到允许的群组
+                self.config_manager.add_allowed_group(chat.id, user.id)
+                self.logger.info(f"Bot 被超级管理员 {user.id} 添加到群组 {chat.id}")
+                await context.bot.send_message(chat_id=chat.id,
+                                               text="✅ Bot 已被授权在此群组使用。")
+            else:
+                self.logger.warning(f"Bot 被非超级管理员 {user.id} 添加到群组 {chat.id}")
+                await context.bot.send_message(
+                    chat_id=chat.id, text="⚠️ Bot 只能由超级管理员添加到群组。将自动退出。")
+                # 尝试离开群组
+                try:
+                    await context.bot.leave_chat(chat.id)
+                except Exception as e:
+                    self.logger.error(f"离开群组 {chat.id} 失败: {e}")
+
+        # 处理 Bot 被踢出群组的情况
+        elif (chat_member.old_chat_member.status
+              in ["member", "administrator"]
+              and chat_member.new_chat_member.status in ["left", "kicked"]):
+            # 从白名单移除该群组
+            self.config_manager.remove_allowed_group(chat.id)
+            self.logger.info(f"Bot 已从群组 {chat.id} 移除，已从白名单删除")
+
+    async def _list_allowed_groups_command(self, update, context):
+        """列出所有允许的群组"""
+        allowed_groups = self.config_manager.list_allowed_groups()
+
+        if not allowed_groups:
+            await update.message.reply_text("当前没有允许的群组。")
+            return
+
+        message = "📋 *允许使用 Bot 的群组列表:*\n\n"
+
+        for group_id, group_info in allowed_groups.items():
+            added_time = datetime.fromtimestamp(group_info.get(
+                "added_at", 0)).strftime("%Y-%m-%d %H:%M:%S")
+            message += f"🔹 *群组 ID:* `{group_id}`\n"
+            message += f"  👤 添加者: {group_info.get('added_by', '未知')}\n"
+            message += f"  ⏰ 添加时间: {added_time}\n\n"
+
+        try:
+            await update.message.reply_text(message, parse_mode="MARKDOWN")
+        except Exception:
+            # 如果 Markdown 解析失败，发送纯文本
+            from utils.formatter import TextFormatter
+            await update.message.reply_text(
+                TextFormatter.markdown_to_plain(message))
+
+    async def _add_allowed_group_command(self, update, context):
+        """手动添加群组到白名单"""
+        chat = update.effective_chat
+        user_id = update.effective_user.id
+
+        self.logger.info(
+            f"用户 {user_id} 执行 /addgroup 命令，聊天类型: {chat.type}, 聊天 ID: {chat.id}"
+        )
+
+        # 不带参数时，添加当前群组
+        if not context.args:
+            if chat.type in ["group", "supergroup"]:
+                # 添加到白名单
+                self.logger.info(f"尝试添加当前群组 {chat.id} 到白名单")
+                if self.config_manager.add_allowed_group(chat.id, user_id):
+                    await update.message.reply_text(
+                        f"✅ 已将当前群组 {chat.id} 添加到白名单。")
+                    self.logger.info(f"成功添加群组 {chat.id} 到白名单")
+                else:
+                    await update.message.reply_text(f"❌ 添加当前群组到白名单失败。")
+                    self.logger.error(f"添加群组 {chat.id} 到白名单失败")
+            else:
+                await update.message.reply_text("当前不在群组中。用法: /addgroup [群组 ID]"
+                                                )
+            return
+
+        # 带参数时，添加指定群组
+        try:
+            group_id = int(context.args[0])
+            self.logger.info(f"尝试添加群组 {group_id} 到白名单")
+
+            # 添加到白名单
+            if self.config_manager.add_allowed_group(group_id, user_id):
+                await update.message.reply_text(f"✅ 已将群组 {group_id} 添加到白名单。")
+                self.logger.info(f"成功添加群组 {group_id} 到白名单")
+            else:
+                await update.message.reply_text(f"❌ 添加群组到白名单失败。")
+                self.logger.error(f"添加群组 {group_id} 到白名单失败")
+        except ValueError:
+            await update.message.reply_text("群组 ID 必须是数字。")
+        except Exception as e:
+            self.logger.error(f"添加群组失败: {e}", exc_info=True)
+            await update.message.reply_text(f"添加群组失败: {e}")
+
+    async def _remove_allowed_group_command(self, update, context):
+        """从白名单移除群组并退出"""
+        if not context.args or len(context.args) != 1:
+            await update.message.reply_text("用法: /removegroup <群组 ID>")
+            return
+
+        try:
+            group_id = int(context.args[0])
+            current_chat_id = update.effective_chat.id
+
+            # 检查是否在群组中执行此命令
+            is_in_target_group = (current_chat_id == group_id)
+
+            # 检查群组是否在白名单中
+            if not self.config_manager.is_allowed_group(group_id):
+                await update.message.reply_text(f"❌ 群组 {group_id} 不在白名单中。")
+                return
+
+            # 如果是在目标群组中执行命令，先发送预警
+            if is_in_target_group:
+                await update.message.reply_text(f"⚠️ 正在将此群组从授权列表中移除，Bot 将退出。")
+
+            # 从白名单移除
+            removed = self.config_manager.remove_allowed_group(group_id)
+            if not removed:
+                if not is_in_target_group:  # 只有在非目标群组中才发送失败消息
+                    await update.message.reply_text(
+                        f"❌ 从白名单移除群组 {group_id} 失败。")
+                return
+
+            # 如果不是在目标群组中执行命令，尝试向目标群组发送通知
+            if not is_in_target_group:
+                try:
+                    await context.bot.send_message(
+                        chat_id=group_id, text="⚠️ 此群组已从授权列表中移除，Bot 将退出。")
+                except Exception as e:
+                    self.logger.warning(f"向群组 {group_id} 发送退出通知失败: {e}")
+
+            # 尝试退出群组
+            try:
+                await context.bot.leave_chat(group_id)
+                # 记录成功退出的日志
+                self.logger.info(f"Bot 已成功退出群组 {group_id}")
+                # 只有在非目标群组中才发送成功退出的消息
+                if not is_in_target_group:
+                    await update.message.reply_text(
+                        f"✅ 已将群组 {group_id} 从白名单移除并退出该群组。")
+            except Exception as e:
+                self.logger.error(f"退出群组 {group_id} 失败: {e}")
+                # 只有在非目标群组中才发送退出失败的消息
+                if not is_in_target_group:
+                    await update.message.reply_text(
+                        f"✅ 已将群组 {group_id} 从白名单移除，但退出群组失败: {e}")
+
+        except ValueError:
+            await update.message.reply_text("群组 ID 必须是数字。")
+        except Exception as e:
+            self.logger.error(f"移除群组命令处理失败: {e}", exc_info=True)
+            # 只有在非目标群组中才尝试发送错误消息
+            if update.effective_chat.id != group_id:
+                try:
+                    await update.message.reply_text(f"处理命令时发生错误: {e}")
+                except Exception:
+                    pass

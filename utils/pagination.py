@@ -81,7 +81,7 @@ class PaginationHelper:
         if page_index > 0:
             row.append(
                 InlineKeyboardButton(
-                    "◀️ 上一页",
+                    "◁ Prev",
                     callback_data=
                     f"{self.callback_prefix}:{page_index - 1}:{id(self)}"))
         else:
@@ -96,7 +96,7 @@ class PaginationHelper:
         if page_index < self.total_pages - 1:
             row.append(
                 InlineKeyboardButton(
-                    "下一页 ▶️",
+                    "▷ Next",
                     callback_data=
                     f"{self.callback_prefix}:{page_index + 1}:{id(self)}"))
         else:
