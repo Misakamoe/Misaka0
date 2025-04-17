@@ -468,10 +468,10 @@ class CommandManager:
             update: 更新对象
             context: 上下文对象
         """
-        await update.message.reply_text("👋 欢迎使用模块化 Telegram 机器人！\n\n"
-                                        "使用 /help 查看帮助信息\n"
-                                        "使用 /modules 查看可用模块\n"
-                                        "使用 /commands 查看可用命令")
+        await update.message.reply_sticker(
+            sticker=
+            'CAACAgEAAxkBAAIBmGJ1Mt3gP0VaAvccwfw1lwgt53VlAAIXCQACkSkAARB0sik1UbskECQE'
+        )
 
     async def _help_command(self, update, context):
         """处理 /help 命令
@@ -480,7 +480,7 @@ class CommandManager:
             update: 更新对象
             context: 上下文对象
         """
-        help_text = "🤖 *模块化 Telegram 机器人帮助*\n\n"
+
         help_text += "*基本命令：*\n"
         help_text += "/start - 启动机器人\n"
         help_text += "/help - 显示此帮助信息\n"
