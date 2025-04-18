@@ -13,7 +13,7 @@ from telegram import Update, File
 from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
-MODULE_NAME = "Ai"
+MODULE_NAME = "ai"
 MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "支持多种 AI 的聊天助手"
 MODULE_DEPENDENCIES = []

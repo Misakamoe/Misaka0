@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
-MODULE_NAME = "Alias"
+MODULE_NAME = "alias"
 MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "命令别名，支持中文命令和动作"
 MODULE_DEPENDENCIES = []

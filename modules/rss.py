@@ -13,7 +13,7 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
 # 模块元数据
-MODULE_NAME = "RSS"
+MODULE_NAME = "rss"
 MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "RSS 订阅，智能间隔和健康监控"
 MODULE_DEPENDENCIES = []
@@ -399,7 +399,7 @@ async def notify_source_unhealthy(url, source_info, subscribed_chats,
     # 发送通知给所有订阅者
     for chat_id, _ in subscribed_chats:
         try:
-            await module_interface.bot_engine.application.bot.send_message(
+            await module_interface.application.bot.send_message(
                 chat_id=chat_id, text=message, parse_mode="HTML")
         except Exception as e:
             module_interface.logger.error(f"向聊天 {chat_id} 发送源健康警告失败: {e}")
@@ -416,7 +416,7 @@ async def notify_source_recovered(url, source_info, subscribed_chats,
     # 发送通知给所有订阅者
     for chat_id, _ in subscribed_chats:
         try:
-            await module_interface.bot_engine.application.bot.send_message(
+            await module_interface.application.bot.send_message(
                 chat_id=chat_id, text=message, parse_mode="HTML")
         except Exception as e:
             module_interface.logger.error(f"向聊天 {chat_id} 发送源恢复通知失败: {e}")
@@ -734,7 +734,7 @@ async def send_entry(entry, source_info, url, subscribed_chats,
             try:
                 if image_url:
                     # 如果有图片，发送图片 + 文字
-                    await module_interface.bot_engine.application.bot.send_photo(
+                    await module_interface.application.bot.send_photo(
                         chat_id=chat_id,
                         photo=image_url,
                         caption=html_content,
@@ -742,7 +742,7 @@ async def send_entry(entry, source_info, url, subscribed_chats,
                         reply_markup=keyboard)
                 else:
                     # 否则只发送文字
-                    await module_interface.bot_engine.application.bot.send_message(
+                    await module_interface.application.bot.send_message(
                         chat_id=chat_id,
                         text=html_content,
                         parse_mode="HTML",
@@ -753,7 +753,7 @@ async def send_entry(entry, source_info, url, subscribed_chats,
                 # 如果发送失败（可能是图片无效），回退到纯文本
                 try:
                     module_interface.logger.warning(f"发送图片消息失败，回退到纯文本: {e}")
-                    await module_interface.bot_engine.application.bot.send_message(
+                    await module_interface.application.bot.send_message(
                         chat_id=chat_id,
                         text=html_content,
                         parse_mode="HTML",

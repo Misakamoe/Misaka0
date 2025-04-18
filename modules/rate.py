@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 # 模块元数据
-MODULE_NAME = "Rate"
+MODULE_NAME = "rate"
 MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "汇率转换，支持法币/虚拟货币"
 MODULE_DEPENDENCIES = []

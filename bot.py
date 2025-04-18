@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 # bot.py - 机器人主入口
 
-import os
 import sys
 import argparse
-import logging
 import asyncio
 import signal
-import time
 from core.bot_engine import BotEngine
 from utils.logger import setup_logger
 

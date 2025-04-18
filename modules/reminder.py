@@ -11,7 +11,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 # 模块元数据
-MODULE_NAME = "Reminder"
+MODULE_NAME = "reminder"
 MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "周期性和一次性提醒功能"
 MODULE_DEPENDENCIES = []

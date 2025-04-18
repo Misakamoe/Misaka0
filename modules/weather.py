@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 # 模块元数据
-MODULE_NAME = "Weather"
+MODULE_NAME = "weather"
 MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "天气查询，支持多种天气源"
 MODULE_DEPENDENCIES = []

@@ -3,7 +3,7 @@
 from telegram import Update
 from telegram.ext import ContextTypes
 
-MODULE_NAME = "Echo"
+MODULE_NAME = "echo"
 MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "简单复读用户发送的消息"
 MODULE_DEPENDENCIES = []

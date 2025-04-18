@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes, CallbackQueryHandler
 from utils.formatter import TextFormatter
 
 # 模块元数据
-MODULE_NAME = "Shuo"
+MODULE_NAME = "shuo"
 MODULE_VERSION = "2.0.0"
 MODULE_DESCRIPTION = "发布说说到 GitHub 仓库"
 MODULE_DEPENDENCIES = []
