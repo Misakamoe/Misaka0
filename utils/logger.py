@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 
 
 def setup_logger(name,
-                 log_level="INFO",
+                 log_level=None,
                  max_size=10 * 1024 * 1024,
                  backup_count=5,
                  cleanup_days=30):
@@ -16,7 +16,7 @@ def setup_logger(name,
     
     Args:
         name: 日志记录器名称
-        log_level: 日志级别
+        log_level: 日志级别，如果为 None，则尝试从全局配置获取
         max_size: 单个日志文件最大大小（字节）
         backup_count: 保留的日志文件数量
         cleanup_days: 清理超过多少天的日志
@@ -29,7 +29,14 @@ def setup_logger(name,
     os.makedirs(logs_dir, exist_ok=True)
 
     # 设置日志级别
-    level = getattr(logging, log_level.upper(), logging.INFO)
+    if log_level is None:
+        from core.bot_engine import BotEngine
+        if hasattr(BotEngine, 'global_log_level'):
+            level = BotEngine.global_log_level
+        else:
+            level = logging.INFO
+    else:
+        level = getattr(logging, log_level.upper(), logging.INFO)
 
     # 创建日志记录器
     logger = logging.getLogger(name)

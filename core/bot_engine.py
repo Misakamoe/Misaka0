@@ -25,9 +25,10 @@ class BotEngine:
         self.config_manager = ConfigManager(config_dir)
 
         # 设置日志
-        self.logger = setup_logger(
-            "BotEngine",
-            self.config_manager.main_config.get("log_level", "INFO"))
+        log_level = self.config_manager.main_config.get("log_level", "INFO")
+        BotEngine.global_log_level = getattr(logging, log_level.upper(),
+                                             logging.INFO)
+        self.logger = setup_logger("BotEngine", log_level)
 
         # 降低网络错误的日志级别
         logging.getLogger("telegram.request").setLevel(logging.WARNING)
