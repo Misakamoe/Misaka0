@@ -472,9 +472,9 @@ async def delete_post(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # 创建确认按钮
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("○ Confirm",
+        InlineKeyboardButton("◯ Confirm",
                              callback_data=f"shuo_confirm_delete_{post_key}"),
-        InlineKeyboardButton("× Cancel", callback_data="shuo_cancel_delete")
+        InlineKeyboardButton("⨉ Cancel", callback_data="shuo_cancel_delete")
     ]])
 
     # 获取说说内容预览

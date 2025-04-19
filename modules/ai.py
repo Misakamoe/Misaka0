@@ -1106,8 +1106,8 @@ class ConfigHandler:
                     provider) if provider in _state["providers"] else provider
                 stats_text += f"• <code>{provider}</code> ({provider_name}): <code>{count}</code>\n"
 
-        # 按用户统计 (仅显示前10位活跃用户)
-        stats_text += "\n<b>按用户统计 (前10位):</b>\n"
+        # 按用户统计 (仅显示前 10 位活跃用户)
+        stats_text += "\n<b>按用户统计 (前 10 位):</b>\n"
         if not stats.get('requests_by_user'):
             stats_text += "<i>暂无数据</i>\n"
         else:

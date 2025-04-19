@@ -155,7 +155,7 @@ class BotEngine:
             error_callback=self.polling_error_callback)
 
         # 加载模块
-        await self.module_manager.load_enabled_modules()
+        await self.module_manager.start()
 
         # 启动会话清理
         await self.session_manager.start_cleanup()
@@ -189,7 +189,7 @@ class BotEngine:
 
         # 卸载所有模块
         if self.module_manager:
-            await self.module_manager.unload_all_modules()
+            await self.module_manager.stop()
 
         # 停止轮询
         if hasattr(self.application, 'updater') and self.application.updater:

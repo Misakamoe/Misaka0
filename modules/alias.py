@@ -139,26 +139,6 @@ async def _save_aliases():
                 _interface.logger.error(f"保存别名数据失败: {e}")
 
 
-async def _get_command_metadata(command: str) -> Dict[str, Any]:
-    """获取命令的元数据，包括权限要求"""
-    # 从状态中获取
-    if "permissions" in _state and command in _state["permissions"]:
-        return {"admin_level": _state["permissions"][command]}
-
-    # 尝试从命令管理器获取
-    try:
-        command_manager = _interface.application.bot_data.get(
-            "command_manager")
-        if command_manager and hasattr(command_manager, "commands"):
-            cmd_info = command_manager.commands.get(command, {})
-            if cmd_info:
-                return {"admin_level": cmd_info.get("admin_level", False)}
-    except Exception as e:
-        _interface.logger.debug(f"获取命令元数据时出错: {e}")
-
-    return {}
-
-
 def _check_alias_cycle(cmd: str,
                        alias: str,
                        visited: Optional[set] = None) -> bool:
@@ -250,6 +230,39 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _interface.logger.debug(
                 f"执行别名命令: /{aliased_command} (别名: {command})")
 
+            # 获取命令管理器
+            command_manager = _interface.application.bot_data.get(
+                "command_manager")
+            if not command_manager:
+                return
+
+            # 获取命令信息
+            cmd_info = command_manager.commands.get(aliased_command)
+            if not cmd_info:
+                return
+
+            # 获取命令权限级别
+            admin_level = cmd_info.get("admin_level", False)
+
+            # 检查用户权限
+            if admin_level:
+                user_id = update.effective_user.id
+                chat_id = update.effective_chat.id
+
+                # 根据权限级别进行不同的检查
+                if admin_level == "super_admin":
+                    # 检查是否是超级管理员
+                    if not _interface.config_manager.is_admin(user_id):
+                        await update.message.reply_text(f"⚠️ 您没有执行此命令的权限")
+                        return
+
+                elif admin_level == "group_admin":
+                    # 检查是否是群组管理员
+                    if not _interface.config_manager.is_chat_admin(
+                            chat_id, user_id):
+                        await update.message.reply_text(f"⚠️ 您没有执行此命令的权限")
+                        return
+
             # 保存原始参数
             original_args = context.args if hasattr(context, 'args') else None
 
@@ -257,19 +270,11 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # 设置新参数
                 context.args = args
 
-                # 尝试执行命令
-                command_manager = _interface.application.bot_data.get(
-                    "command_manager")
-                if command_manager:
-                    # 获取命令信息
-                    cmd_info = command_manager.commands.get(aliased_command)
-                    if cmd_info:
-                        # 获取回调函数
-                        callback = cmd_info.get("callback")
-                        if callback:
-                            # 执行命令
-                            await callback(update, context)
-                            return
+                # 执行命令回调
+                callback = cmd_info.get("callback")
+                if callback:
+                    await callback(update, context)
+                    return
 
                 # 如果直接执行失败，尝试通过事件系统
                 await _interface.publish_event("execute_command",
@@ -401,37 +406,27 @@ async def register_message_handler():
     """安全地注册消息处理器"""
     global _interface, _message_handler
 
-    # 如果已经注册了处理器，先注销
+    # 如果已经注册了处理器，先从接口的追踪列表中移除
     if _message_handler:
         try:
-            # 从接口的已注册处理器列表中移除
-            for i, (handler, group) in enumerate(_interface.handlers):
-                if handler == _message_handler:
-                    _interface.handlers.pop(i)
-                    break
+            # 从接口的追踪列表中移除
+            _interface.handlers = [(h, g) for h, g in _interface.handlers
+                                   if h != _message_handler]
 
-            # 从应用中移除处理器
-            _interface.application.remove_handler(_message_handler, 100)
+            # 使用模块管理器的队列系统安全移除处理器
+            await _interface.module_manager.schedule_handler_operation(
+                "remove", _message_handler, 0, _interface.module_name)
+
             _message_handler = None
         except Exception as e:
             _interface.logger.error(f"注销消息处理器失败: {e}")
 
-    # 注册新的消息处理器
+    # 注册新的消息处理器，使用默认组(0)
     _message_handler = MessageHandler(filters.Regex(r'^/'), process_message)
-    await _interface.register_handler(_message_handler, group=100)  # 使用较低的优先级
+
+    # 使用模块接口注册处理器（默认组 0）
+    await _interface.register_handler(_message_handler)
     _interface.logger.info("别名消息处理器已安全注册")
-
-
-# 所有模块加载完成的事件处理
-async def on_all_modules_loaded(event_type, **event_data):
-    """当所有模块加载完成时调用"""
-    # 延迟一点时间再注册处理器，确保所有命令都已注册
-    await asyncio.sleep(1)
-
-    # 注册消息处理器
-    await register_message_handler()
-
-    _interface.logger.info("所有模块加载完成，别名系统已更新")
 
 
 # 状态管理函数
@@ -467,23 +462,24 @@ async def setup(module_interface):
                                             admin_level="super_admin",
                                             description="管理命令别名")
 
-    # 订阅模块加载完成事件
-    await module_interface.subscribe_event("all_modules_loaded",
-                                           on_all_modules_loaded)
-
-    # 创建一个延迟任务来安全地注册消息处理器
+    # 延迟注册处理器，确保所有命令已经注册
     asyncio.create_task(delayed_register_handler())
 
     module_interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
 
 async def delayed_register_handler():
-    """安全地延迟注册消息处理器"""
-    # 延迟一段时间，确保所有命令都已注册
+    """延迟注册消息处理器，确保所有命令都已注册"""
+    global _interface, _message_handler
+
+    # 等待 2s 让所有模块初始化
     await asyncio.sleep(2)
 
-    # 注册消息处理器
-    await register_message_handler()
+    # 使用标准的处理器注册方式
+    _message_handler = MessageHandler(filters.Regex(r'^/'), process_message)
+    await _interface.register_handler(_message_handler)
+
+    _interface.logger.info("别名消息处理器已注册")
 
 
 async def cleanup(module_interface):

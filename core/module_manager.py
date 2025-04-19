@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import traceback
 from utils.logger import setup_logger
+from collections import deque
 
 
 class ModuleInterface:
@@ -77,8 +78,11 @@ class ModuleInterface:
         # 替换回调函数
         handler.callback = checked_callback
 
-        # 添加到应用
-        self.application.add_handler(handler, group)
+        # 将处理器注册请求添加到队列，而不是直接注册
+        await self.module_manager.schedule_handler_operation(
+            "add", handler, group, self.module_name)
+
+        # 跟踪处理器以便清理
         self.handlers.append((handler, group))
         return True
 
@@ -160,9 +164,11 @@ class ModuleInterface:
         # 注销所有处理器
         for handler, group in self.handlers:
             try:
-                self.application.remove_handler(handler, group)
+                # 将处理器移除请求添加到队列
+                await self.module_manager.schedule_handler_operation(
+                    "remove", handler, group, self.module_name)
             except Exception as e:
-                self.logger.error(f"移除处理器时出错: {e}")
+                self.logger.error(f"安排移除处理器时出错: {e}")
 
         # 取消所有事件订阅
         for subscription in self.event_subscriptions:
@@ -174,8 +180,6 @@ class ModuleInterface:
         # 重置资源跟踪
         self.handlers = []
         self.event_subscriptions = []
-
-        # 命令将由 CommandManager 统一清理
         self.commands = []
 
 
@@ -211,6 +215,87 @@ class ModuleManager:
         # 添加模块目录到 Python 路径
         if modules_dir not in sys.path:
             sys.path.append(os.path.abspath(modules_dir))
+
+        # 添加处理器操作锁
+        self._handlers_lock = asyncio.Lock()
+
+        # 添加处理器操作队列
+        self._handler_operations_queue = deque()
+
+        # 处理器操作任务
+        self._handler_processor_task = None
+
+    async def start(self):
+        """启动模块管理器"""
+        # 启动处理器操作处理任务
+        self._handler_processor_task = asyncio.create_task(
+            self._process_handler_operations())
+
+        # 加载启用的模块
+        await self.load_enabled_modules()
+
+    async def stop(self):
+        """停止模块管理器"""
+        # 卸载所有模块
+        await self.unload_all_modules()
+
+        # 取消处理器操作处理任务
+        if self._handler_processor_task:
+            self._handler_processor_task.cancel()
+            try:
+                await self._handler_processor_task
+            except asyncio.CancelledError:
+                pass
+            self._handler_processor_task = None
+
+    async def schedule_handler_operation(self, operation, handler, group,
+                                         module_name):
+        """安排处理器操作
+        
+        Args:
+            operation: 操作类型 ("add" 或 "remove")
+            handler: 处理器对象
+            group: 处理器组
+            module_name: 模块名称
+        """
+        # 将操作添加到队列
+        self._handler_operations_queue.append(
+            (operation, handler, group, module_name))
+
+        # 确保操作处理任务正在运行
+        if not self._handler_processor_task or self._handler_processor_task.done(
+        ):
+            self._handler_processor_task = asyncio.create_task(
+                self._process_handler_operations())
+
+    async def _process_handler_operations(self):
+        """处理处理器操作队列"""
+        while True:
+            # 如果队列为空，等待一小段时间
+            if not self._handler_operations_queue:
+                await asyncio.sleep(0.1)
+                continue
+
+            # 获取操作
+            try:
+                operation, handler, group, module_name = self._handler_operations_queue.popleft(
+                )
+
+                # 获取锁并执行操作
+                async with self._handlers_lock:
+                    if operation == "add":
+                        self.logger.debug(f"为模块 {module_name} 添加处理器")
+                        self.application.add_handler(handler, group)
+                    elif operation == "remove":
+                        self.logger.debug(f"为模块 {module_name} 移除处理器")
+                        self.application.remove_handler(handler, group)
+
+                # 短暂睡眠以避免CPU过载
+                await asyncio.sleep(0.01)
+
+            except Exception as e:
+                self.logger.error(f"执行处理器操作时出错: {e}")
+                await asyncio.sleep(0.1)  # 出错时延长等待时间
 
     async def load_enabled_modules(self):
         """加载所有启用的模块"""
@@ -407,7 +492,7 @@ class ModuleManager:
                     self.logger.error(
                         f"调用模块 {module_name} 的 cleanup 方法出错: {e}")
 
-            # 清理模块接口
+            # 清理模块接口 - 这会安排处理器移除操作而不是直接移除
             await interface.cleanup()
 
             # 注销命令

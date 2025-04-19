@@ -96,7 +96,7 @@ class PaginationHelper:
         if page_index < self.total_pages - 1:
             row.append(
                 InlineKeyboardButton(
-                    "▷ Next",
+                    "Next ▷",
                     callback_data=
                     f"{self.callback_prefix}:{page_index + 1}:{id(self)}"))
         else:
