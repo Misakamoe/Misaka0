@@ -411,8 +411,7 @@ class ConfigManager:
             # 获取群组特定的模块列表
             group_modules = self.modules_config.get("group_modules",
                                                     {}).get(chat_id_str, [])
-            # 合并全局启用的模块
-            return list(set(self.get_enabled_modules() + group_modules))
+            return group_modules
         else:  # 私聊 ID
             # 私聊使用全局设置
             return self.get_enabled_modules()
