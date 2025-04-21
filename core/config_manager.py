@@ -3,7 +3,6 @@
 import os
 import json
 import time
-import asyncio
 from utils.logger import setup_logger
 
 
@@ -13,17 +12,12 @@ class ConfigManager:
     def __init__(self, config_dir="config"):
         self.config_dir = config_dir
         self.main_config_path = os.path.join(config_dir, "config.json")
-        self.modules_config_path = os.path.join(config_dir, "modules.json")
-
-        # 创建锁
-        self.config_lock = asyncio.Lock()
 
         # 设置日志
         self.logger = setup_logger("ConfigManager")
 
         # 配置缓存
         self.main_config = {}
-        self.modules_config = {}
 
         # 确保配置目录存在
         self._ensure_config_dir()
@@ -137,36 +131,9 @@ class ConfigManager:
         self.main_config = config
         return config
 
-    def reload_modules_config(self):
-        """重新加载模块配置
-        
-        Returns:
-            dict: 加载的配置
-        """
-        default_config = {"enabled_modules": [], "group_modules": {}}
-
-        # 加载配置
-        config = self._load_json_file(self.modules_config_path, default_config)
-
-        # 检查是否需要补充缺失的配置项
-        needs_save = False
-        for key, value in default_config.items():
-            if key not in config:
-                config[key] = value
-                needs_save = True
-
-        # 如果有缺失的配置项，保存配置
-        if needs_save:
-            self._save_json_file(self.modules_config_path, config)
-            self.logger.info("已自动补充模块配置中的缺失项并保存")
-
-        self.modules_config = config
-        return config
-
     def reload_all_configs(self):
         """重新加载所有配置"""
         self.reload_main_config()
-        self.reload_modules_config()
         self.logger.info("所有配置已重新加载")
 
     def save_main_config(self):
@@ -176,15 +143,6 @@ class ConfigManager:
             bool: 是否成功保存
         """
         return self._save_json_file(self.main_config_path, self.main_config)
-
-    def save_modules_config(self):
-        """保存模块配置
-        
-        Returns:
-            bool: 是否成功保存
-        """
-        return self._save_json_file(self.modules_config_path,
-                                    self.modules_config)
 
     def get_token(self):
         """获取 Bot Token
@@ -293,43 +251,6 @@ class ConfigManager:
             return self.save_main_config()
         return True
 
-    def get_enabled_modules(self):
-        """获取全局启用的模块列表
-        
-        Returns:
-            list: 启用的模块列表
-        """
-        return self.modules_config.get("enabled_modules", [])
-
-    def enable_module(self, module_name):
-        """全局启用模块
-        
-        Args:
-            module_name: 模块名称
-            
-        Returns:
-            bool: 是否成功启用
-        """
-        if module_name not in self.modules_config.get("enabled_modules", []):
-            self.modules_config.setdefault("enabled_modules",
-                                           []).append(module_name)
-            return self.save_modules_config()
-        return True
-
-    def disable_module(self, module_name):
-        """全局禁用模块
-        
-        Args:
-            module_name: 模块名称
-            
-        Returns:
-            bool: 是否成功禁用
-        """
-        if module_name in self.modules_config.get("enabled_modules", []):
-            self.modules_config["enabled_modules"].remove(module_name)
-            return self.save_modules_config()
-        return True
-
     def is_allowed_group(self, group_id):
         """检查群组是否允许使用 bot
         
@@ -394,103 +315,3 @@ class ConfigManager:
             dict: 群组信息
         """
         return self.main_config.get("allowed_groups", {})
-
-    def get_enabled_modules_for_chat(self, chat_id):
-        """获取指定聊天的已启用模块列表
-        
-        Args:
-            chat_id: 聊天 ID
-            
-        Returns:
-            list: 启用的模块列表
-        """
-        chat_id_str = str(chat_id)
-
-        # 检查是否是群组 ID（群组 ID 通常为负数）
-        if chat_id < 0:  # 群组 ID
-            # 获取群组特定的模块列表
-            group_modules = self.modules_config.get("group_modules",
-                                                    {}).get(chat_id_str, [])
-            return group_modules
-        else:  # 私聊 ID
-            # 私聊使用全局设置
-            return self.get_enabled_modules()
-
-    def enable_module_for_chat(self, module_name, chat_id):
-        """为特定聊天启用模块
-        
-        Args:
-            module_name: 模块名称
-            chat_id: 聊天 ID
-            
-        Returns:
-            bool: 是否成功启用
-        """
-        chat_id_str = str(chat_id)
-
-        # 检查是否是群组 ID
-        if chat_id < 0:  # 群组 ID
-            # 确保 group_modules 存在
-            if "group_modules" not in self.modules_config:
-                self.modules_config["group_modules"] = {}
-
-            # 确保该群组的配置存在
-            if chat_id_str not in self.modules_config["group_modules"]:
-                self.modules_config["group_modules"][chat_id_str] = []
-
-            # 启用模块
-            if module_name not in self.modules_config["group_modules"][
-                    chat_id_str]:
-                self.modules_config["group_modules"][chat_id_str].append(
-                    module_name)
-                return self.save_modules_config()
-            return True
-        else:  # 私聊 ID
-            # 使用全局设置
-            return self.enable_module(module_name)
-
-    def disable_module_for_chat(self, module_name, chat_id):
-        """为特定聊天禁用模块
-        
-        Args:
-            module_name: 模块名称
-            chat_id: 聊天 ID
-            
-        Returns:
-            bool: 是否成功禁用
-        """
-        chat_id_str = str(chat_id)
-
-        # 检查是否是群组 ID
-        if chat_id < 0:  # 群组 ID
-            # 确保 group_modules 存在
-            if "group_modules" not in self.modules_config:
-                self.modules_config["group_modules"] = {}
-
-            # 确保该群组的配置存在
-            if chat_id_str not in self.modules_config["group_modules"]:
-                self.modules_config["group_modules"][chat_id_str] = []
-                return self.save_modules_config()
-
-            # 禁用模块
-            if module_name in self.modules_config["group_modules"][
-                    chat_id_str]:
-                self.modules_config["group_modules"][chat_id_str].remove(
-                    module_name)
-                return self.save_modules_config()
-            return True
-        else:  # 私聊 ID
-            # 使用全局设置
-            return self.disable_module(module_name)
-
-    def is_module_enabled_for_chat(self, module_name, chat_id):
-        """检查模块是否在特定聊天中启用
-        
-        Args:
-            module_name: 模块名称
-            chat_id: 聊天 ID
-            
-        Returns:
-            bool: 是否启用
-        """
-        return module_name in self.get_enabled_modules_for_chat(chat_id)

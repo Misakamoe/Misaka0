@@ -165,10 +165,6 @@ class BotEngine:
         cleanup_task = asyncio.create_task(self.periodic_cleanup())
         self.tasks.append(cleanup_task)
 
-        # 启动配置监视
-        config_watch_task = asyncio.create_task(self.watch_config_changes())
-        self.tasks.append(config_watch_task)
-
         self.logger.info("机器人已成功启动")
 
     async def stop(self):
@@ -235,12 +231,6 @@ class BotEngine:
                 collected = gc.collect()
                 self.logger.debug(f"垃圾回收完成，回收了 {collected} 个对象")
 
-                # 清理未使用的模块
-                unused_count = await self.module_manager.cleanup_unused_modules(
-                )
-                if unused_count > 0:
-                    self.logger.info(f"已清理 {unused_count} 个未使用的模块")
-
                 # 更新统计信息
                 self.stats["last_cleanup"] = time.time()
 
@@ -255,17 +245,10 @@ class BotEngine:
         """监控配置文件变化"""
         config_dir = self.config_manager.config_dir
         main_config_path = os.path.join(config_dir, "config.json")
-        modules_config_path = os.path.join(config_dir, "modules.json")
 
         # 初始化文件最后修改时间
-        last_mtimes = {
-            main_config_path:
-            os.path.getmtime(main_config_path)
-            if os.path.exists(main_config_path) else 0,
-            modules_config_path:
-            os.path.getmtime(modules_config_path)
-            if os.path.exists(modules_config_path) else 0
-        }
+        last_mtime = os.path.getmtime(main_config_path) if os.path.exists(
+            main_config_path) else 0
 
         check_interval = 5  # 5 秒检查一次
 
@@ -273,41 +256,20 @@ class BotEngine:
             while True:
                 try:
                     # 检查配置文件
-                    for path in [main_config_path, modules_config_path]:
-                        if not os.path.exists(path):
-                            continue
+                    if not os.path.exists(main_config_path):
+                        await asyncio.sleep(check_interval)
+                        continue
 
-                        current_mtime = os.path.getmtime(path)
-                        if current_mtime > last_mtimes[path]:
-                            self.logger.info(f"检测到配置文件变化: {path}")
-                            last_mtimes[path] = current_mtime
+                    current_mtime = os.path.getmtime(main_config_path)
+                    if current_mtime > last_mtime:
+                        self.logger.info(f"检测到配置文件变化: {main_config_path}")
+                        last_mtime = current_mtime
 
-                            # 适当延迟，确保文件写入完成
-                            await asyncio.sleep(0.5)
+                        # 适当延迟，确保文件写入完成
+                        await asyncio.sleep(0.5)
 
-                            # 重新加载配置
-                            if path == main_config_path:
-                                self.config_manager.reload_main_config()
-                            else:
-                                old_modules = set(
-                                    self.config_manager.get_enabled_modules())
-                                self.config_manager.reload_modules_config()
-                                new_modules = set(
-                                    self.config_manager.get_enabled_modules())
-
-                                # 处理新启用的模块
-                                for module_name in new_modules - old_modules:
-                                    self.logger.info(
-                                        f"检测到新启用的模块: {module_name}")
-                                    await self.module_manager.load_and_enable_module(
-                                        module_name)
-
-                                # 处理新禁用的模块
-                                for module_name in old_modules - new_modules:
-                                    self.logger.info(
-                                        f"检测到模块已禁用: {module_name}")
-                                    await self.module_manager.disable_and_unload_module(
-                                        module_name)
+                        # 重新加载配置
+                        self.config_manager.reload_main_config()
 
                     await asyncio.sleep(check_interval)
 

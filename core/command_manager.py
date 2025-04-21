@@ -75,24 +75,6 @@ class CommandManager:
                 "description": "列出可用命令"
             },
             {
-                "name": "enable",
-                "callback": self._enable_module_command,
-                "admin_level": "group_admin",
-                "description": "启用模块"
-            },
-            {
-                "name": "disable",
-                "callback": self._disable_module_command,
-                "admin_level": "group_admin",
-                "description": "禁用模块"
-            },
-            {
-                "name": "reload",
-                "callback": self._reload_module_command,
-                "admin_level": "super_admin",
-                "description": "重新加载模块"
-            },
-            {
                 "name": "stats",
                 "callback": self._stats_command,
                 "admin_level": "super_admin",
@@ -265,7 +247,7 @@ class CommandManager:
 
     def _create_command_wrapper(self, command_name, callback, admin_level,
                                 module_name):
-        """创建命令包装器，处理权限检查和模块状态检查
+        """创建命令包装器，处理权限检查和模块聊天类型检查
         
         Args:
             command_name: 命令名称
@@ -283,14 +265,29 @@ class CommandManager:
                 if not await self._check_allowed_group(update, context):
                     return
 
-                # 核心命令不进行模块检查
+                # 获取聊天类型
+                chat_type = "private" if update.effective_chat.type == "private" else "group"
+
+                # 核心命令不进行模块聊天类型检查
                 if module_name != "core":
-                    # 检查模块是否在当前聊天中启用
-                    if not self._check_module_enabled(module_name, update):
-                        await update.message.reply_text(
-                            f"命令 /{command_name} 所属的模块 {module_name} 未在当前聊天启用。"
-                        )
-                        return
+                    # 获取模块管理器
+                    module_manager = context.bot_data.get("module_manager")
+                    if module_manager:
+                        # 获取模块信息
+                        module_info = module_manager.get_module_info(
+                            module_name)
+                        if module_info:
+                            # 检查模块是否支持当前聊天类型
+                            module = module_info["module"]
+                            supported_types = getattr(
+                                module, "MODULE_CHAT_TYPES",
+                                ["global", "private", "group"])
+
+                            if chat_type not in supported_types and "global" not in supported_types:
+                                await update.message.reply_text(
+                                    f"命令 /{command_name} 所属的模块 {module_name} 不支持在{chat_type}中使用。"
+                                )
+                                return
 
                 # 检查用户权限
                 if not await self._check_permission(admin_level, update,
@@ -363,23 +360,6 @@ class CommandManager:
             return False
 
         return True
-
-    def _check_module_enabled(self, module_name, update):
-        """检查模块是否在当前聊天中启用
-        
-        Args:
-            module_name: 模块名称
-            update: 更新对象
-            
-        Returns:
-            bool: 模块是否启用
-        """
-        if module_name == "core":
-            return True
-
-        chat_id = update.effective_chat.id
-        return self.config_manager.is_module_enabled_for_chat(
-            module_name, chat_id)
 
     async def _check_permission(self, admin_level, update, context):
         """检查用户权限
@@ -480,7 +460,7 @@ class CommandManager:
             update: 更新对象
             context: 上下文对象
         """
-
+        help_text = "🫥 *机器人帮助*\n\n"
         help_text += "*基本命令：*\n"
         help_text += "/start - 启动机器人\n"
         help_text += "/help - 显示此帮助信息\n"
@@ -490,34 +470,17 @@ class CommandManager:
 
         # 检查用户权限
         user_id = update.effective_user.id
-        chat = update.effective_chat
 
         # 检查是否是超级管理员
         is_super_admin = self.config_manager.is_admin(user_id)
 
-        # 检查是否是群组管理员
-        is_group_admin = False
-        if chat.type in ["group", "supergroup"]:
-            try:
-                chat_member = await context.bot.get_chat_member(
-                    chat.id, user_id)
-                is_group_admin = chat_member.status in [
-                    "creator", "administrator"
-                ]
-            except Exception:
-                pass
-
-        # 显示管理员命令
-        if is_super_admin or is_group_admin:
-            help_text += "*管理员命令：*\n"
-            help_text += "/enable <模块名> - 启用模块\n"
-            help_text += "/disable <模块名> - 禁用模块\n\n"
-
         # 显示超级管理员命令
         if is_super_admin:
             help_text += "*超级管理员命令：*\n"
-            help_text += "/reload <模块名> - 重新加载模块\n"
             help_text += "/stats - 显示机器人统计信息\n"
+            help_text += "/listgroups - 列出允许的群组\n"
+            help_text += "/addgroup <群组ID> - 添加群组到白名单\n"
+            help_text += "/removegroup <群组ID> - 从白名单移除群组\n"
 
         try:
             await update.message.reply_text(help_text, parse_mode="MARKDOWN")
@@ -589,14 +552,11 @@ class CommandManager:
         """
         chat_id = update.effective_chat.id
         chat_type = update.effective_chat.type
+        current_chat_type = "private" if chat_type == "private" else "group"
 
         # 获取已安装的模块
         module_manager = context.bot_data.get("module_manager")
         installed_modules = module_manager.discover_modules()
-
-        # 获取当前聊天启用的模块
-        enabled_modules = self.config_manager.get_enabled_modules_for_chat(
-            chat_id)
 
         # 构建模块信息列表
         module_list = []
@@ -612,32 +572,39 @@ class CommandManager:
                 metadata = module_info["metadata"]
                 description = metadata.get("description", "")
                 version = metadata.get("version", "unknown")
+
+                # 获取模块支持的聊天类型
+                module = module_info["module"]
+                supported_types = getattr(module, "MODULE_CHAT_TYPES",
+                                          ["global", "private", "group"])
             else:
                 metadata = None
                 description = ""
                 version = "unknown"
+                supported_types = ["global", "private", "group"]  # 默认全部支持
 
-            # 检查是否启用
-            is_enabled = module_name in enabled_modules
+            # 检查是否支持当前聊天类型
+            supports_current_type = current_chat_type in supported_types or "global" in supported_types
 
             module_list.append({
                 "name": module_name,
-                "enabled": is_enabled,
+                "supports_current_type": supports_current_type,
+                "supported_types": supported_types,
                 "description": description,
                 "version": version,
                 "loaded": module_info is not None
             })
 
-        # 按启用状态和名称排序
-        module_list.sort(key=lambda x: (not x["enabled"], x["name"]))
+        # 按当前聊天类型支持状态和名称排序
+        module_list.sort(
+            key=lambda x: (not x["supports_current_type"], x["name"]))
 
         # 使用分页帮助器
         pagination = PaginationHelper(
             items=module_list,
             page_size=8,
             format_item=lambda item: self._format_module_item(item),
-            title=
-            f"{'群组' if chat_type in ['group', 'supergroup'] else '全局'}模块列表",
+            title=f"模块列表（当前聊天类型：{current_chat_type}）",
             callback_prefix="mod_page")
 
         # 显示第一页
@@ -652,13 +619,24 @@ class CommandManager:
         Returns:
             str: 格式化后的文本
         """
-        status = "✅" if item["enabled"] else "❌"
         name = TextFormatter.escape_markdown(item["name"])
         description = TextFormatter.escape_markdown(
             item["description"]) if item["description"] else "_无描述_"
         version = TextFormatter.escape_markdown(item["version"])
 
-        return f"{status} *{name}* v{version}\n  {description}"
+        # 显示支持的聊天类型
+        chat_types = []
+        if "global" in item["supported_types"]:
+            chat_types.append("全局")
+        if "private" in item["supported_types"]:
+            chat_types.append("私聊")
+        if "group" in item["supported_types"]:
+            chat_types.append("群组")
+
+        chat_types_str = ", ".join(chat_types)
+        status = "✅" if item["supports_current_type"] else "❌"
+
+        return f"{status} *{name}* v{version} [{chat_types_str}]\n  {description}"
 
     async def _list_commands_command(self, update, context):
         """处理 /commands 命令
@@ -669,6 +647,7 @@ class CommandManager:
         """
         chat_id = update.effective_chat.id
         chat_type = update.effective_chat.type
+        current_chat_type = "private" if chat_type == "private" else "group"
 
         # 获取用户权限
         user_id = update.effective_user.id
@@ -688,6 +667,9 @@ class CommandManager:
         # 收集命令信息
         command_list = []
 
+        # 获取模块管理器
+        module_manager = context.bot_data.get("module_manager")
+
         for cmd_name, cmd_info in self.commands.items():
             module_name = cmd_info["module"]
             admin_level = cmd_info["admin_level"]
@@ -701,17 +683,29 @@ class CommandManager:
                                                      or is_group_admin):
                 continue
 
-            # 检查模块是否启用
-            if module_name != "core" and not self.config_manager.is_module_enabled_for_chat(
-                    module_name, chat_id):
+            # 核心模块命令总是可用
+            if module_name == "core":
+                command_list.append({
+                    "name": cmd_name,
+                    "module": module_name,
+                    "admin_level": admin_level,
+                    "description": description
+                })
                 continue
 
-            command_list.append({
-                "name": cmd_name,
-                "module": module_name,
-                "admin_level": admin_level,
-                "description": description
-            })
+            # 检查非核心模块命令是否支持当前聊天类型
+            module_info = module_manager.get_module_info(module_name)
+            if module_info:
+                module = module_info["module"]
+                supported_types = getattr(module, "MODULE_CHAT_TYPES",
+                                          ["global", "private", "group"])
+                if current_chat_type in supported_types or "global" in supported_types:
+                    command_list.append({
+                        "name": cmd_name,
+                        "module": module_name,
+                        "admin_level": admin_level,
+                        "description": description
+                    })
 
         # 按模块和名称排序
         command_list.sort(
@@ -722,8 +716,7 @@ class CommandManager:
             items=command_list,
             page_size=10,
             format_item=lambda item: self._format_command_item(item),
-            title=
-            f"{'群组' if chat_type in ['group', 'supergroup'] else '全局'}命令列表",
+            title=f"命令列表（当前聊天类型：{current_chat_type}）",
             callback_prefix="cmd_page")
 
         # 显示第一页
@@ -772,6 +765,7 @@ class CommandManager:
 
             chat_id = update.effective_chat.id
             chat_type = update.effective_chat.type
+            current_chat_type = "private" if chat_type == "private" else "group"
 
             # 获取用户权限
             user_id = update.effective_user.id
@@ -792,8 +786,6 @@ class CommandManager:
                 # 模块列表分页
                 module_manager = context.bot_data.get("module_manager")
                 installed_modules = module_manager.discover_modules()
-                enabled_modules = self.config_manager.get_enabled_modules_for_chat(
-                    chat_id)
 
                 # 构建模块信息列表
                 module_list = []
@@ -808,32 +800,41 @@ class CommandManager:
                         metadata = module_info["metadata"]
                         description = metadata.get("description", "")
                         version = metadata.get("version", "unknown")
+
+                        # 获取模块支持的聊天类型
+                        module = module_info["module"]
+                        supported_types = getattr(
+                            module, "MODULE_CHAT_TYPES",
+                            ["global", "private", "group"])
                     else:
                         metadata = None
                         description = ""
                         version = "unknown"
+                        supported_types = ["global", "private",
+                                           "group"]  # 默认全部支持
 
-                    # 检查是否启用
-                    is_enabled = module_name in enabled_modules
+                    # 检查是否支持当前聊天类型
+                    supports_current_type = current_chat_type in supported_types or "global" in supported_types
 
                     module_list.append({
                         "name": module_name,
-                        "enabled": is_enabled,
+                        "supports_current_type": supports_current_type,
+                        "supported_types": supported_types,
                         "description": description,
                         "version": version,
                         "loaded": module_info is not None
                     })
 
-                # 按启用状态和名称排序
-                module_list.sort(key=lambda x: (not x["enabled"], x["name"]))
+                # 按支持当前聊天类型和名称排序
+                module_list.sort(
+                    key=lambda x: (not x["supports_current_type"], x["name"]))
 
                 # 使用分页帮助器
                 pagination = PaginationHelper(
                     items=module_list,
                     page_size=8,
                     format_item=lambda item: self._format_module_item(item),
-                    title=
-                    f"{'群组' if chat_type in ['group', 'supergroup'] else '全局'}模块列表",
+                    title=f"模块列表（当前聊天类型：{current_chat_type}）",
                     callback_prefix="mod_page")
 
                 # 显示请求的页面
@@ -843,6 +844,9 @@ class CommandManager:
                 # 命令列表分页
                 # 收集命令信息
                 command_list = []
+
+                # 获取模块管理器
+                module_manager = context.bot_data.get("module_manager")
 
                 for cmd_name, cmd_info in self.commands.items():
                     module_name = cmd_info["module"]
@@ -857,17 +861,30 @@ class CommandManager:
                                                              is_group_admin):
                         continue
 
-                    # 检查模块是否启用
-                    if module_name != "core" and not self.config_manager.is_module_enabled_for_chat(
-                            module_name, chat_id):
+                    # 核心模块命令总是可用
+                    if module_name == "core":
+                        command_list.append({
+                            "name": cmd_name,
+                            "module": module_name,
+                            "admin_level": admin_level,
+                            "description": description
+                        })
                         continue
 
-                    command_list.append({
-                        "name": cmd_name,
-                        "module": module_name,
-                        "admin_level": admin_level,
-                        "description": description
-                    })
+                    # 检查非核心模块命令是否支持当前聊天类型
+                    module_info = module_manager.get_module_info(module_name)
+                    if module_info:
+                        module = module_info["module"]
+                        supported_types = getattr(
+                            module, "MODULE_CHAT_TYPES",
+                            ["global", "private", "group"])
+                        if current_chat_type in supported_types or "global" in supported_types:
+                            command_list.append({
+                                "name": cmd_name,
+                                "module": module_name,
+                                "admin_level": admin_level,
+                                "description": description
+                            })
 
                 # 按模块和名称排序
                 command_list.sort(key=lambda x: (x["module"] != "core", x[
@@ -878,8 +895,7 @@ class CommandManager:
                     items=command_list,
                     page_size=10,
                     format_item=lambda item: self._format_command_item(item),
-                    title=
-                    f"{'群组' if chat_type in ['group', 'supergroup'] else '全局'}命令列表",
+                    title=f"命令列表（当前聊天类型：{current_chat_type}）",
                     callback_prefix="cmd_page")
 
                 # 显示请求的页面
@@ -891,136 +907,6 @@ class CommandManager:
         except Exception as e:
             self.logger.error(f"处理分页回调时出错: {e}", exc_info=True)
             await query.answer("处理回调时出错")
-
-    async def _enable_module_command(self, update, context):
-        """处理 /enable 命令
-        
-        Args:
-            update: 更新对象
-            context: 上下文对象
-        """
-        if not context.args or len(context.args) != 1:
-            await update.message.reply_text("用法: /enable <模块名>")
-            return
-
-        module_name = context.args[0]
-        chat_id = update.effective_chat.id
-        chat_type = update.effective_chat.type
-
-        # 获取模块管理器
-        module_manager = context.bot_data.get("module_manager")
-
-        # 检查模块是否存在
-        available_modules = module_manager.discover_modules()
-        if module_name not in available_modules:
-            await update.message.reply_text(f"找不到模块 {module_name}")
-            return
-
-        # 检查模块是否已启用
-        if self.config_manager.is_module_enabled_for_chat(
-                module_name, chat_id):
-            if chat_type in ["group", "supergroup"]:
-                await update.message.reply_text(f"模块 {module_name} 已在当前群组启用")
-            else:
-                await update.message.reply_text(f"模块 {module_name} 已全局启用")
-            return
-
-        # 加载并启用模块
-        success = await module_manager.load_and_enable_module(module_name)
-
-        if success:
-            # 为当前聊天启用模块
-            self.config_manager.enable_module_for_chat(module_name, chat_id)
-
-            if chat_type in ["group", "supergroup"]:
-                await update.message.reply_text(f"✅ 模块 {module_name} 已在当前群组启用")
-            else:
-                await update.message.reply_text(f"✅ 模块 {module_name} 已全局启用")
-        else:
-            await update.message.reply_text(f"❌ 启用模块 {module_name} 失败，请查看日志")
-
-    async def _disable_module_command(self, update, context):
-        """处理 /disable 命令
-        
-        Args:
-            update: 更新对象
-            context: 上下文对象
-        """
-        if not context.args or len(context.args) != 1:
-            await update.message.reply_text("用法: /disable <模块名>")
-            return
-
-        module_name = context.args[0]
-        chat_id = update.effective_chat.id
-        chat_type = update.effective_chat.type
-
-        # 检查是否是核心模块
-        if module_name == "core":
-            await update.message.reply_text("❌ 无法禁用核心模块")
-            return
-
-        # 检查模块是否已启用
-        if not self.config_manager.is_module_enabled_for_chat(
-                module_name, chat_id):
-            if chat_type in ["group", "supergroup"]:
-                await update.message.reply_text(f"模块 {module_name} 未在当前群组启用")
-            else:
-                await update.message.reply_text(f"模块 {module_name} 未全局启用")
-            return
-
-        # 获取模块管理器
-        module_manager = context.bot_data.get("module_manager")
-
-        # 禁用模块
-        self.config_manager.disable_module_for_chat(module_name, chat_id)
-
-        # 如果模块在其他地方未启用，卸载它
-        if not self._is_module_enabled_anywhere(module_name):
-            # 检查是否有其他模块依赖此模块
-            success, dependents = await module_manager.disable_and_unload_module(
-                module_name)
-
-            if not success:
-                # 有其他模块依赖此模块
-                dependents_str = ", ".join(dependents)
-                await update.message.reply_text(
-                    f"⚠️ 模块 {module_name} 已禁用，但因为它被其他模块依赖 ({dependents_str})，"
-                    f"所以仍然处于加载状态。")
-                return
-
-        if chat_type in ["group", "supergroup"]:
-            await update.message.reply_text(f"✅ 模块 {module_name} 已在当前群组禁用")
-        else:
-            await update.message.reply_text(f"✅ 模块 {module_name} 已全局禁用")
-
-    async def _reload_module_command(self, update, context):
-        """处理 /reload 命令
-        
-        Args:
-            update: 更新对象
-            context: 上下文对象
-        """
-        if not context.args or len(context.args) != 1:
-            await update.message.reply_text("用法: /reload <模块名>")
-            return
-
-        module_name = context.args[0]
-
-        # 获取模块管理器
-        module_manager = context.bot_data.get("module_manager")
-
-        # 检查模块是否已加载
-        if not module_manager.is_module_loaded(module_name):
-            await update.message.reply_text(f"❌ 模块 {module_name} 未加载")
-            return
-
-        # 执行热重载
-        success = await module_manager.reload_module(module_name)
-
-        if success:
-            await update.message.reply_text(f"✅ 模块 {module_name} 已成功重新加载")
-        else:
-            await update.message.reply_text(f"❌ 重新加载模块 {module_name} 失败，请查看日志")
 
     async def _stats_command(self, update, context):
         """处理 /stats 命令
@@ -1060,24 +946,3 @@ class CommandManager:
             # 如果 Markdown 解析失败，发送纯文本
             await update.message.reply_text(
                 TextFormatter.markdown_to_plain(message))
-
-    def _is_module_enabled_anywhere(self, module_name):
-        """检查模块是否在任何聊天中启用
-        
-        Args:
-            module_name: 模块名称
-            
-        Returns:
-            bool: 是否在任何聊天中启用
-        """
-        # 检查全局设置
-        if module_name in self.config_manager.get_enabled_modules():
-            return True
-
-        # 检查群组设置
-        for group_id, modules in self.config_manager.modules_config.get(
-                "group_modules", {}).items():
-            if module_name in modules:
-                return True
-
-        return False

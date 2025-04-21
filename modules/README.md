@@ -6,6 +6,24 @@
 
 每个模块都是独立的 Python 文件，放置在 `modules` 目录下。基本结构如下：
 
+### 聊天类型支持
+
+通过 `MODULE_CHAT_TYPES` 声明模块支持的聊天类型：
+
+```python
+MODULE_CHAT_TYPES = ["global", "private", "group"]  # 支持所有聊天类型
+
+MODULE_CHAT_TYPES = ["private"]  # 仅支持私聊
+
+MODULE_CHAT_TYPES = ["group"]    # 仅支持群组聊天
+```
+
+聊天类型说明：
+
+- `global`: 与特定聊天上下文无关的功能，例如 rss 通知
+- `private`: 私聊功能，仅在用户与机器人的私聊中可用
+- `group`: 群组功能，仅在群组聊天中可用
+
 ```python
 # modules/your_module.py
 
@@ -13,8 +31,8 @@
 MODULE_NAME = "模块名称"           # 显示名称
 MODULE_VERSION = "1.0.0"          # 版本号
 MODULE_DESCRIPTION = "模块描述"     # 简短描述
-MODULE_DEPENDENCIES = []          # 依赖的其他模块列表
 MODULE_COMMANDS = ["命令1", "命令2"] # 模块提供的命令列表
+MODULE_CHAT_TYPES = ["private", "group"] # 模块支持的聊天类型
 
 # 必需的函数
 async def setup(interface):
@@ -110,14 +128,14 @@ interface.logger.error("错误")
 ### 6. 配置访问
 
 ```python
-# 检查模块是否在特定聊天中启用
-is_enabled = interface.config_manager.is_module_enabled_for_chat(interface.module_name, chat_id)
-
 # 获取管理员列表
 admin_ids = interface.config_manager.get_valid_admin_ids()
 
 # 检查用户是否是管理员
 is_admin = interface.config_manager.is_admin(user_id)
+
+# 检查聊天是否在白名单中
+is_allowed = interface.config_manager.is_chat_allowed(chat_id)
 ```
 
 ## 三、文本处理工具
@@ -449,8 +467,8 @@ async def send_image_command(update, context):
 MODULE_NAME = "counter"
 MODULE_VERSION = "1.0.0"
 MODULE_DESCRIPTION = "为每个用户跟踪计数，支持增加和重置"
-MODULE_DEPENDENCIES = []
 MODULE_COMMANDS = ["count", "reset"]
+MODULE_CHAT_TYPES = ["global", "private", "group"]  # 支持所有聊天类型
 
 from telegram import Update
 from telegram.ext import ContextTypes
