@@ -285,7 +285,7 @@ class CommandManager:
 
                             if chat_type not in supported_types and "global" not in supported_types:
                                 await update.message.reply_text(
-                                    f"命令 /{command_name} 所属的模块 {module_name} 不支持在{chat_type}中使用。"
+                                    f"命令 /{command_name} 所属的模块 {module_name} 不支持在 {chat_type} 中使用。"
                                 )
                                 return
 
