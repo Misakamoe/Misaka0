@@ -11,7 +11,7 @@
 通过 `MODULE_CHAT_TYPES` 声明模块支持的聊天类型：
 
 ```python
-MODULE_CHAT_TYPES = ["global", "private", "group"]  # 支持所有聊天类型
+MODULE_CHAT_TYPES = ["private", "group"]  # 支持所有聊天类型
 
 MODULE_CHAT_TYPES = ["private"]  # 仅支持私聊
 
@@ -20,7 +20,6 @@ MODULE_CHAT_TYPES = ["group"]    # 仅支持群组聊天
 
 聊天类型说明：
 
-- `global`: 与特定聊天上下文无关的功能，例如 rss 通知
 - `private`: 私聊功能，仅在用户与机器人的私聊中可用
 - `group`: 群组功能，仅在群组聊天中可用
 
@@ -45,16 +44,6 @@ async def cleanup(interface):
     # 在这里进行必要的清理工作
     pass
 
-# 可选函数
-async def get_state(interface):
-    """获取模块状态（可选）"""
-    # 返回需要保存的状态数据
-    return {}
-
-async def set_state(interface, state):
-    """设置模块状态（可选）"""
-    # 恢复模块状态
-    pass
 
 # 命令处理函数
 async def your_command(update, context):
@@ -82,9 +71,11 @@ await interface.register_command(
 
 ```python
 # 订阅事件
-subscription = await interface.subscribe_event(
+await interface.subscribe_event(
     "event_type",  # 事件类型
-    callback       # 回调函数 async def callback(event_type, **event_data)
+    callback,      # 回调函数
+    priority=0,    # 优先级（可选）
+    filter_func=None  # 过滤函数（可选）
 )
 
 # 发布事件
@@ -101,21 +92,27 @@ count = await interface.publish_event(
 interface.save_state(state_data)  # 状态数据必须可 JSON 序列化
 
 # 加载状态
-state = interface.load_state(default=None)
-
-# 注意：还可以通过 get_state 和 set_state 函数实现更复杂的状态管理
+state = interface.load_state(default=None)  # default 参数是可选的
 ```
 
 ### 4. 消息处理器注册
 
 ```python
 # 注册消息处理器
-from telegram.ext import MessageHandler, filters
-handler = MessageHandler(filters.TEXT & ~filters.COMMAND, callback)
-await interface.register_handler(handler, group=0)  # group 决定优先级
+await interface.register_handler(
+    handler,  # 处理器对象
+    group=0   # 处理器组，决定优先级
+)
 ```
 
-### 5. 日志系统
+### 5. 聊天类型判断
+
+```python
+# 获取聊天类型
+chat_type = interface.get_chat_type(update)  # 返回 "private", "group" 或 "global"
+```
+
+### 6. 日志系统
 
 ```python
 # 记录日志
@@ -125,7 +122,7 @@ interface.logger.warning("警告")
 interface.logger.error("错误")
 ```
 
-### 6. 配置访问
+### 7. 配置访问
 
 ```python
 # 获取管理员列表
@@ -134,8 +131,17 @@ admin_ids = interface.config_manager.get_valid_admin_ids()
 # 检查用户是否是管理员
 is_admin = interface.config_manager.is_admin(user_id)
 
+# 检查用户是否是超级管理员
+is_super_admin = interface.config_manager.is_super_admin(user_id)
+
+# 检查用户是否是群组管理员
+is_group_admin = interface.config_manager.is_group_admin(user_id, chat_id)
+
 # 检查聊天是否在白名单中
 is_allowed = interface.config_manager.is_chat_allowed(chat_id)
+
+# 检查群组是否在白名单中
+is_allowed_group = interface.config_manager.is_allowed_group(chat_id)
 ```
 
 ## 三、文本处理工具
@@ -350,13 +356,6 @@ async def count_command(update, context):
     # 保存状态
     interface.save_state({"counter": counter})
 
-async def get_state(interface):
-    global counter
-    return {"counter": counter}
-
-async def set_state(interface, state):
-    global counter
-    counter = state.get("counter", 0)
 ```
 
 ### 使用会话
@@ -504,15 +503,6 @@ async def cleanup(interface):
     """模块清理"""
     interface.logger.info("计数器模块已卸载")
 
-async def get_state(interface):
-    """获取模块状态"""
-    return {"counters": user_counters}
-
-async def set_state(interface, state):
-    """恢复模块状态"""
-    global user_counters
-    user_counters = state.get("counters", {})
-
 async def count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /count 命令"""
     user_id = str(update.effective_user.id)
@@ -534,7 +524,7 @@ async def count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(plain_message)
 
     # 保存状态
-    context.bot_data["state_manager"].save_state("counter", {"counters": user_counters})
+    interface.save_state({"counters": user_counters})
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /reset 命令"""
@@ -550,5 +540,5 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # 保存状态
-    context.bot_data["state_manager"].save_state("counter", {"counters": user_counters})
+    interface.save_state({"counters": user_counters})
 ```

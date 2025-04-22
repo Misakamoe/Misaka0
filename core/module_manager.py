@@ -73,7 +73,7 @@ class ModuleInterface:
             module = self.module_manager.get_module_info(
                 self.module_name)["module"]
             supported_types = getattr(module, "MODULE_CHAT_TYPES",
-                                      ["global", "private", "group"])
+                                      ["private", "group"])
 
             # 检查聊天类型是否被支持
             if chat_type not in supported_types:
@@ -118,7 +118,7 @@ class ModuleInterface:
             module = self.module_manager.get_module_info(
                 self.module_name)["module"]
             supported_types = getattr(module, "MODULE_CHAT_TYPES",
-                                      ["global", "private", "group"])
+                                      ["private", "group"])
 
             # 确定事件的聊天类型
             chat_type = "global"  # 默认为全局事件
@@ -318,8 +318,7 @@ class ModuleManager:
                 if not hasattr(module, "MODULE_CHAT_TYPES"):
                     self.logger.warning(
                         f"模块 {module_name} 未声明 MODULE_CHAT_TYPES，默认为全部支持")
-                    setattr(module, "MODULE_CHAT_TYPES",
-                            ["global", "private", "group"])
+                    setattr(module, "MODULE_CHAT_TYPES", ["private", "group"])
 
                 # 创建模块接口
                 interface = ModuleInterface(module_name, self.application,
@@ -566,8 +565,7 @@ class ModuleManager:
                 "author":
                 getattr(module, "MODULE_AUTHOR", "unknown"),
                 "chat_types":
-                getattr(module, "MODULE_CHAT_TYPES",
-                        ["global", "private", "group"]),
+                getattr(module, "MODULE_CHAT_TYPES", ["private", "group"]),
             }
 
             return metadata

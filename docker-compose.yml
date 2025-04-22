@@ -6,9 +6,6 @@ services:
     volumes:
       # 持久化配置
       - ./config:/app/config
-      # ./logs:/app/logs
-      # 如果需要热更新模块，取消下面的注释
-      # - ./modules:/app/modules
     environment:
       - TZ=Asia/Hong_Kong
       # 可选：通过环境变量设置配置（优先级高于配置文件）

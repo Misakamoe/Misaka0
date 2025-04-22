@@ -279,14 +279,13 @@ class CommandManager:
                         if module_info:
                             # 检查模块是否支持当前聊天类型
                             module = module_info["module"]
-                            supported_types = getattr(
-                                module, "MODULE_CHAT_TYPES",
-                                ["global", "private", "group"])
+                            supported_types = getattr(module,
+                                                      "MODULE_CHAT_TYPES",
+                                                      ["private", "group"])
 
-                            if chat_type not in supported_types and "global" not in supported_types:
+                            if chat_type not in supported_types:
                                 await update.message.reply_text(
-                                    f"命令 /{command_name} 所属的模块 {module_name} 不支持在 {chat_type} 中使用。"
-                                )
+                                    f"模块 {module_name} 不支持在 {chat_type} 中使用。")
                                 return
 
                 # 检查用户权限
@@ -576,15 +575,15 @@ class CommandManager:
                 # 获取模块支持的聊天类型
                 module = module_info["module"]
                 supported_types = getattr(module, "MODULE_CHAT_TYPES",
-                                          ["global", "private", "group"])
+                                          ["private", "group"])
             else:
                 metadata = None
                 description = ""
                 version = "unknown"
-                supported_types = ["global", "private", "group"]  # 默认全部支持
+                supported_types = ["private", "group"]  # 默认全部支持
 
             # 检查是否支持当前聊天类型
-            supports_current_type = current_chat_type in supported_types or "global" in supported_types
+            supports_current_type = current_chat_type in supported_types
 
             module_list.append({
                 "name": module_name,
@@ -626,8 +625,6 @@ class CommandManager:
 
         # 显示支持的聊天类型
         chat_types = []
-        if "global" in item["supported_types"]:
-            chat_types.append("全局")
         if "private" in item["supported_types"]:
             chat_types.append("私聊")
         if "group" in item["supported_types"]:
@@ -698,8 +695,8 @@ class CommandManager:
             if module_info:
                 module = module_info["module"]
                 supported_types = getattr(module, "MODULE_CHAT_TYPES",
-                                          ["global", "private", "group"])
-                if current_chat_type in supported_types or "global" in supported_types:
+                                          ["private", "group"])
+                if current_chat_type in supported_types:
                     command_list.append({
                         "name": cmd_name,
                         "module": module_name,
@@ -803,18 +800,16 @@ class CommandManager:
 
                         # 获取模块支持的聊天类型
                         module = module_info["module"]
-                        supported_types = getattr(
-                            module, "MODULE_CHAT_TYPES",
-                            ["global", "private", "group"])
+                        supported_types = getattr(module, "MODULE_CHAT_TYPES",
+                                                  ["private", "group"])
                     else:
                         metadata = None
                         description = ""
                         version = "unknown"
-                        supported_types = ["global", "private",
-                                           "group"]  # 默认全部支持
+                        supported_types = ["private", "group"]  # 默认全部支持
 
                     # 检查是否支持当前聊天类型
-                    supports_current_type = current_chat_type in supported_types or "global" in supported_types
+                    supports_current_type = current_chat_type in supported_types
 
                     module_list.append({
                         "name": module_name,
@@ -875,10 +870,9 @@ class CommandManager:
                     module_info = module_manager.get_module_info(module_name)
                     if module_info:
                         module = module_info["module"]
-                        supported_types = getattr(
-                            module, "MODULE_CHAT_TYPES",
-                            ["global", "private", "group"])
-                        if current_chat_type in supported_types or "global" in supported_types:
+                        supported_types = getattr(module, "MODULE_CHAT_TYPES",
+                                                  ["private", "group"])
+                        if current_chat_type in supported_types:
                             command_list.append({
                                 "name": cmd_name,
                                 "module": module_name,
