@@ -734,6 +734,9 @@ def stop_reminder_tasks(interface):
 
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /remind 命令 - 创建周期性提醒"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 获取模块接口
     interface = context.bot_data["module_manager"].get_module_info(
         "reminder")["interface"]
@@ -755,17 +758,17 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "/reminders - 列出所有提醒\n\n"
                      "*删除提醒:*\n"
                      "/delreminder ID - 删除指定 ID 的提醒")
-        await update.message.reply_text(help_text, parse_mode="MARKDOWN")
+        await message.reply_text(help_text, parse_mode="MARKDOWN")
         return
 
     # 解析参数
     interval_str = context.args[0]
-    message = " ".join(context.args[1:])
+    reminder_message = " ".join(context.args[1:])
 
     # 解析时间间隔
     interval_seconds = parse_interval(interval_str)
     if interval_seconds is None:
-        await update.message.reply_text(
+        await message.reply_text(
             "⚠️ 无法识别的时间格式，请使用如:\n"
             "- 中文: 分钟、小时、天、周、月、年\n"
             "- 英文: s/sec, m/min, h/hr, d/day, w/week, mon/month, y/year\n"
@@ -775,7 +778,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 检查最小间隔
     if interval_seconds < MIN_INTERVAL:
-        await update.message.reply_text(f"⚠️ 提醒间隔太短，最小间隔为 {MIN_INTERVAL} 秒。")
+        await message.reply_text(f"⚠️ 提醒间隔太短，最小间隔为 {MIN_INTERVAL} 秒。")
         return
 
     # 生成提醒 ID
@@ -785,7 +788,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     chat_id_str = str(chat_id)
     reminder = PeriodicReminder(
-        reminder_id, message, update.effective_user.id,
+        reminder_id, reminder_message, update.effective_user.id,
         update.effective_user.full_name or update.effective_user.username
         or "未知用户", chat_id_str, update.effective_chat.type, interval_seconds)
 
@@ -804,10 +807,10 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     interval_text = format_interval(interval_seconds)
 
     # 发送确认消息
-    await update.message.reply_text(
+    await message.reply_text(
         f"✅ 周期性提醒已创建!\n\n"
         f"⏰ *间隔:* {interval_text}\n"
-        f"📝 *内容:* {message}\n"
+        f"📝 *内容:* {reminder_message}\n"
         f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
         f"每 {interval_text}，我会发送一次提醒。\n"
         f"如需删除，请使用 `/delreminder {reminder_id}`",
@@ -821,12 +824,15 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def remind_once_command(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """处理 /remindonce 命令 - 创建一次性提醒"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 获取模块接口
     interface = context.bot_data["module_manager"].get_module_info(
         "reminder")["interface"]
 
     if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
+        await message.reply_text(
             "用法: /remindonce 时间 内容\n"
             "例如: `/remindonce 8:30 晨会！`\n"
             "或: `/remindonce 2025年4月5日18:30 提交报告！`\n"
@@ -841,7 +847,7 @@ async def remind_once_command(update: Update,
         full_input)
 
     target_datetime = None
-    message = ""
+    reminder_message = ""
 
     if special_format_match:
         month, day = int(special_format_match.group(1)), int(
@@ -850,7 +856,7 @@ async def remind_once_command(update: Update,
             special_format_match.group(4))
         second = int(special_format_match.group(
             5)) if special_format_match.group(5) else 0
-        message = special_format_match.group(6)
+        reminder_message = special_format_match.group(6)
 
         now = datetime.now(pytz.timezone(DEFAULT_TIMEZONE))
 
@@ -870,7 +876,7 @@ async def remind_once_command(update: Update,
         # 常规解析过程
         datetime_str = context.args[0]
         target_datetime = parse_datetime(datetime_str)
-        message = " ".join(context.args[1:])
+        reminder_message = " ".join(context.args[1:])
 
         # 如果第一个参数无法解析为日期，尝试合并前两个参数
         if target_datetime is None and len(context.args) >= 2:
@@ -878,19 +884,19 @@ async def remind_once_command(update: Update,
             target_datetime = parse_datetime(datetime_str)
 
             if target_datetime is not None:
-                message = " ".join(context.args[2:])
+                reminder_message = " ".join(context.args[2:])
 
     if target_datetime is None:
-        await update.message.reply_text("⚠️ 无法识别的时间格式，请使用如:\n"
-                                        "- 2025年4月5日18:30\n"
-                                        "- 4月5日16:00\n"
-                                        "- 6-25 16:00\n"
-                                        "- 2025/04/05 18:30\n"
-                                        "- 18:30 (今天或明天)")
+        await message.reply_text("⚠️ 无法识别的时间格式，请使用如:\n"
+                                 "- 2025年4月5日18:30\n"
+                                 "- 4月5日16:00\n"
+                                 "- 6-25 16:00\n"
+                                 "- 2025/04/05 18:30\n"
+                                 "- 18:30 (今天或明天)")
         return
 
-    if not message:
-        await update.message.reply_text("⚠️ 请提供提醒内容。")
+    if not reminder_message:
+        await message.reply_text("⚠️ 请提供提醒内容。")
         return
 
     # 转换为时间戳
@@ -899,7 +905,7 @@ async def remind_once_command(update: Update,
     # 检查是否是过去的时间
     now_timestamp = time.time()
     if target_timestamp <= now_timestamp:
-        await update.message.reply_text("⚠️ 提醒时间不能是过去的时间。")
+        await message.reply_text("⚠️ 提醒时间不能是过去的时间。")
         return
 
     # 生成提醒 ID
@@ -909,7 +915,7 @@ async def remind_once_command(update: Update,
     chat_id = update.effective_chat.id
     chat_id_str = str(chat_id)
     reminder = OneTimeReminder(
-        reminder_id, message, update.effective_user.id,
+        reminder_id, reminder_message, update.effective_user.id,
         update.effective_user.full_name or update.effective_user.username
         or "未知用户", chat_id_str, update.effective_chat.type, target_timestamp,
         target_datetime.strftime("%Y-%m-%d %H:%M:%S"))
@@ -930,11 +936,11 @@ async def remind_once_command(update: Update,
     wait_text = format_interval(int(wait_seconds))
 
     # 发送确认消息
-    await update.message.reply_text(
+    await message.reply_text(
         f"✅ 一次性提醒已创建!\n\n"
         f"⏰ *时间:* {target_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"⏳ *等待:* {wait_text}\n"
-        f"📝 *内容:* {message}\n"
+        f"📝 *内容:* {reminder_message}\n"
         f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
         f"到时间我会发送一次提醒。\n"
         f"如需删除，请使用 `/delreminder {reminder_id}`",
@@ -947,6 +953,9 @@ async def remind_once_command(update: Update,
 
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """列出所有提醒"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 获取模块接口
     interface = context.bot_data["module_manager"].get_module_info(
         "reminder")["interface"]
@@ -956,7 +965,7 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 检查是否有提醒
     if chat_id_str not in _tasks or not _tasks[chat_id_str]:
-        await update.message.reply_text("当前聊天没有创建任何提醒。")
+        await message.reply_text("当前聊天没有创建任何提醒。")
         return
 
     # 分类提醒
@@ -974,61 +983,64 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             periodic_reminders.append(reminder)
 
     # 构建消息
-    message = "📋 *当前聊天的提醒列表:*\n\n"
+    reminder_list_message = "📋 *当前聊天的提醒列表:*\n\n"
 
     # 一次性提醒
     if one_time_reminders:
-        message += "*一次性提醒:*\n"
+        reminder_list_message += "*一次性提醒:*\n"
         for reminder in one_time_reminders:
             status = "✅ 已启用" if reminder.enabled else "❌ 已禁用"
             creator_info = f" (由 {reminder.creator_name} 创建)" if update.effective_chat.type != "private" else ""
 
-            message += (f"🔹 *{reminder.title}*{creator_info}\n"
-                        f"  🆔 ID: `{reminder.id}`\n"
-                        f"  ⏰ 时间: {reminder.target_time_str}\n"
-                        f"  📝 内容: {reminder.message}\n"
-                        f"  🔄 状态: {status}\n\n")
+            reminder_list_message += (f"🔹 *{reminder.title}*{creator_info}\n"
+                                      f"  🆔 ID: `{reminder.id}`\n"
+                                      f"  ⏰ 时间: {reminder.target_time_str}\n"
+                                      f"  📝 内容: {reminder.message}\n"
+                                      f"  🔄 状态: {status}\n\n")
 
     # 周期性提醒
     if periodic_reminders:
-        message += "*周期性提醒:*\n"
+        reminder_list_message += "*周期性提醒:*\n"
         for reminder in periodic_reminders:
             status = "✅ 已启用" if reminder.enabled else "❌ 已禁用"
             interval_text = format_interval(reminder.interval)
             creator_info = f" (由 {reminder.creator_name} 创建)" if update.effective_chat.type != "private" else ""
 
-            message += (f"🔹 *{reminder.title}*{creator_info}\n"
-                        f"  🆔 ID: `{reminder.id}`\n"
-                        f"  ⏰ 间隔: {interval_text}\n"
-                        f"  📝 内容: {reminder.message}\n"
-                        f"  🔄 状态: {status}\n\n")
+            reminder_list_message += (f"🔹 *{reminder.title}*{creator_info}\n"
+                                      f"  🆔 ID: `{reminder.id}`\n"
+                                      f"  ⏰ 间隔: {interval_text}\n"
+                                      f"  📝 内容: {reminder.message}\n"
+                                      f"  🔄 状态: {status}\n\n")
 
     # 如果没有任何提醒
     if not one_time_reminders and not periodic_reminders:
-        await update.message.reply_text("当前聊天没有创建任何提醒。")
+        await message.reply_text("当前聊天没有创建任何提醒。")
         return
 
-    message += "要删除提醒，请使用 `/delreminder ID`"
+    reminder_list_message += "要删除提醒，请使用 `/delreminder ID`"
 
     # 发送消息
     try:
-        await update.message.reply_text(message, parse_mode="MARKDOWN")
+        await message.reply_text(reminder_list_message, parse_mode="MARKDOWN")
     except Exception as e:
         interface.logger.error(f"发送提醒列表失败: {e}")
         # 尝试发送纯文本
-        await update.message.reply_text(
-            message.replace("*", "").replace("`", ""))
+        await message.reply_text(
+            reminder_list_message.replace("*", "").replace("`", ""))
 
 
 async def delete_reminder_command(update: Update,
                                   context: ContextTypes.DEFAULT_TYPE):
     """删除提醒"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 获取模块接口
     interface = context.bot_data["module_manager"].get_module_info(
         "reminder")["interface"]
 
     if not context.args or len(context.args) < 1:
-        await update.message.reply_text("用法: /delreminder ID")
+        await message.reply_text("用法: /delreminder ID")
         return
 
     reminder_id = context.args[0]
@@ -1037,13 +1049,13 @@ async def delete_reminder_command(update: Update,
 
     # 检查提醒是否存在
     if (chat_id_str not in _tasks or reminder_id not in _tasks[chat_id_str]):
-        await update.message.reply_text("❌ 找不到该提醒或已被删除。")
+        await message.reply_text("❌ 找不到该提醒或已被删除。")
         return
 
     # 获取提醒对象
     reminder = _tasks[chat_id_str][reminder_id].get("reminder")
     if not reminder:
-        await update.message.reply_text("❌ 找不到该提醒或已被删除。")
+        await message.reply_text("❌ 找不到该提醒或已被删除。")
         return
 
     # 检查权限（群组中只有创建者或管理员可以删除）
@@ -1055,18 +1067,17 @@ async def delete_reminder_command(update: Update,
             is_admin = chat_member.status in ["creator", "administrator"]
 
             if not is_admin:
-                await update.message.reply_text(
-                    "⚠️ 您没有权限删除此提醒，只有提醒创建者或群组管理员可以删除。")
+                await message.reply_text("⚠️ 您没有权限删除此提醒，只有提醒创建者或群组管理员可以删除。")
                 return
 
     # 删除提醒
     reminder_title = reminder.title
     if delete_reminder(chat_id, reminder_id, interface):
-        await update.message.reply_text(f"✅ 提醒 \"{reminder_title}\" 已删除。")
+        await message.reply_text(f"✅ 提醒 \"{reminder_title}\" 已删除。")
         interface.logger.info(
             f"用户 {update.effective_user.id} 删除了提醒 {reminder_id}")
     else:
-        await update.message.reply_text("❌ 删除提醒失败，请稍后再试。")
+        await message.reply_text("❌ 删除提醒失败，请稍后再试。")
 
 
 # 模块不使用框架的状态管理器，所有数据直接保存在数据文件中

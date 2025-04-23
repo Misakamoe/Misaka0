@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
+from utils.formatter import escape_html, strip_html, normalize_whitespace
 
 # 模块元数据
 MODULE_NAME = "rss"
@@ -87,6 +88,9 @@ def save_config():
 # RSS 命令处理函数
 async def rss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理 RSS 订阅"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     if not context.args:
         await show_help(update, context)
         return
@@ -107,18 +111,24 @@ async def rss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示帮助信息"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     help_text = ("<b>📢 RSS 订阅管理</b>\n\n"
                  "可用命令：\n"
                  "• <code>/rss list</code> - 列出当前订阅\n"
                  "• <code>/rss add &lt;url&gt; [title]</code> - 添加订阅\n"
                  "• <code>/rss remove &lt;url 或序号&gt;</code> - 删除订阅\n"
                  "• <code>/rss health</code> - 查看源健康状态\n")
-    await update.message.reply_text(help_text, parse_mode="HTML")
+    await message.reply_text(help_text, parse_mode="HTML")
 
 
 async def list_subscriptions(update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
     """列出当前订阅"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
 
@@ -126,7 +136,7 @@ async def list_subscriptions(update: Update,
     subscriptions = _config["subscriptions"][chat_type].get(chat_id, [])
 
     if not subscriptions:
-        await update.message.reply_text("⚠️ 当前没有 RSS 订阅。")
+        await message.reply_text("⚠️ 当前没有 RSS 订阅。")
         return
 
     text = "<b>📋 RSS 订阅列表</b>\n\n"
@@ -139,12 +149,15 @@ async def list_subscriptions(update: Update,
         text += f"{i}. <b>{safe_title}</b>\n"
         text += f"   <code>{safe_url}</code>\n\n"
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    await message.reply_text(text, parse_mode="HTML")
 
 
 async def rss_health_command(update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
     """查询 RSS 源健康状态"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
 
@@ -152,7 +165,7 @@ async def rss_health_command(update: Update,
     subscriptions = _config["subscriptions"][chat_type].get(chat_id, [])
 
     if not subscriptions:
-        await update.message.reply_text("⚠️ 当前没有 RSS 订阅。")
+        await message.reply_text("⚠️ 当前没有 RSS 订阅。")
         return
 
     text = "<b>📊 RSS 源健康状态</b>\n\n"
@@ -196,11 +209,14 @@ async def rss_health_command(update: Update,
                  f"  • 最后成功: {last_success}\n"
                  f"  • 检查间隔: {interval:.0f} 秒\n\n")
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    await message.reply_text(text, parse_mode="HTML")
 
 
 async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """添加订阅"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
 
@@ -216,13 +232,13 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 检查是否已订阅
     if url in subscriptions:
-        await update.message.reply_text("⚠️ 已经订阅了该 RSS 源。")
+        await message.reply_text("⚠️ 已经订阅了该 RSS 源。")
         return
 
     # 验证并获取 RSS 源信息
     try:
         # 发送处理中消息
-        processing_msg = await update.message.reply_text("🔍 正在验证 RSS 源...")
+        processing_msg = await message.reply_text("🔍 正在验证 RSS 源...")
 
         feed = await fetch_feed(url)
 
@@ -283,27 +299,30 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if published:
                     preview_text += f"  ⏰ {published}\n"
 
-            await update.message.reply_text(preview_text, parse_mode="HTML")
+            await message.reply_text(preview_text, parse_mode="HTML")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ 添加 RSS 源失败: {str(e)}")
+        await message.reply_text(f"❌ 添加 RSS 源失败: {str(e)}")
 
 
 async def remove_subscription(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
     """删除订阅"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
 
     # 获取当前聊天的订阅
     if chat_id not in _config["subscriptions"][chat_type]:
-        await update.message.reply_text("⚠️ 当前没有 RSS 订阅。")
+        await message.reply_text("⚠️ 当前没有 RSS 订阅。")
         return
 
     subscriptions = _config["subscriptions"][chat_type][chat_id]
 
     if not subscriptions:
-        await update.message.reply_text("⚠️ 当前没有 RSS 订阅。")
+        await message.reply_text("⚠️ 当前没有 RSS 订阅。")
         return
 
     # 处理参数（可以是 URL 或序号）
@@ -316,7 +335,7 @@ async def remove_subscription(update: Update,
         if 0 <= index < len(subscriptions):
             url_to_remove = subscriptions[index]
         else:
-            await update.message.reply_text(
+            await message.reply_text(
                 "❌ 无效的序号，请使用 <code>/rss list</code> 查看可用的订阅。",
                 parse_mode="HTML")
             return
@@ -363,9 +382,9 @@ async def remove_subscription(update: Update,
         save_config()
 
         success_text = f"✅ 成功删除 RSS 订阅\n\n📚 <b>{safe_title}</b>"
-        await update.message.reply_text(success_text, parse_mode="HTML")
+        await message.reply_text(success_text, parse_mode="HTML")
     else:
-        await update.message.reply_text(
+        await message.reply_text(
             "❌ 未找到该 RSS 订阅，请使用 <code>/rss list</code> 查看可用的订阅。",
             parse_mode="HTML")
 
@@ -765,34 +784,6 @@ async def send_entry(entry, source_info, url, subscribed_chats,
 
     except Exception as e:
         module_interface.logger.error(f"发送 RSS 条目时出错: {e}")
-
-
-# 文本处理函数
-def strip_html(text):
-    """移除 HTML 标签"""
-    if not text:
-        return ""
-    return re.sub(r'<[^>]+>', '', text)
-
-
-def normalize_whitespace(text):
-    """规范化文本中的空白字符，删除多余的空行和空格"""
-    if not text:
-        return ""
-    # 将多个空行替换为一个空行
-    text = re.sub(r'\n\s*\n', '\n\n', text)
-    # 删除每行开头和结尾的空白
-    text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)
-    # 删除整个文本开头和结尾的空白
-    return text.strip()
-
-
-def escape_html(text):
-    """转义 HTML 特殊字符"""
-    if not text:
-        return ""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(
-        ">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
 
 
 # 状态管理函数已移除，直接使用框架的状态管理功能

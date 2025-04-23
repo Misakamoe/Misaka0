@@ -70,11 +70,14 @@ async def shuo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 由于 MODULE_CHAT_TYPES = ["private"]，此命令只会在私聊中被调用
     # 框架会自动处理聊天类型检查
 
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 检查是否配置了 GitHub 信息
     if not _config["github_token"] or not _config[
             "github_repo"] or not _config["json_path"]:
-        await update.message.reply_text("⚠️ 模块配置不完整，请先设置 GitHub 令牌、仓库和文件路径。\n"
-                                        "使用 /shuoconfig 命令进行配置。")
+        await message.reply_text("⚠️ 模块配置不完整，请先设置 GitHub 令牌、仓库和文件路径。\n"
+                                 "使用 /shuoconfig 命令进行配置。")
         return
 
     # 获取说说内容
@@ -96,7 +99,7 @@ async def shuo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             content = content.replace(f"#{tag}", "").strip()
 
     # 发送处理中消息
-    message = await update.message.reply_text("🔄 正在发布说说，请稍候...")
+    waiting_message = await message.reply_text("🔄 正在发布说说，请稍候...")
 
     try:
         # 获取现有的 JSON 数据
@@ -127,18 +130,18 @@ async def shuo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if success:
             # 发送成功消息
-            await message.edit_text(
+            await waiting_message.edit_text(
                 f"✅ 说说已成功发布！\n\n"
                 f"*Key:* {new_post['key']}\n"
                 f"*时间:* {new_post['date']}\n"
                 f"*内容:*\n{content}",
                 parse_mode="MARKDOWN")
         else:
-            await message.edit_text("❌ 发布失败，请稍后重试或检查 GitHub 配置。")
+            await waiting_message.edit_text("❌ 发布失败，请稍后重试或检查 GitHub 配置。")
 
     except Exception as e:
         _module_interface.logger.error(f"发布说说失败: {e}")
-        await message.edit_text(f"❌ 发布过程中出现错误: {str(e)}")
+        await waiting_message.edit_text(f"❌ 发布过程中出现错误: {str(e)}")
 
 
 async def shuodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -146,11 +149,14 @@ async def shuodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 由于 MODULE_CHAT_TYPES = ["private"]，此命令只会在私聊中被调用
     # 框架会自动处理聊天类型检查
 
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 检查是否配置了 GitHub 信息
     if not _config["github_token"] or not _config[
             "github_repo"] or not _config["json_path"]:
-        await update.message.reply_text("⚠️ 模块配置不完整，请先设置 GitHub 令牌、仓库和文件路径。\n"
-                                        "使用 /shuoconfig 命令进行配置。")
+        await message.reply_text("⚠️ 模块配置不完整，请先设置 GitHub 令牌、仓库和文件路径。\n"
+                                 "使用 /shuoconfig 命令进行配置。")
         return
 
     # 如果有参数，则尝试删除特定 key 的说说
@@ -167,6 +173,9 @@ async def shuoconfig_command(update: Update,
     """配置说说模块"""
     # 由于 MODULE_CHAT_TYPES = ["private"]，此命令只会在私聊中被调用
     # 框架会自动处理聊天类型检查
+
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
 
     if not context.args or len(context.args) < 2:
         # 显示当前配置
@@ -188,12 +197,12 @@ async def shuoconfig_command(update: Update,
                        "`/shuoconfig branch 分支名` - 设置分支（默认 master）")
 
         try:
-            await update.message.reply_text(config_text, parse_mode="MARKDOWN")
+            await message.reply_text(config_text, parse_mode="MARKDOWN")
         except Exception as e:
             _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
             # 如果 Markdown 解析失败，尝试使用纯文本发送
             plain_text = TextFormatter.markdown_to_plain(config_text)
-            await update.message.reply_text(plain_text)
+            await message.reply_text(plain_text)
         return
 
     key = context.args[0].lower()
@@ -216,10 +225,10 @@ async def shuoconfig_command(update: Update,
         _config[config_key] = value
         save_config()
 
-        await update.message.reply_text(f"✅ 已设置 {key} = {log_value}")
+        await message.reply_text(f"✅ 已设置 {key} = {log_value}")
     else:
-        await update.message.reply_text(f"❌ 未知配置项: {key}\n\n"
-                                        "可用配置项: token, repo, path, branch")
+        await message.reply_text(f"❌ 未知配置项: {key}\n\n"
+                                 "可用配置项: token, repo, path, branch")
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -273,14 +282,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 辅助函数
 async def list_posts(update: Update, _: ContextTypes.DEFAULT_TYPE, page=0):
     """列出说说，支持翻页"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    msg = update.message or update.edited_message
+
     # 发送处理中消息
-    message = await update.message.reply_text("🔄 正在获取说说列表...")
+    waiting_message = await msg.reply_text("🔄 正在获取说说列表...")
 
     # 获取 JSON 数据
     json_data = await fetch_json_from_github()
 
     if not json_data:
-        await message.edit_text("⚠️ 没有找到任何说说，或无法获取数据。")
+        await waiting_message.edit_text("⚠️ 没有找到任何说说，或无法获取数据。")
         return
 
     # 计算分页 - 每页 4 条
@@ -347,14 +359,14 @@ async def list_posts(update: Update, _: ContextTypes.DEFAULT_TYPE, page=0):
 
     # 使用普通 Markdown 格式
     try:
-        await message.edit_text(list_text,
-                                parse_mode="MARKDOWN",
-                                reply_markup=keyboard)
+        await waiting_message.edit_text(list_text,
+                                        parse_mode="MARKDOWN",
+                                        reply_markup=keyboard)
     except Exception as e:
         _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
         # 回退到纯文本
         plain_text = TextFormatter.markdown_to_plain(list_text)
-        await message.edit_text(plain_text, reply_markup=keyboard)
+        await waiting_message.edit_text(plain_text, reply_markup=keyboard)
 
 
 async def show_posts_page(query, _, page=0):
@@ -443,14 +455,17 @@ async def show_posts_page(query, _, page=0):
 async def delete_post(update: Update, _: ContextTypes.DEFAULT_TYPE,
                       post_key: str):
     """删除特定 key 的说说"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    msg = update.message or update.edited_message
+
     # 发送处理中消息
-    message = await update.message.reply_text("🔄 正在处理...")
+    waiting_message = await msg.reply_text("🔄 正在处理...")
 
     # 获取 JSON 数据
     json_data = await fetch_json_from_github()
 
     if not json_data:
-        await message.edit_text("⚠️ 无法获取说说数据。")
+        await waiting_message.edit_text("⚠️ 无法获取说说数据。")
         return
 
     # 查找特定 key 的说说
@@ -459,7 +474,7 @@ async def delete_post(update: Update, _: ContextTypes.DEFAULT_TYPE,
         -1)
 
     if post_index == -1:
-        await message.edit_text(f"⚠️ 未找到 key 为 {post_key} 的说说。")
+        await waiting_message.edit_text(f"⚠️ 未找到 key 为 {post_key} 的说说。")
         return
 
     # 创建确认按钮
@@ -486,7 +501,7 @@ async def delete_post(update: Update, _: ContextTypes.DEFAULT_TYPE,
     safe_date = TextFormatter.escape_markdown(date)
     safe_preview = TextFormatter.escape_markdown(preview_content)
 
-    await message.edit_text(
+    await waiting_message.edit_text(
         f"⚠️ *确定要删除这条说说吗？*\n\n"
         f"*Key:* {safe_key}\n"
         f"*时间:* {safe_date}\n"
@@ -498,6 +513,9 @@ async def delete_post(update: Update, _: ContextTypes.DEFAULT_TYPE,
 
 async def show_help(update: Update, _: ContextTypes.DEFAULT_TYPE):
     """显示帮助信息，包含 HTML 标签说明"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     help_text = ("*📝 说说发布帮助*\n\n"
                  "使用此功能可以发布说说到您的 GitHub 仓库。\n\n"
                  "*基本命令:*\n"
@@ -518,12 +536,12 @@ async def show_help(update: Update, _: ContextTypes.DEFAULT_TYPE):
                  "`/shuodel` - 查看和删除说说")
 
     try:
-        await update.message.reply_text(help_text, parse_mode="MARKDOWN")
+        await message.reply_text(help_text, parse_mode="MARKDOWN")
     except Exception as e:
         _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
         # 回退到纯文本
         plain_text = TextFormatter.markdown_to_plain(help_text)
-        await update.message.reply_text(plain_text)
+        await message.reply_text(plain_text)
 
 
 # GitHub 操作函数

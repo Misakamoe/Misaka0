@@ -194,23 +194,26 @@ async def _save_config():
 # 命令处理函数
 async def sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /sticker 命令"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     user_id = str(update.effective_user.id)
     config = user_configs.get(user_id, DEFAULT_CONFIG.copy())
     args = context.args
 
     if not args:
         # 显示当前配置和选项
-        message = "*贴纸助手设置*\n\n"
-        message += f"📊 *当前配置*\n"
-        message += f"• 图片格式: `{config['image_format']}`\n"
-        message += f"• GIF 质量: `{config['gif_quality']}`\n"
-        message += f"• 自动下载: `{'✅' if config['auto_download'] else '❌'}`\n\n"
-        message += "*使用方法*\n"
-        message += "发送贴纸给我，即可转换为图片或 GIF\n\n"
-        message += "*命令列表*\n"
-        message += "`/sticker format [PNG|WEBP|JPG]` - 设置图片格式\n"
-        message += "`/sticker quality [low|medium|high]` - 设置 GIF 质量\n"
-        message += "`/sticker download [on|off]` - 设置自动下载\n"
+        help_message = "*贴纸助手设置*\n\n"
+        help_message += f"📊 *当前配置*\n"
+        help_message += f"• 图片格式: `{config['image_format']}`\n"
+        help_message += f"• GIF 质量: `{config['gif_quality']}`\n"
+        help_message += f"• 自动下载: `{'✅' if config['auto_download'] else '❌'}`\n\n"
+        help_message += "*使用方法*\n"
+        help_message += "发送贴纸给我，即可转换为图片或 GIF\n\n"
+        help_message += "*命令列表*\n"
+        help_message += "`/sticker format [PNG|WEBP|JPG]` - 设置图片格式\n"
+        help_message += "`/sticker quality [low|medium|high]` - 设置 GIF 质量\n"
+        help_message += "`/sticker download [on|off]` - 设置自动下载\n"
 
         # 创建查看和创建贴纸包的按钮
         keyboard = []
@@ -232,9 +235,9 @@ async def sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text(message,
-                                        parse_mode="MARKDOWN",
-                                        reply_markup=reply_markup)
+        await message.reply_text(help_message,
+                                 parse_mode="MARKDOWN",
+                                 reply_markup=reply_markup)
         return
 
     # 处理参数
@@ -244,36 +247,33 @@ async def sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         format_value = args[1].upper()
         if format_value in ["PNG", "WEBP", "JPG"]:
             config["image_format"] = format_value
-            await update.message.reply_text(f"✅ 图片格式已设置为: *{format_value}*",
-                                            parse_mode="MARKDOWN")
+            await message.reply_text(f"✅ 图片格式已设置为: *{format_value}*",
+                                     parse_mode="MARKDOWN")
         else:
-            await update.message.reply_text(
-                "❌ 不支持的格式。请使用 `PNG`、`WEBP` 或 `JPG`。", parse_mode="MARKDOWN")
+            await message.reply_text("❌ 不支持的格式。请使用 `PNG`、`WEBP` 或 `JPG`。",
+                                     parse_mode="MARKDOWN")
 
     elif param == "quality" and len(args) > 1:
         quality = args[1].lower()
         if quality in ["low", "medium", "high"]:
             config["gif_quality"] = quality
-            await update.message.reply_text(f"✅ GIF 质量已设置为: *{quality}*",
-                                            parse_mode="MARKDOWN")
+            await message.reply_text(f"✅ GIF 质量已设置为: *{quality}*",
+                                     parse_mode="MARKDOWN")
         else:
-            await update.message.reply_text(
-                "❌ 不支持的质量级别。请使用 `low`、`medium` 或 `high`。",
-                parse_mode="MARKDOWN")
+            await message.reply_text("❌ 不支持的质量级别。请使用 `low`、`medium` 或 `high`。",
+                                     parse_mode="MARKDOWN")
 
     elif param == "download" and len(args) > 1:
         download_value = args[1].lower()
         if download_value in ["on", "true", "yes"]:
             config["auto_download"] = True
-            await update.message.reply_text("✅ 自动下载已开启。",
-                                            parse_mode="MARKDOWN")
+            await message.reply_text("✅ 自动下载已开启。", parse_mode="MARKDOWN")
         elif download_value in ["off", "false", "no"]:
             config["auto_download"] = False
-            await update.message.reply_text("✅ 自动下载已关闭。",
-                                            parse_mode="MARKDOWN")
+            await message.reply_text("✅ 自动下载已关闭。", parse_mode="MARKDOWN")
         else:
-            await update.message.reply_text("❌ 无效的值。请使用 `on` 或 `off`。",
-                                            parse_mode="MARKDOWN")
+            await message.reply_text("❌ 无效的值。请使用 `on` 或 `off`。",
+                                     parse_mode="MARKDOWN")
 
     elif param == "manage":
         # 显示贴纸包信息
@@ -282,21 +282,22 @@ async def sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_id]:
             set_name = user_sticker_sets[user_id]["set_name"]
             share_link = f"https://t.me/addstickers/{set_name}"
-            await update.message.reply_text(
-                f"点击下方按钮查看贴纸包",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("View", url=share_link)]]))
+            await message.reply_text(f"点击下方按钮查看贴纸包",
+                                     reply_markup=InlineKeyboardMarkup([[
+                                         InlineKeyboardButton("View",
+                                                              url=share_link)
+                                     ]]))
         else:
-            await update.message.reply_text(
-                "你还没有贴纸包，是否创建新的贴纸包？",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("+ Create",
-                                         callback_data="stk:create")
-                ]]))
+            await message.reply_text("你还没有贴纸包，是否创建新的贴纸包？",
+                                     reply_markup=InlineKeyboardMarkup([[
+                                         InlineKeyboardButton(
+                                             "+ Create",
+                                             callback_data="stk:create")
+                                     ]]))
 
     else:
-        await update.message.reply_text("❌ 无效的参数。使用 `/sticker` 查看帮助。",
-                                        parse_mode="MARKDOWN")
+        await message.reply_text("❌ 无效的参数。使用 `/sticker` 查看帮助。",
+                                 parse_mode="MARKDOWN")
 
     # 保存用户配置
     user_configs[user_id] = config
@@ -306,8 +307,15 @@ async def sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 贴纸处理和转换函数
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理收到的贴纸消息"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
+    # 如果是编辑的消息，不处理
+    if update.edited_message:
+        return
+
     user_id = str(update.effective_user.id)
-    sticker = update.message.sticker
+    sticker = message.sticker
     config = user_configs.get(user_id, DEFAULT_CONFIG.copy())
 
     try:
@@ -317,7 +325,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 根据自动下载设置决定操作
         if config["auto_download"]:
             # 自动下载模式
-            processing_msg = await update.message.reply_text("⏳ 正在处理贴纸，请稍候...")
+            processing_msg = await message.reply_text("⏳ 正在处理贴纸，请稍候...")
 
             # 下载并发送贴纸
             download_success = await download_and_send_sticker(
@@ -337,10 +345,10 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
-                await update.message.reply_text("✅ 已下载，可点击添加到贴纸包",
-                                                reply_markup=reply_markup)
+                await message.reply_text("✅ 已下载，可点击添加到贴纸包",
+                                         reply_markup=reply_markup)
             else:
-                await update.message.reply_text("❗ 贴纸下载失败，请重试")
+                await message.reply_text("❗ 贴纸下载失败，请重试")
         else:
             # 手动模式：显示操作按钮
             keyboard = [[
@@ -351,8 +359,8 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.message.reply_text("选择下载或是添加到贴纸包:",
-                                            reply_markup=reply_markup)
+            await message.reply_text("选择下载或是添加到贴纸包:",
+                                     reply_markup=reply_markup)
     except Exception as e:
         # 错误处理
         if _interface:
@@ -365,12 +373,15 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def download_and_send_sticker(update, context, sticker, config):
     """下载贴纸并直接发送"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     try:
         return await download_and_send_sticker_to_chat(context.bot,
-                                                       update.message.chat_id,
+                                                       message.chat_id,
                                                        sticker, config)
     except Exception as e:
-        await update.message.reply_text(f"处理贴纸时出错: {str(e)}")
+        await message.reply_text(f"处理贴纸时出错: {str(e)}")
         return False
 
 

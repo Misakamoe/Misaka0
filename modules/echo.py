@@ -12,7 +12,7 @@ MODULE_CHAT_TYPES = ["private", "group"]  # 支持所有聊天类型
 
 async def setup(interface):
     """模块初始化
-    
+
     Args:
         interface: 模块接口
     """
@@ -27,7 +27,7 @@ async def setup(interface):
 
 async def cleanup(interface):
     """模块清理
-    
+
     Args:
         interface: 模块接口
     """
@@ -36,17 +36,20 @@ async def cleanup(interface):
 
 async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /echo 命令
-    
+
     Args:
         update: 更新对象
         context: 上下文对象
     """
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     if not context.args:
-        await update.message.reply_text("用法: /echo <文本>")
+        await message.reply_text("用法: /echo <文本>")
         return
 
     # 获取用户输入
     text = " ".join(context.args)
 
     # 回复消息
-    await update.message.reply_text(f"{text}")
+    await message.reply_text(f"{text}")

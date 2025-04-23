@@ -330,31 +330,37 @@ class BotEngine:
 
     async def _list_allowed_groups_command(self, update, context):
         """列出所有允许的群组"""
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message_obj = update.message or update.edited_message
+
         allowed_groups = self.config_manager.list_allowed_groups()
 
         if not allowed_groups:
-            await update.message.reply_text("当前没有允许的群组。")
+            await message_obj.reply_text("当前没有允许的群组。")
             return
 
-        message = "📋 *允许使用 Bot 的群组列表:*\n\n"
+        groups_message = "📋 *允许使用 Bot 的群组列表:*\n\n"
 
         for group_id, group_info in allowed_groups.items():
             added_time = datetime.fromtimestamp(group_info.get(
                 "added_at", 0)).strftime("%Y-%m-%d %H:%M:%S")
-            message += f"🔹 *群组 ID:* `{group_id}`\n"
-            message += f"  👤 添加者: {group_info.get('added_by', '未知')}\n"
-            message += f"  ⏰ 添加时间: {added_time}\n\n"
+            groups_message += f"🔹 *群组 ID:* `{group_id}`\n"
+            groups_message += f"  👤 添加者: {group_info.get('added_by', '未知')}\n"
+            groups_message += f"  ⏰ 添加时间: {added_time}\n\n"
 
         try:
-            await update.message.reply_text(message, parse_mode="MARKDOWN")
+            await message_obj.reply_text(groups_message, parse_mode="MARKDOWN")
         except Exception:
             # 如果 Markdown 解析失败，发送纯文本
             from utils.formatter import TextFormatter
-            await update.message.reply_text(
-                TextFormatter.markdown_to_plain(message))
+            await message_obj.reply_text(
+                TextFormatter.markdown_to_plain(groups_message))
 
     async def _add_allowed_group_command(self, update, context):
         """手动添加群组到白名单"""
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message_obj = update.message or update.edited_message
+
         chat = update.effective_chat
         user_id = update.effective_user.id
 
@@ -368,15 +374,13 @@ class BotEngine:
                 # 添加到白名单
                 self.logger.info(f"尝试添加当前群组 {chat.id} 到白名单")
                 if self.config_manager.add_allowed_group(chat.id, user_id):
-                    await update.message.reply_text(
-                        f"✅ 已将当前群组 {chat.id} 添加到白名单。")
+                    await message_obj.reply_text(f"✅ 已将当前群组 {chat.id} 添加到白名单。")
                     self.logger.info(f"成功添加群组 {chat.id} 到白名单")
                 else:
-                    await update.message.reply_text(f"❌ 添加当前群组到白名单失败。")
+                    await message_obj.reply_text(f"❌ 添加当前群组到白名单失败。")
                     self.logger.error(f"添加群组 {chat.id} 到白名单失败")
             else:
-                await update.message.reply_text("当前不在群组中。用法: /addgroup [群组 ID]"
-                                                )
+                await message_obj.reply_text("当前不在群组中。用法: /addgroup [群组 ID]")
             return
 
         # 带参数时，添加指定群组
@@ -386,21 +390,24 @@ class BotEngine:
 
             # 添加到白名单
             if self.config_manager.add_allowed_group(group_id, user_id):
-                await update.message.reply_text(f"✅ 已将群组 {group_id} 添加到白名单。")
+                await message_obj.reply_text(f"✅ 已将群组 {group_id} 添加到白名单。")
                 self.logger.info(f"成功添加群组 {group_id} 到白名单")
             else:
-                await update.message.reply_text(f"❌ 添加群组到白名单失败。")
+                await message_obj.reply_text(f"❌ 添加群组到白名单失败。")
                 self.logger.error(f"添加群组 {group_id} 到白名单失败")
         except ValueError:
-            await update.message.reply_text("群组 ID 必须是数字。")
+            await message_obj.reply_text("群组 ID 必须是数字。")
         except Exception as e:
             self.logger.error(f"添加群组失败: {e}", exc_info=True)
-            await update.message.reply_text(f"添加群组失败: {e}")
+            await message_obj.reply_text(f"添加群组失败: {e}")
 
     async def _remove_allowed_group_command(self, update, context):
         """从白名单移除群组并退出"""
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message_obj = update.message or update.edited_message
+
         if not context.args or len(context.args) != 1:
-            await update.message.reply_text("用法: /removegroup <群组 ID>")
+            await message_obj.reply_text("用法: /removegroup <群组 ID>")
             return
 
         try:
@@ -412,19 +419,18 @@ class BotEngine:
 
             # 检查群组是否在白名单中
             if not self.config_manager.is_allowed_group(group_id):
-                await update.message.reply_text(f"❌ 群组 {group_id} 不在白名单中。")
+                await message_obj.reply_text(f"❌ 群组 {group_id} 不在白名单中。")
                 return
 
             # 如果是在目标群组中执行命令，先发送预警
             if is_in_target_group:
-                await update.message.reply_text(f"⚠️ 正在将此群组从授权列表中移除，Bot 将退出。")
+                await message_obj.reply_text(f"⚠️ 正在将此群组从授权列表中移除，Bot 将退出。")
 
             # 从白名单移除
             removed = self.config_manager.remove_allowed_group(group_id)
             if not removed:
                 if not is_in_target_group:  # 只有在非目标群组中才发送失败消息
-                    await update.message.reply_text(
-                        f"❌ 从白名单移除群组 {group_id} 失败。")
+                    await message_obj.reply_text(f"❌ 从白名单移除群组 {group_id} 失败。")
                 return
 
             # 如果不是在目标群组中执行命令，尝试向目标群组发送通知
@@ -442,22 +448,22 @@ class BotEngine:
                 self.logger.info(f"Bot 已成功退出群组 {group_id}")
                 # 只有在非目标群组中才发送成功退出的消息
                 if not is_in_target_group:
-                    await update.message.reply_text(
+                    await message_obj.reply_text(
                         f"✅ 已将群组 {group_id} 从白名单移除并退出该群组。")
             except Exception as e:
                 self.logger.error(f"退出群组 {group_id} 失败: {e}")
                 # 只有在非目标群组中才发送退出失败的消息
                 if not is_in_target_group:
-                    await update.message.reply_text(
+                    await message_obj.reply_text(
                         f"✅ 已将群组 {group_id} 从白名单移除，但退出群组失败: {e}")
 
         except ValueError:
-            await update.message.reply_text("群组 ID 必须是数字。")
+            await message_obj.reply_text("群组 ID 必须是数字。")
         except Exception as e:
             self.logger.error(f"移除群组命令处理失败: {e}", exc_info=True)
             # 只有在非目标群组中才尝试发送错误消息
             if update.effective_chat.id != group_id:
                 try:
-                    await update.message.reply_text(f"处理命令时发生错误: {e}")
+                    await message_obj.reply_text(f"处理命令时发生错误: {e}")
                 except Exception:
                     pass

@@ -147,6 +147,12 @@ class TextFormatter:
 
         return parts
 
+    def strip_html(text):
+        """移除 HTML 标签"""
+        if not text:
+            return ""
+        return re.sub(r'<[^>]+>', '', text)
+
     @staticmethod
     def normalize_whitespace(text):
         """规范化文本中的空白字符

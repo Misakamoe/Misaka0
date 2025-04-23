@@ -113,14 +113,14 @@ class CommandManager:
                                admin_level=False,
                                description=""):
         """注册命令
-        
+
         Args:
             module_name: 模块名称
             command_name: 命令名称
             callback: 回调函数
             admin_level: 管理权限要求 (False, "group_admin", "super_admin")
             description: 命令描述
-            
+
         Returns:
             bool: 是否成功注册
         """
@@ -149,11 +149,13 @@ class CommandManager:
             if command_name not in self.module_commands[module_name]:
                 self.module_commands[module_name].append(command_name)
 
-            # 创建处理器
-            handler = CommandHandler(
-                command_name,
-                self._create_command_wrapper(command_name, callback,
-                                             admin_level, module_name))
+            # 创建处理器，允许处理编辑后的消息
+            handler = CommandHandler(command_name,
+                                     self._create_command_wrapper(
+                                         command_name, callback, admin_level,
+                                         module_name),
+                                     filters=filters.UpdateType.MESSAGES
+                                     | filters.UpdateType.EDITED_MESSAGE)
 
             # 添加到应用
             self.application.add_handler(handler)
@@ -168,14 +170,14 @@ class CommandManager:
                                       admin_level=False,
                                       description=""):
         """注册模块命令（别名）
-        
+
         Args:
             module_name: 模块名称
             command_name: 命令名称
             callback: 回调函数
             admin_level: 管理权限要求
             description: 命令描述
-            
+
         Returns:
             bool: 是否成功注册
         """
@@ -184,10 +186,10 @@ class CommandManager:
 
     async def unregister_command(self, command_name):
         """注销单个命令
-        
+
         Args:
             command_name: 命令名称
-            
+
         Returns:
             bool: 是否成功注销
         """
@@ -227,10 +229,10 @@ class CommandManager:
 
     async def unregister_module_commands(self, module_name):
         """注销模块的所有命令
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             int: 注销的命令数量
         """
@@ -248,19 +250,28 @@ class CommandManager:
     def _create_command_wrapper(self, command_name, callback, admin_level,
                                 module_name):
         """创建命令包装器，处理权限检查和模块聊天类型检查
-        
+
         Args:
             command_name: 命令名称
             callback: 回调函数
             admin_level: 管理权限要求
             module_name: 模块名称
-            
+
         Returns:
             function: 包装后的回调函数
         """
 
         async def wrapper(update, context):
             try:
+                # 获取消息对象（可能是新消息或编辑的消息）
+                message = update.message or update.edited_message
+
+                # 如果是编辑的消息，记录日志
+                if update.edited_message:
+                    self.logger.info(
+                        f"处理编辑后的命令: /{command_name} (用户: {update.effective_user.id})"
+                    )
+
                 # 检查命令是否来自有效群组
                 if not await self._check_allowed_group(update, context):
                     return
@@ -284,7 +295,7 @@ class CommandManager:
                                                       ["private", "group"])
 
                             if chat_type not in supported_types:
-                                await update.message.reply_text(
+                                await message.reply_text(
                                     f"模块 {module_name} 不支持在 {chat_type} 中使用。")
                                 return
 
@@ -299,17 +310,19 @@ class CommandManager:
             except Exception as e:
                 self.logger.error(f"执行命令 /{command_name} 时出错: {e}",
                                   exc_info=True)
-                await update.message.reply_text("执行命令时出错，请查看日志了解详情。")
+                message = update.message or update.edited_message
+                if message:
+                    await message.reply_text("执行命令时出错，请查看日志了解详情。")
 
         return wrapper
 
     async def _check_allowed_group(self, update, context):
         """检查是否在允许的群组中执行命令
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
-            
+
         Returns:
             bool: 是否允许执行命令
         """
@@ -329,9 +342,9 @@ class CommandManager:
 
             # 获取当前命令 - 提取完整的命令名
             command = None
-            if update.message and update.message.text and update.message.text.startswith(
-                    '/'):
-                command = update.message.text.split()[0][1:].split('@')[0]
+            message = update.message or update.edited_message
+            if message and message.text and message.text.startswith('/'):
+                command = message.text.split()[0][1:].split('@')[0]
 
             # 超级管理员的特权命令列表
             special_commands = ["addgroup", "listgroups", "removegroup"]
@@ -348,13 +361,16 @@ class CommandManager:
             message += f"群组 ID: `{chat.id}`\n"
             message += f"群组名称: {TextFormatter.escape_markdown(chat.title)}\n\n"
 
+            # 获取消息对象
+            msg = update.message or update.edited_message
+
             # 如果是超级管理员，提供快速添加到白名单的提示
             if is_super_admin:
                 message += f"您是超级管理员，可以使用以下命令授权此群组：\n"
                 message += f"`/addgroup {chat.id}`"
-                await update.message.reply_text(message, parse_mode="MARKDOWN")
+                await msg.reply_text(message, parse_mode="MARKDOWN")
             else:
-                await update.message.reply_text(message)
+                await msg.reply_text(message)
 
             return False
 
@@ -362,12 +378,12 @@ class CommandManager:
 
     async def _check_permission(self, admin_level, update, context):
         """检查用户权限
-        
+
         Args:
             admin_level: 管理权限要求
             update: 更新对象
             context: 上下文对象
-            
+
         Returns:
             bool: 是否有权限
         """
@@ -381,9 +397,12 @@ class CommandManager:
         if self.config_manager.is_admin(user_id):
             return True
 
+        # 获取消息对象
+        message = update.message or update.edited_message
+
         # 如果需要超级管理员权限，到这里就返回 False
         if admin_level == "super_admin":
-            await update.message.reply_text("⚠️ 此命令仅超级管理员可用。")
+            await message.reply_text("⚠️ 此命令仅超级管理员可用。")
             return False
 
         # 检查是否是群组管理员
@@ -396,23 +415,26 @@ class CommandManager:
             except Exception as e:
                 self.logger.error(f"检查群组权限时出错: {e}")
 
-            await update.message.reply_text("⚠️ 您没有执行此命令的权限。")
+            await message.reply_text("⚠️ 您没有执行此命令的权限。")
             return False
 
         return False
 
     async def _handle_unknown_command(self, update, context):
         """处理未知命令
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
         """
-        if not update.message or not update.message.text:
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message = update.message or update.edited_message
+
+        if not message or not message.text:
             return
 
         # 提取命令名称
-        text = update.message.text
+        text = message.text
         if not text.startswith('/'):
             return
 
@@ -438,23 +460,26 @@ class CommandManager:
                     suggestion += f" - {description}"
                 suggestion += "\n"
 
-            await update.message.reply_text(suggestion)
+            await message.reply_text(suggestion)
 
     async def _start_command(self, update, context):
         """处理 /start 命令
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
         """
-        await update.message.reply_sticker(
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message = update.message or update.edited_message
+
+        await message.reply_sticker(
             sticker=
             'CAACAgEAAxkBAAIBmGJ1Mt3gP0VaAvccwfw1lwgt53VlAAIXCQACkSkAARB0sik1UbskECQE'
         )
 
     async def _help_command(self, update, context):
         """处理 /help 命令
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
@@ -481,16 +506,19 @@ class CommandManager:
             help_text += "/addgroup <群组ID> - 添加群组到白名单\n"
             help_text += "/removegroup <群组ID> - 从白名单移除群组\n"
 
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message = update.message or update.edited_message
+
         try:
-            await update.message.reply_text(help_text, parse_mode="MARKDOWN")
+            await message.reply_text(help_text, parse_mode="MARKDOWN")
         except Exception:
             # 如果 Markdown 解析失败，发送纯文本
-            await update.message.reply_text(
-                TextFormatter.markdown_to_plain(help_text))
+            await message.reply_text(TextFormatter.markdown_to_plain(help_text)
+                                     )
 
     async def _id_command(self, update, context):
         """处理 /id 命令
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
@@ -498,53 +526,56 @@ class CommandManager:
         user = update.effective_user
         chat = update.effective_chat
 
+        # 获取消息对象（可能是新消息或编辑的消息）
+        msg = update.message or update.edited_message
+
         # 检查是否是回复消息
-        if update.message.reply_to_message:
+        if msg.reply_to_message:
             # 显示被回复用户的信息
-            replied_user = update.message.reply_to_message.from_user
-            message = f"👤 *用户信息*\n"
-            message += f"用户 ID: `{replied_user.id}`\n"
+            replied_user = msg.reply_to_message.from_user
+            message_text = f"👤 *用户信息*\n"
+            message_text += f"用户 ID: `{replied_user.id}`\n"
 
             if replied_user.username:
-                message += f"用户名: @{TextFormatter.escape_markdown(replied_user.username)}\n"
+                message_text += f"用户名: @{TextFormatter.escape_markdown(replied_user.username)}\n"
 
-            message += f"名称: {TextFormatter.escape_markdown(replied_user.full_name)}\n"
+            message_text += f"名称: {TextFormatter.escape_markdown(replied_user.full_name)}\n"
 
             try:
-                await update.message.reply_to_message.reply_text(
-                    message, parse_mode="MARKDOWN")
+                await msg.reply_to_message.reply_text(message_text,
+                                                      parse_mode="MARKDOWN")
             except Exception:
                 # 如果 Markdown 解析失败，发送纯文本
-                await update.message.reply_to_message.reply_text(
-                    TextFormatter.markdown_to_plain(message))
+                await msg.reply_to_message.reply_text(
+                    TextFormatter.markdown_to_plain(message_text))
 
         else:
             # 显示自己的信息和聊天信息
-            message = f"👤 *用户信息*\n"
-            message += f"用户 ID: `{user.id}`\n"
+            message_text = f"👤 *用户信息*\n"
+            message_text += f"用户 ID: `{user.id}`\n"
 
             if user.username:
-                message += f"用户名: @{TextFormatter.escape_markdown(user.username)}\n"
+                message_text += f"用户名: @{TextFormatter.escape_markdown(user.username)}\n"
 
-            message += f"名称: {TextFormatter.escape_markdown(user.full_name)}\n\n"
+            message_text += f"名称: {TextFormatter.escape_markdown(user.full_name)}\n\n"
 
-            message += f"💬 *聊天信息*\n"
-            message += f"聊天 ID: `{chat.id}`\n"
-            message += f"类型: {chat.type}\n"
+            message_text += f"💬 *聊天信息*\n"
+            message_text += f"聊天 ID: `{chat.id}`\n"
+            message_text += f"类型: {chat.type}\n"
 
             if chat.type in ["group", "supergroup"]:
-                message += f"群组名称: {TextFormatter.escape_markdown(chat.title)}\n"
+                message_text += f"群组名称: {TextFormatter.escape_markdown(chat.title)}\n"
 
             try:
-                await update.message.reply_text(message, parse_mode="MARKDOWN")
+                await msg.reply_text(message_text, parse_mode="MARKDOWN")
             except Exception:
                 # 如果 Markdown 解析失败，发送纯文本
-                await update.message.reply_text(
-                    TextFormatter.markdown_to_plain(message))
+                await msg.reply_text(
+                    TextFormatter.markdown_to_plain(message_text))
 
     async def _list_modules_command(self, update, context):
         """处理 /modules 命令
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
@@ -611,10 +642,10 @@ class CommandManager:
 
     def _format_module_item(self, item):
         """格式化模块项目
-        
+
         Args:
             item: 模块信息
-            
+
         Returns:
             str: 格式化后的文本
         """
@@ -637,7 +668,7 @@ class CommandManager:
 
     async def _list_commands_command(self, update, context):
         """处理 /commands 命令
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
@@ -721,10 +752,10 @@ class CommandManager:
 
     def _format_command_item(self, item):
         """格式化命令项目
-        
+
         Args:
             item: 命令信息
-            
+
         Returns:
             str: 格式化后的文本
         """
@@ -742,7 +773,7 @@ class CommandManager:
 
     async def _handle_command_page_callback(self, update, context):
         """处理命令分页回调
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
@@ -904,11 +935,14 @@ class CommandManager:
 
     async def _stats_command(self, update, context):
         """处理 /stats 命令
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
         """
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message_obj = update.message or update.edited_message
+
         bot_engine = context.bot_data.get("bot_engine")
         module_manager = context.bot_data.get("module_manager")
 
@@ -923,20 +957,20 @@ class CommandManager:
         loaded_modules = len(module_manager.loaded_modules)
 
         # 构建统计信息
-        message = f"📊 *机器人统计信息*\n\n"
-        message += f"⏱️ 运行时间: {uptime_str}\n"
-        message += f"📦 已加载模块: {loaded_modules}\n"
-        message += f"🔖 已注册命令: {len(self.commands)}\n"
+        stats_message = f"📊 *机器人统计信息*\n\n"
+        stats_message += f"⏱️ 运行时间: {uptime_str}\n"
+        stats_message += f"📦 已加载模块: {loaded_modules}\n"
+        stats_message += f"🔖 已注册命令: {len(self.commands)}\n"
 
         # 最后清理时间
         if bot_engine.stats.get("last_cleanup", 0) > 0:
             last_cleanup = datetime.fromtimestamp(
                 bot_engine.stats["last_cleanup"]).strftime("%Y-%m-%d %H:%M:%S")
-            message += f"🧹 最后清理: {last_cleanup}\n"
+            stats_message += f"🧹 最后清理: {last_cleanup}\n"
 
         try:
-            await update.message.reply_text(message, parse_mode="MARKDOWN")
+            await message_obj.reply_text(stats_message, parse_mode="MARKDOWN")
         except Exception:
             # 如果 Markdown 解析失败，发送纯文本
-            await update.message.reply_text(
-                TextFormatter.markdown_to_plain(message))
+            await message_obj.reply_text(
+                TextFormatter.markdown_to_plain(stats_message))

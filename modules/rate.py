@@ -333,6 +333,9 @@ async def convert_currency(amount, from_currency, to_currency):
 
 async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /rate 命令"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 如果没有参数，显示帮助信息
     if not context.args or len(context.args) < 2:
         help_text = ("💱 *汇率转换帮助*\n\n"
@@ -353,7 +356,7 @@ async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "- 中文名称: 人民币, 美元, 比特币等\n"
                      "- 国家/地区名称: 中国, 美国, 日本等\n"
                      "- 符号: $, €, £, ¥等")
-        await update.message.reply_text(help_text, parse_mode="MARKDOWN")
+        await message.reply_text(help_text, parse_mode="MARKDOWN")
         return
 
     # 解析参数
@@ -375,22 +378,22 @@ async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 amount = float(context.args[2])
             except ValueError:
-                await update.message.reply_text(
+                await message.reply_text(
                     "无法识别的金额。请使用数字表示金额，例如: `/rate 100 美元 人民币`",
                     parse_mode="MARKDOWN")
                 return
 
     # 如果没有提供目标货币
     if not to_currency:
-        await update.message.reply_text("请同时提供源货币和目标货币，例如: `/rate 100 美元 人民币`",
-                                        parse_mode="MARKDOWN")
+        await message.reply_text("请同时提供源货币和目标货币，例如: `/rate 100 美元 人民币`",
+                                 parse_mode="MARKDOWN")
         return
 
     # 执行货币转换
     result, error = await convert_currency(amount, from_currency, to_currency)
 
     if error:
-        await update.message.reply_text(f"❌ 转换失败: {error}")
+        await message.reply_text(f"❌ 转换失败: {error}")
         return
 
     # 获取货币代码和类型
@@ -409,15 +412,18 @@ async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 time.localtime(_state["last_update"]))
 
     # 发送结果
-    message = (f"💱 *汇率转换结果*\n\n"
-               f"{formatted_from} = {formatted_to}\n\n"
-               f"*汇率更新时间:* {update_time}")
+    result_message = (f"💱 *汇率转换结果*\n\n"
+                      f"{formatted_from} = {formatted_to}\n\n"
+                      f"*汇率更新时间:* {update_time}")
 
-    await update.message.reply_text(message, parse_mode="MARKDOWN")
+    await message.reply_text(result_message, parse_mode="MARKDOWN")
 
 
 async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /setrate 命令，用于管理员设置汇率模块配置"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 如果没有参数，显示当前配置
     if not context.args:
         config = load_config()
@@ -435,7 +441,7 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"`/setrate api_key YOUR_API_KEY` - 设置 ExchangeRate API 密钥\n"
             f"`/setrate interval 3600` - 设置更新间隔(秒)")
 
-        await update.message.reply_text(config_text, parse_mode="MARKDOWN")
+        await message.reply_text(config_text, parse_mode="MARKDOWN")
         return
 
     # 解析参数
@@ -452,19 +458,18 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             global EXCHANGERATE_API_KEY
             EXCHANGERATE_API_KEY = api_key
 
-            await update.message.reply_text("✅ API 密钥已更新",
-                                            parse_mode="MARKDOWN")
+            await message.reply_text("✅ API 密钥已更新", parse_mode="MARKDOWN")
 
             # 立即尝试更新汇率数据以验证 API 密钥
             try:
                 await update_exchange_rates()
-                await update.message.reply_text("✅ 汇率数据已更新，API 密钥有效",
-                                                parse_mode="MARKDOWN")
+                await message.reply_text("✅ 汇率数据已更新，API 密钥有效",
+                                         parse_mode="MARKDOWN")
             except Exception as e:
-                await update.message.reply_text(
-                    f"⚠️ 更新汇率数据失败，请检查 API 密钥: {str(e)}", parse_mode="MARKDOWN")
+                await message.reply_text(f"⚠️ 更新汇率数据失败，请检查 API 密钥: {str(e)}",
+                                         parse_mode="MARKDOWN")
         else:
-            await update.message.reply_text(f"❌ 保存配置失败", parse_mode="MARKDOWN")
+            await message.reply_text(f"❌ 保存配置失败", parse_mode="MARKDOWN")
 
         return
 
@@ -473,8 +478,8 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             interval = int(context.args[1])
             if interval < 600:  # 设置最小间隔，如10分钟
-                await update.message.reply_text("⚠️ 更新间隔不能小于 600 秒(10 分钟)",
-                                                parse_mode="MARKDOWN")
+                await message.reply_text("⚠️ 更新间隔不能小于 600 秒(10 分钟)",
+                                         parse_mode="MARKDOWN")
                 return
 
             config = load_config()
@@ -502,21 +507,19 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 _update_task = asyncio.create_task(periodic_update())
 
-                await update.message.reply_text(f"✅ 更新间隔已设置为 {interval} 秒",
-                                                parse_mode="MARKDOWN")
+                await message.reply_text(f"✅ 更新间隔已设置为 {interval} 秒",
+                                         parse_mode="MARKDOWN")
             else:
-                await update.message.reply_text(f"❌ 保存配置失败",
-                                                parse_mode="MARKDOWN")
+                await message.reply_text(f"❌ 保存配置失败", parse_mode="MARKDOWN")
 
         except ValueError:
-            await update.message.reply_text("❌ 请输入有效的数字作为更新间隔",
-                                            parse_mode="MARKDOWN")
+            await message.reply_text("❌ 请输入有效的数字作为更新间隔", parse_mode="MARKDOWN")
 
         return
 
     # 如果参数不匹配任何设置选项
-    await update.message.reply_text("❌ 无效的设置命令。使用 `/setrate` 查看可用设置选项。",
-                                    parse_mode="MARKDOWN")
+    await message.reply_text("❌ 无效的设置命令。使用 `/setrate` 查看可用设置选项。",
+                             parse_mode="MARKDOWN")
 
 
 async def periodic_update():

@@ -163,6 +163,9 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update: Telegram 更新对象
         context: 回调上下文
     """
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     user_id = str(update.effective_user.id)
 
     # 获取位置参数
@@ -173,7 +176,7 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in _state["user_locations"]:
             location = _state["user_locations"][user_id]
         else:
-            await update.message.reply_text("🌍 请提供位置名称，例如: /weather 北京")
+            await message.reply_text("🌍 请提供位置名称，例如: /weather 北京")
             return
     else:
         # 记住用户的位置
@@ -186,13 +189,13 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api_key = _state["api_keys"].get(source)
 
     if not api_key:
-        await update.message.reply_text(
+        await message.reply_text(
             f"⚠️ 未设置 {WEATHER_SOURCES[source]['name']} 的 API 密钥，请使用 /weatherset key {source} YOUR_API_KEY 设置"
         )
         return
 
     # 发送等待消息
-    waiting_msg = await update.message.reply_text("🔍 正在查询天气，请稍候...")
+    waiting_msg = await message.reply_text("🔍 正在查询天气，请稍候...")
 
     # 检查缓存
     cache_key = f"weather:{source}:{location}"
@@ -270,6 +273,9 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update: Telegram 更新对象
         context: 回调上下文
     """
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     user_id = str(update.effective_user.id)
 
     # 获取位置参数和天数
@@ -287,7 +293,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in _state["user_locations"]:
             location = _state["user_locations"][user_id]
         else:
-            await update.message.reply_text("🌍 请提供位置名称，例如: /forecast 北京 3")
+            await message.reply_text("🌍 请提供位置名称，例如: /forecast 北京 3")
             return
 
     # 获取活跃的天气源
@@ -295,13 +301,13 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api_key = _state["api_keys"].get(source)
 
     if not api_key:
-        await update.message.reply_text(
+        await message.reply_text(
             f"⚠️ 未设置 {WEATHER_SOURCES[source]['name']} 的 API 密钥，请使用 /weatherset key {source} YOUR_API_KEY 设置"
         )
         return
 
     # 发送等待消息
-    waiting_msg = await update.message.reply_text("🔍 正在查询天气预报，请稍候...")
+    waiting_msg = await message.reply_text("🔍 正在查询天气预报，请稍候...")
 
     # 检查缓存
     cache_key = f"forecast:{source}:{location}:{days}"
@@ -381,6 +387,9 @@ async def weather_set_command(update: Update,
         update: Telegram 更新对象
         context: 回调上下文
     """
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     if not context.args or len(context.args) < 1:
         # 显示帮助信息
         help_text = """
@@ -395,7 +404,7 @@ async def weather_set_command(update: Update,
         for source, info in WEATHER_SOURCES.items():
             help_text += f"- `{source}`: {info['name']}\n"
 
-        await update.message.reply_text(help_text, parse_mode="MARKDOWN")
+        await message.reply_text(help_text, parse_mode="MARKDOWN")
         return
 
     action = context.args[0].lower()
@@ -406,7 +415,7 @@ async def weather_set_command(update: Update,
         api_key = context.args[2]
 
         if source not in WEATHER_SOURCES:
-            await update.message.reply_text(f"❌ 不支持的天气源: {source}")
+            await message.reply_text(f"❌ 不支持的天气源: {source}")
             return
 
         # 记录设置操作，但不记录 API 密钥
@@ -417,7 +426,7 @@ async def weather_set_command(update: Update,
 
         _state["api_keys"][source] = api_key
 
-        await update.message.reply_text(
+        await message.reply_text(
             f"✅ 已设置 {WEATHER_SOURCES[source]['name']} 的 API 密钥")
 
     elif action == "source" and len(context.args) >= 2:
@@ -425,7 +434,7 @@ async def weather_set_command(update: Update,
         source = context.args[1].lower()
 
         if source not in WEATHER_SOURCES:
-            await update.message.reply_text(f"❌ 不支持的天气源: {source}")
+            await message.reply_text(f"❌ 不支持的天气源: {source}")
             return
 
         _state["active_source"] = source
@@ -435,7 +444,7 @@ async def weather_set_command(update: Update,
                 f"用户 {update.effective_user.id} 将默认天气源设置为 {WEATHER_SOURCES[source]['name']}"
             )
 
-        await update.message.reply_text(
+        await message.reply_text(
             f"✅ 已将默认天气源设置为: {WEATHER_SOURCES[source]['name']}")
 
     elif action == "info":
@@ -450,10 +459,10 @@ async def weather_set_command(update: Update,
                     key) > 8 else "********"
                 info_text += f"- {WEATHER_SOURCES[source]['name']}: `{masked_key}`\n"
 
-        await update.message.reply_text(info_text, parse_mode="MARKDOWN")
+        await message.reply_text(info_text, parse_mode="MARKDOWN")
 
     else:
-        await update.message.reply_text("❌ 无效的命令，使用 /weatherset 查看帮助")
+        await message.reply_text("❌ 无效的命令，使用 /weatherset 查看帮助")
 
 
 # 获取天气图标

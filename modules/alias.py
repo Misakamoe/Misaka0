@@ -182,6 +182,9 @@ async def handle_action_command(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE,
                                 action: str):
     """处理动作命令"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 获取发送者信息
     user = update.effective_user
     user_name = user.full_name
@@ -189,8 +192,8 @@ async def handle_action_command(update: Update,
 
     # 检查是否回复了其他消息
     target_mention = "自己"
-    if update.message.reply_to_message:
-        target_user = update.message.reply_to_message.from_user
+    if message.reply_to_message:
+        target_user = message.reply_to_message.from_user
         if target_user:
             target_name = target_user.full_name
             target_mention = f'<a href="tg://user?id={target_user.id}">{target_name}</a>'
@@ -208,15 +211,18 @@ async def handle_action_command(update: Update,
                                      target=target_mention)
 
     # 发送消息
-    await update.message.reply_text(action_message, parse_mode="HTML")
+    await message.reply_text(action_message, parse_mode="HTML")
 
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理所有消息，检查是否包含中文命令别名或动作命令"""
-    if not update.message or not update.message.text:
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
+    if not message or not message.text:
         return
 
-    message_text = update.message.text
+    message_text = message.text
 
     # 只处理带 "/" 开头的命令别名，如 /复读
     if message_text.startswith('/'):
@@ -258,14 +264,14 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if admin_level == "super_admin":
                     # 检查是否是超级管理员
                     if not _interface.config_manager.is_admin(user_id):
-                        await update.message.reply_text(f"⚠️ 您没有执行此命令的权限")
+                        await message.reply_text(f"⚠️ 您没有执行此命令的权限")
                         return
 
                 elif admin_level == "group_admin":
                     # 检查是否是群组管理员
                     if not _interface.config_manager.is_chat_admin(
                             chat_id, user_id):
-                        await update.message.reply_text(f"⚠️ 您没有执行此命令的权限")
+                        await message.reply_text(f"⚠️ 您没有执行此命令的权限")
                         return
 
             # 保存原始参数
@@ -303,6 +309,9 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理命令别名"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     if not context.args or len(context.args) < 1:
         # 显示当前所有别名
         reply = "当前命令别名：\n"
@@ -310,7 +319,7 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if aliases:  # 只显示有别名的命令
                 alias_str = ", ".join([f"「{a}」" for a in aliases])
                 reply += f"/{cmd} → {alias_str}\n"
-        await update.message.reply_text(reply)
+        await message.reply_text(reply)
         return
 
     # 子命令: add 或 remove
@@ -328,17 +337,17 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         command_manager = _interface.application.bot_data.get(
             "command_manager")
         if not command_manager or cmd not in command_manager.commands:
-            await update.message.reply_text(f"⚠️ 命令 /{cmd} 不存在")
+            await message.reply_text(f"⚠️ 命令 /{cmd} 不存在")
             return
 
         # 检查别名是否与现有命令冲突
         if alias in command_manager.commands:
-            await update.message.reply_text(f"⚠️ 别名「{alias}」与现有命令冲突，请使用其他名称")
+            await message.reply_text(f"⚠️ 别名「{alias}」与现有命令冲突，请使用其他名称")
             return
 
         # 检查是否会形成循环引用
         if _check_alias_cycle(cmd, alias):
-            await update.message.reply_text(f"⚠️ 添加别名「{alias}」会形成循环引用")
+            await message.reply_text(f"⚠️ 添加别名「{alias}」会形成循环引用")
             return
 
         # 获取命令的权限要求
@@ -361,9 +370,9 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _state["aliases"][cmd].append(alias)
                 _update_reverse_aliases()
             await _save_aliases()  # 保存到文件和框架状态
-            await update.message.reply_text(f"已为 /{cmd} 添加别名「{alias}」")
+            await message.reply_text(f"已为 /{cmd} 添加别名「{alias}」")
         else:
-            await update.message.reply_text(f"别名「{alias}」已存在")
+            await message.reply_text(f"别名「{alias}」已存在")
 
     elif action in ["remove", "删除"] and len(context.args) >= 3:
         # 删除别名: /alias remove echo 复读
@@ -375,7 +384,7 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 检查命令是否存在
         if cmd not in _state["aliases"]:
-            await update.message.reply_text(f"命令 /{cmd} 没有任何别名")
+            await message.reply_text(f"命令 /{cmd} 没有任何别名")
             return
 
         # 移除别名
@@ -391,9 +400,9 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         del _state["permissions"][cmd]
                 _update_reverse_aliases()
             await _save_aliases()  # 保存到文件和框架状态
-            await update.message.reply_text(f"已从 /{cmd} 移除别名「{alias}」")
+            await message.reply_text(f"已从 /{cmd} 移除别名「{alias}」")
         else:
-            await update.message.reply_text(f"别名「{alias}」不存在")
+            await message.reply_text(f"别名「{alias}」不存在")
 
     else:
         # 显示帮助信息
@@ -404,7 +413,7 @@ async def alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "示例：\n"
                      "`/alias add help 帮助`\n"
                      "`/alias remove help 帮助`")
-        await update.message.reply_text(help_text, parse_mode="MARKDOWN")
+        await message.reply_text(help_text, parse_mode="MARKDOWN")
 
 
 async def register_message_handler():

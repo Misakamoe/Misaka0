@@ -1190,7 +1190,8 @@ class ConfigHandler:
                           context: ContextTypes.DEFAULT_TYPE) -> None:
         """显示当前 AI 配置"""
         global _state
-        # context 参数用于与框架兼容
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message = update.message or update.edited_message
 
         # 构建配置信息（使用 HTML 格式）
         config_text = "<b>🤖 AI 配置面板</b>\n\n"
@@ -1275,18 +1276,19 @@ class ConfigHandler:
         config_text += "• <code>/aiconfig timeout &lt;小时数&gt;</code> - 设置对话超时时间\n"
 
         try:
-            await update.message.reply_text(config_text, parse_mode="HTML")
+            await message.reply_text(config_text, parse_mode="HTML")
         except Exception as e:
             # 如果发送失败（可能是 HTML 格式问题），发送纯文本
             _interface.logger.error(f"发送 AI 配置信息失败: {e}")
-            await update.message.reply_text("发送配置信息失败，请联系管理员查看日志")
+            await message.reply_text("发送配置信息失败，请联系管理员查看日志")
 
     @staticmethod
     async def show_stats(update: Update,
                          context: ContextTypes.DEFAULT_TYPE) -> None:
         """显示 AI 使用统计"""
         global _state
-        # context 参数用于与框架兼容
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message = update.message or update.edited_message
 
         stats = _state["usage_stats"]
 
@@ -1321,17 +1323,18 @@ class ConfigHandler:
                 stats_text += f"• 用户 <code>{user_id}</code>: <code>{count}</code> 次请求\n"
 
         try:
-            await update.message.reply_text(stats_text, parse_mode="HTML")
+            await message.reply_text(stats_text, parse_mode="HTML")
         except Exception as e:
             _interface.logger.error(f"发送 AI 统计信息失败: {e}")
-            await update.message.reply_text("发送统计信息失败，请联系管理员查看日志")
+            await message.reply_text("发送统计信息失败，请联系管理员查看日志")
 
     @staticmethod
     async def show_whitelist(update: Update,
                              context: ContextTypes.DEFAULT_TYPE) -> None:
         """显示当前 AI 白名单"""
         global _state
-        # context 参数用于与框架兼容
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message = update.message or update.edited_message
 
         whitelist_text = "<b>👥 AI 白名单用户</b>\n\n"
 
@@ -1348,10 +1351,10 @@ class ConfigHandler:
         whitelist_text += "\n💡 提示：回复用户消息并使用 <code>/aiwhitelist add</code> 可快速添加该用户\n"
 
         try:
-            await update.message.reply_text(whitelist_text, parse_mode="HTML")
+            await message.reply_text(whitelist_text, parse_mode="HTML")
         except Exception as e:
             _interface.logger.error(f"发送 AI 白名单信息失败: {e}")
-            await update.message.reply_text("发送白名单信息失败，请联系管理员查看日志")
+            await message.reply_text("发送白名单信息失败，请联系管理员查看日志")
 
 
 # 命令处理函数
@@ -1362,9 +1365,12 @@ async def ai_config_command(update: Update,
     """处理 /aiconfig 命令 - 配置 AI 设置"""
     global _state
 
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 检查是否是私聊
     if update.effective_chat.type != "private":
-        await update.message.reply_text("⚠️ 出于安全考虑，AI 配置只能在私聊中进行")
+        await message.reply_text("⚠️ 出于安全考虑，AI 配置只能在私聊中进行")
         return
 
     # 解析参数
@@ -1632,6 +1638,9 @@ async def ai_whitelist_command(update: Update,
     """处理 /aiwhitelist 命令 - 管理 AI 白名单"""
     global _state
 
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     if not context.args:
         # 显示当前白名单
         await ConfigHandler.show_whitelist(update, context)
@@ -1642,17 +1651,17 @@ async def ai_whitelist_command(update: Update,
 
     if operation == "add":
         # 添加用户到白名单
-        if len(context.args) < 2 and not update.message.reply_to_message:
-            await update.message.reply_text(
+        if len(context.args) < 2 and not message.reply_to_message:
+            await message.reply_text(
                 "用法: `/aiwhitelist add <用户ID>`\n或回复某人的消息添加他们",
                 parse_mode="MARKDOWN")
             return
 
         # 检查是否是回复某人的消息
-        if update.message.reply_to_message and update.message.reply_to_message.from_user:
-            user_id = update.message.reply_to_message.from_user.id
-            username = update.message.reply_to_message.from_user.username or "未知用户名"
-            full_name = update.message.reply_to_message.from_user.full_name or "未知姓名"
+        if message.reply_to_message and message.reply_to_message.from_user:
+            user_id = message.reply_to_message.from_user.id
+            username = message.reply_to_message.from_user.username or "未知用户名"
+            full_name = message.reply_to_message.from_user.full_name or "未知姓名"
         else:
             # 从参数获取用户 ID
             try:
@@ -1660,13 +1669,13 @@ async def ai_whitelist_command(update: Update,
                 username = "未知用户名"
                 full_name = "未知姓名"
             except ValueError:
-                await update.message.reply_text("用户 ID 必须是数字")
+                await message.reply_text("用户 ID 必须是数字")
                 return
 
         # 检查用户是否已在白名单中
         if user_id in _state["whitelist"]:
             safe_username = username.replace('.', '\\.').replace('-', '\\-')
-            await update.message.reply_text(
+            await message.reply_text(
                 f"用户 `{user_id}` (@{safe_username}) 已在白名单中",
                 parse_mode="MARKDOWN")
             return
@@ -1679,7 +1688,7 @@ async def ai_whitelist_command(update: Update,
 
         safe_username = username.replace('.', '\\.').replace('-', '\\-')
         safe_full_name = full_name.replace('.', '\\.').replace('-', '\\-')
-        await update.message.reply_text(
+        await message.reply_text(
             f"✅ 已将用户 `{user_id}` (@{safe_username}, {safe_full_name}) 添加到白名单",
             parse_mode="MARKDOWN")
         _interface.logger.info(
@@ -1688,8 +1697,8 @@ async def ai_whitelist_command(update: Update,
     elif operation == "remove":
         # 从白名单中移除用户
         if len(context.args) < 2:
-            await update.message.reply_text("用法: `/aiwhitelist remove <用户ID>`",
-                                            parse_mode="MARKDOWN")
+            await message.reply_text("用法: `/aiwhitelist remove <用户ID>`",
+                                     parse_mode="MARKDOWN")
             return
 
         try:
@@ -1697,8 +1706,8 @@ async def ai_whitelist_command(update: Update,
 
             # 检查用户是否在白名单中
             if user_id not in _state["whitelist"]:
-                await update.message.reply_text(f"用户 `{user_id}` 不在白名单中",
-                                                parse_mode="MARKDOWN")
+                await message.reply_text(f"用户 `{user_id}` 不在白名单中",
+                                         parse_mode="MARKDOWN")
                 return
 
             # 从白名单中移除
@@ -1707,12 +1716,12 @@ async def ai_whitelist_command(update: Update,
             # 保存配置
             save_config()
 
-            await update.message.reply_text(f"✅ 已将用户 `{user_id}` 从白名单中移除",
-                                            parse_mode="MARKDOWN")
+            await message.reply_text(f"✅ 已将用户 `{user_id}` 从白名单中移除",
+                                     parse_mode="MARKDOWN")
             _interface.logger.info(
                 f"用户 {update.effective_user.id} 将用户 {user_id} 从 AI 白名单中移除")
         except ValueError:
-            await update.message.reply_text("用户 ID 必须是数字")
+            await message.reply_text("用户 ID 必须是数字")
 
     elif operation == "clear":
         # 清空白名单
@@ -1721,12 +1730,12 @@ async def ai_whitelist_command(update: Update,
         # 保存配置
         save_config()
 
-        await update.message.reply_text("✅ 已清空 AI 白名单")
+        await message.reply_text("✅ 已清空 AI 白名单")
         _interface.logger.info(f"用户 {update.effective_user.id} 清空了 AI 白名单")
 
     else:
         # 未知操作
-        await update.message.reply_text(
+        await message.reply_text(
             f"未知操作: `{operation}`\n"
             "可用操作: add, remove, clear",
             parse_mode="MARKDOWN")
@@ -1737,18 +1746,21 @@ async def ai_clear_command(update: Update,
     """处理 /aiclear 命令 - 清除对话上下文"""
     user_id = update.effective_user.id
 
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 检查权限 - 仅超级管理员和白名单用户可用
     if not AIManager.is_user_authorized(user_id, context):
-        await update.message.reply_text("⚠️ 您没有使用 AI 功能的权限\n请联系管理员将您添加到白名单")
+        await message.reply_text("⚠️ 您没有使用 AI 功能的权限\n请联系管理员将您添加到白名单")
         _interface.logger.warning(f"用户 {user_id} 尝试使用 AI 功能但没有权限")
         return
 
     # 清除上下文
     if ConversationManager.clear_context(user_id):
-        await update.message.reply_text("✅ 已清除您的对话历史")
+        await message.reply_text("✅ 已清除您的对话历史")
         _interface.logger.info(f"用户 {user_id} 清除了对话历史")
     else:
-        await update.message.reply_text("您还没有任何对话历史")
+        await message.reply_text("您还没有任何对话历史")
 
 
 async def ai_command(update: Update,
@@ -1756,15 +1768,18 @@ async def ai_command(update: Update,
     """处理 /ai 命令 - 向 AI 发送消息"""
     user_id = update.effective_user.id
 
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 检查权限 - 仅超级管理员和白名单用户可用
     if not AIManager.is_user_authorized(user_id, context):
-        await update.message.reply_text("⚠️ 您没有使用 AI 功能的权限\n请联系管理员将您添加到白名单")
+        await message.reply_text("⚠️ 您没有使用 AI 功能的权限\n请联系管理员将您添加到白名单")
         _interface.logger.warning(f"用户 {user_id} 尝试使用 AI 功能但没有权限")
         return
 
     # 检查是否有消息内容
     if not context.args:
-        await update.message.reply_text(
+        await message.reply_text(
             "请输入要发送给 AI 的消息\n"
             "例如: `/ai 你好，请介绍一下自己`\n\n"
             "🔄 使用 `/aiclear` 可清除对话历史\n"
@@ -1777,19 +1792,18 @@ async def ai_command(update: Update,
 
     # 检查消息长度
     if len(message_text) > MAX_MESSAGE_LENGTH:
-        await update.message.reply_text(
-            f"⚠️ 消息太长，请将长度控制在 {MAX_MESSAGE_LENGTH} 字符以内")
+        await message.reply_text(f"⚠️ 消息太长，请将长度控制在 {MAX_MESSAGE_LENGTH} 字符以内")
         return
 
     # 检查默认服务商
     provider_id = _state["default_provider"]
     if not provider_id or provider_id not in _state["providers"]:
-        await update.message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
+        await message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
         _interface.logger.warning(f"用户 {user_id} 尝试使用 AI 但未配置默认服务商")
         return
 
     # 获取图像（如果有）
-    replied_message = update.message.reply_to_message
+    replied_message = message.reply_to_message
     images = []
 
     if replied_message and replied_message.photo:
@@ -1804,12 +1818,12 @@ async def ai_command(update: Update,
             image_data = await AIManager.process_image(photo_file)
             if image_data:
                 images.append(image_data)
-                await update.message.reply_text("📷 已添加图片到请求中")
+                await message.reply_text("📷 已添加图片到请求中")
         else:
-            await update.message.reply_text("⚠️ 当前服务商不支持图像处理")
+            await message.reply_text("⚠️ 当前服务商不支持图像处理")
 
     # 发送"正在思考"消息
-    thinking_message = await update.message.reply_text("🤔 正在思考中...")
+    thinking_message = await message.reply_text("🤔 正在思考中...")
 
     # 添加用户消息到上下文
     ConversationManager.add_message(user_id, "user", message_text)
@@ -1888,8 +1902,8 @@ async def ai_command(update: Update,
             _interface.logger.info(f"消息过长，将分为 {len(parts)} 段发送")
 
             # 发送第一段
-            first_message = await update.message.reply_text(parts[0],
-                                                            parse_mode="HTML")
+            first_message = await message.reply_text(parts[0],
+                                                     parse_mode="HTML")
 
             # 发送剩余段落
             for part in parts[1:]:
@@ -1907,6 +1921,13 @@ async def handle_private_message(update: Update,
                                  context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理私聊消息，直接回复 AI 回答"""
     user_id = update.effective_user.id
+
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
+    # 如果是编辑的消息，不处理
+    if update.edited_message:
+        return
 
     # 检查权限 - 仅超级管理员和白名单用户可用
     if not AIManager.is_user_authorized(user_id, context):
@@ -1936,18 +1957,17 @@ async def handle_private_message(update: Update,
         return
 
     # 获取消息内容
-    message_text = update.message.text
+    message_text = message.text
 
     # 检查消息长度
     if len(message_text) > MAX_MESSAGE_LENGTH:
-        await update.message.reply_text(
-            f"⚠️ 消息太长，请将长度控制在 {MAX_MESSAGE_LENGTH} 字符以内")
+        await message.reply_text(f"⚠️ 消息太长，请将长度控制在 {MAX_MESSAGE_LENGTH} 字符以内")
         return
 
     # 检查默认服务商
     provider_id = _state["default_provider"]
     if not provider_id or provider_id not in _state["providers"]:
-        await update.message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
+        await message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
         _interface.logger.warning(f"用户 {user_id} 尝试使用 AI 但未配置默认服务商")
         return
 
@@ -1957,11 +1977,11 @@ async def handle_private_message(update: Update,
 
     # 检查是否有图像
     images = []
-    if update.message.photo:
+    if message.photo:
         provider = _state["providers"].get(provider_id, {})
         if provider.get("supports_image", False):
             # 获取最大尺寸的图像
-            photo = update.message.photo[-1]
+            photo = message.photo[-1]
             photo_file = await context.bot.get_file(photo.file_id)
 
             # 处理图像
@@ -1970,14 +1990,14 @@ async def handle_private_message(update: Update,
                 images.append(image_data)
                 # 不发送确认消息，保持对话流畅
         else:
-            await update.message.reply_text("⚠️ 当前服务商不支持图像处理")
+            await message.reply_text("⚠️ 当前服务商不支持图像处理")
             # 清除会话状态
             await session_manager.delete(user_id, "ai_active")
             return
 
     try:
         # 发送"正在思考"消息
-        thinking_message = await update.message.reply_text("🤔 正在思考中...")
+        thinking_message = await message.reply_text("🤔 正在思考中...")
 
         # 添加用户消息到上下文
         ConversationManager.add_message(user_id, "user", message_text)
@@ -2007,6 +2027,13 @@ async def handle_private_photo(update: Update,
                                context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理私聊中的图片消息"""
     user_id = update.effective_user.id
+
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
+    # 如果是编辑的消息，不处理
+    if update.edited_message:
+        return
 
     # 检查权限 - 仅超级管理员和白名单用户可用
     if not AIManager.is_user_authorized(user_id, context):

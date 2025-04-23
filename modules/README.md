@@ -272,8 +272,11 @@ async def setup(interface):
     )
 
 async def hello_command(update, context):
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     user = update.effective_user
-    await update.message.reply_text(f"你好，{user.first_name}！")
+    await message.reply_text(f"你好，{user.first_name}！")
 ```
 
 ### 权限控制
@@ -307,8 +310,11 @@ async def setup(interface):
     await interface.register_handler(handler)
 
 async def handle_message(update, context):
-    text = update.message.text
-    await update.message.reply_text(f"你发送了: {text}")
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
+    text = message.text
+    await message.reply_text(f"你发送了: {text}")
 ```
 
 ### 模块间通信
@@ -362,15 +368,21 @@ async def count_command(update, context):
 
 ```python
 async def start_survey(update, context):
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 获取会话管理器
     session_manager = context.bot_data["session_manager"]
     user_id = update.effective_user.id
 
     # 设置会话状态
     await session_manager.set(user_id, "waiting_for_name", True)
-    await update.message.reply_text("请输入您的名字:")
+    await message.reply_text("请输入您的名字:")
 
 async def handle_message(update, context):
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     session_manager = context.bot_data["session_manager"]
     user_id = update.effective_user.id
 
@@ -378,10 +390,10 @@ async def handle_message(update, context):
     waiting_for_name = await session_manager.get(user_id, "waiting_for_name", False)
 
     if waiting_for_name:
-        name = update.message.text
+        name = message.text
         await session_manager.set(user_id, "name", name)
         await session_manager.delete(user_id, "waiting_for_name")
-        await update.message.reply_text(f"谢谢，{name}！")
+        await message.reply_text(f"谢谢，{name}！")
 ```
 
 ### 发送文件和图片
@@ -391,23 +403,26 @@ from telegram import InputFile
 import os
 
 async def send_image_command(update, context):
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     # 从本地文件发送图片
     with open("path/to/image.jpg", "rb") as file:
-        await update.message.reply_photo(
+        await message.reply_photo(
             photo=file,
             caption="这是一张图片"
         )
 
     # 使用文件 ID 发送图片（图片已上传到 Telegram）
     file_id = "已知的文件 ID"
-    await update.message.reply_photo(
+    await message.reply_photo(
         photo=file_id,
         caption="这是另一张图片"
     )
 
     # 发送文档文件
     with open("path/to/document.pdf", "rb") as file:
-        await update.message.reply_document(
+        await message.reply_document(
             document=file,
             caption="这是一个文档"
         )
@@ -505,6 +520,9 @@ async def cleanup(interface):
 
 async def count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /count 命令"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     user_id = str(update.effective_user.id)
     user_name = TextFormatter.escape_markdown(update.effective_user.first_name)
 
@@ -514,20 +532,23 @@ async def count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_counters[user_id] = current_count
 
     # 回复用户
-    message = f"*{user_name}* 的计数: `{current_count}`"
+    reply_message = f"*{user_name}* 的计数: `{current_count}`"
 
     try:
-        await update.message.reply_text(message, parse_mode="MARKDOWN")
+        await message.reply_text(reply_message, parse_mode="MARKDOWN")
     except Exception:
         # 降级到纯文本
         plain_message = f"{update.effective_user.first_name} 的计数: {current_count}"
-        await update.message.reply_text(plain_message)
+        await message.reply_text(plain_message)
 
     # 保存状态
     interface.save_state({"counters": user_counters})
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /reset 命令"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
     user_id = str(update.effective_user.id)
 
     # 重置计数
@@ -535,7 +556,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_counters[user_id] = 0
 
     # 回复用户
-    await update.message.reply_text(
+    await message.reply_text(
         f"你的计数已从 {old_count} 重置为 0"
     )
 

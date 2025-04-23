@@ -15,7 +15,7 @@ class PaginationHelper:
                  title="列表",
                  callback_prefix="page"):
         """初始化分页工具
-        
+
         Args:
             items: 要分页的项目列表
             page_size: 每页显示的项目数
@@ -36,10 +36,10 @@ class PaginationHelper:
 
     def get_page_content(self, page_index):
         """获取指定页的内容
-        
+
         Args:
             page_index: 页码（从 0 开始）
-            
+
         Returns:
             tuple: (格式化内容, 键盘标记)
         """
@@ -67,10 +67,10 @@ class PaginationHelper:
 
     def get_navigation_keyboard(self, page_index):
         """获取导航键盘
-        
+
         Args:
             page_index: 当前页码（从 0 开始）
-            
+
         Returns:
             InlineKeyboardMarkup: 键盘标记
         """
@@ -107,12 +107,12 @@ class PaginationHelper:
 
     async def send_page(self, update, context, page_index):
         """发送指定页
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
             page_index: 页码（从 0 开始）
-            
+
         Returns:
             Message: 发送的消息
         """
@@ -133,20 +133,23 @@ class PaginationHelper:
                 await update.callback_query.answer()
                 return update.callback_query.message
         else:
+            # 获取消息对象（可能是新消息或编辑的消息）
+            message = update.message or update.edited_message
+
             try:
-                return await update.message.reply_text(text=content,
-                                                       reply_markup=keyboard,
-                                                       parse_mode="MARKDOWN")
+                return await message.reply_text(text=content,
+                                                reply_markup=keyboard,
+                                                parse_mode="MARKDOWN")
             except Exception as e:
                 # 如果 Markdown 解析失败，尝试纯文本
                 plain_content = TextFormatter.markdown_to_plain(content)
-                return await update.message.reply_text(text=plain_content,
-                                                       reply_markup=keyboard)
+                return await message.reply_text(text=plain_content,
+                                                reply_markup=keyboard)
 
     @staticmethod
     async def handle_callback(update, context):
         """处理分页回调
-        
+
         Args:
             update: 更新对象
             context: 上下文对象
