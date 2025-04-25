@@ -101,9 +101,19 @@ state = interface.load_state(default=None)  # default 参数是可选的
 # 注册消息处理器
 await interface.register_handler(
     handler,  # 处理器对象
-    group=0   # 处理器组，决定优先级
+    group=5   # 处理器组，决定优先级（建议使用其他模块未使用的组）
+)
+
+# 注册带权限验证的回调查询处理器
+await interface.register_callback_handler(
+    callback,          # 回调函数
+    pattern=None,      # 回调数据匹配模式
+    admin_level=False, # 权限级别："super_admin", "group_admin" 或 False
+    group=0            # 处理器组（对于回调查询处理器，通常不需要设置 group）
 )
 ```
+
+> **注意**：对于 `MessageHandler`，建议使用其他模块未使用的组以避免与其他模块的会话处理冲突。对于 `CallbackQueryHandler`，通常不需要设置 `group` 参数，因为回调查询处理器之间很少相互干扰。
 
 ### 5. 聊天类型判断
 
@@ -200,12 +210,12 @@ pagination = PaginationHelper(
 await pagination.send_page(update, context, 0)
 
 # 注册回调处理器（通常在 setup 中）
-from telegram.ext import CallbackQueryHandler
-handler = CallbackQueryHandler(
+# 使用带权限验证的回调处理器注册方法
+await interface.register_callback_handler(
     handle_pagination_callback,
-    pattern=r"^items_page:\d+$"
+    pattern=r"^items_page:\d+$",
+    admin_level=False  # 所有用户都可以使用
 )
-await interface.register_handler(handler)
 
 # 回调处理函数
 async def handle_pagination_callback(update, context):
@@ -297,7 +307,23 @@ await interface.register_command(
     admin_level="super_admin",
     description="超级管理员命令"
 )
+
+# 只允许群组管理员使用的按钮
+await interface.register_callback_handler(
+    handle_admin_callback,
+    pattern=f"^{CALLBACK_PREFIX}",
+    admin_level="group_admin"
+)
+
+# 只允许超级管理员使用的按钮
+await interface.register_callback_handler(
+    handle_super_callback,
+    pattern=f"^{CALLBACK_PREFIX}super_",
+    admin_level="super_admin"
+)
 ```
+
+> **注意**：使用 `register_callback_handler` 注册的回调处理器会自动进行权限验证，无需在回调函数中手动检查权限。
 
 ### 处理消息
 
@@ -375,7 +401,8 @@ async def start_survey(update, context):
     session_manager = context.bot_data["session_manager"]
     user_id = update.effective_user.id
 
-    # 设置会话状态
+    # 设置会话状态（会话与用户 ID 绑定）
+    await session_manager.set(user_id, "module_active", True)  # 标记模块会话为活跃
     await session_manager.set(user_id, "waiting_for_name", True)
     await message.reply_text("请输入您的名字:")
 
@@ -386,6 +413,11 @@ async def handle_message(update, context):
     session_manager = context.bot_data["session_manager"]
     user_id = update.effective_user.id
 
+    # 首先检查是否是本模块的活跃会话
+    is_active = await session_manager.get(user_id, "module_active", False)
+    if not is_active:
+        return  # 不是本模块的会话，不处理
+
     # 检查会话状态
     waiting_for_name = await session_manager.get(user_id, "waiting_for_name", False)
 
@@ -393,8 +425,11 @@ async def handle_message(update, context):
         name = message.text
         await session_manager.set(user_id, "name", name)
         await session_manager.delete(user_id, "waiting_for_name")
+        await session_manager.delete(user_id, "module_active")  # 会话结束，清除活跃标记
         await message.reply_text(f"谢谢，{name}！")
 ```
+
+> **注意**：会话是与用户 ID 绑定的，而不是与聊天 ID 绑定。这意味着只有启动会话的用户的输入才会被处理。在处理消息时，应该首先检查是否是本模块的活跃会话，避免干扰其他模块的会话处理。
 
 ### 发送文件和图片
 
@@ -473,93 +508,9 @@ async def send_image_command(update, context):
 
 ## 六、示例模块
 
-以下是一个完整的示例模块：
+项目中的 `modules/echo.py` 是一个很好的示例模块，它展示了：
 
-```python
-# modules/counter.py - 计数器模块
-
-MODULE_NAME = "counter"
-MODULE_VERSION = "1.0.0"
-MODULE_DESCRIPTION = "为每个用户跟踪计数，支持增加和重置"
-MODULE_COMMANDS = ["count", "reset"]
-MODULE_CHAT_TYPES = ["global", "private", "group"]  # 支持所有聊天类型
-
-from telegram import Update
-from telegram.ext import ContextTypes
-from utils.formatter import TextFormatter
-
-# 用户计数器
-user_counters = {}
-
-async def setup(interface):
-    """模块初始化"""
-    global user_counters
-
-    interface.logger.info("计数器模块已加载")
-
-    # 加载保存的状态
-    state = interface.load_state(default={"counters": {}})
-    user_counters = state.get("counters", {})
-
-    # 注册命令
-    await interface.register_command(
-        "count",
-        count_command,
-        description="增加你的计数"
-    )
-
-    await interface.register_command(
-        "reset",
-        reset_command,
-        description="重置你的计数"
-    )
-
-async def cleanup(interface):
-    """模块清理"""
-    interface.logger.info("计数器模块已卸载")
-
-async def count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /count 命令"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
-
-    user_id = str(update.effective_user.id)
-    user_name = TextFormatter.escape_markdown(update.effective_user.first_name)
-
-    # 获取并增加计数
-    current_count = user_counters.get(user_id, 0)
-    current_count += 1
-    user_counters[user_id] = current_count
-
-    # 回复用户
-    reply_message = f"*{user_name}* 的计数: `{current_count}`"
-
-    try:
-        await message.reply_text(reply_message, parse_mode="MARKDOWN")
-    except Exception:
-        # 降级到纯文本
-        plain_message = f"{update.effective_user.first_name} 的计数: {current_count}"
-        await message.reply_text(plain_message)
-
-    # 保存状态
-    interface.save_state({"counters": user_counters})
-
-async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /reset 命令"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
-
-    user_id = str(update.effective_user.id)
-
-    # 重置计数
-    old_count = user_counters.get(user_id, 0)
-    user_counters[user_id] = 0
-
-    # 回复用户
-    await message.reply_text(
-        f"你的计数已从 {old_count} 重置为 0"
-    )
-
-    # 保存状态
-    interface.save_state({"counters": user_counters})
-```
+1. 命令处理
+2. 会话管理
+3. 按钮处理
+4. 权限验证

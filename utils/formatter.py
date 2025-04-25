@@ -147,6 +147,7 @@ class TextFormatter:
 
         return parts
 
+    @staticmethod
     def strip_html(text):
         """移除 HTML 标签"""
         if not text:

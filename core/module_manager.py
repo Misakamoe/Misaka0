@@ -33,13 +33,13 @@ class ModuleInterface:
                                admin_level=False,
                                description=""):
         """注册命令
-        
+
         Args:
             command_name: 命令名称
             callback: 命令回调函数
             admin_level: 权限级别 (False, "group_admin", "super_admin")
             description: 命令描述
-            
+
         Returns:
             bool: 是否成功注册
         """
@@ -53,11 +53,11 @@ class ModuleInterface:
 
     async def register_handler(self, handler, group=0):
         """注册消息处理器
-        
+
         Args:
             handler: 处理器对象
             group: 处理器组
-            
+
         Returns:
             bool: 是否成功注册
         """
@@ -98,13 +98,35 @@ class ModuleInterface:
         self.handlers.append((handler, group))
         return True
 
+    async def register_callback_handler(self,
+                                        callback,
+                                        pattern=None,
+                                        admin_level=False,
+                                        group=0):
+        """注册带权限验证的回调查询处理器
+
+        Args:
+            callback: 回调函数
+            pattern: 回调数据匹配模式
+            admin_level: 权限级别 (False, "group_admin", "super_admin")
+            group: 处理器组
+
+        Returns:
+            bool: 是否成功注册
+        """
+        # 使用命令管理器注册回调处理器
+        success = await self.command_manager.register_callback_handler(
+            self.module_name, callback, pattern, admin_level, group)
+
+        return success
+
     async def subscribe_event(self, event_type, callback):
         """订阅事件
-        
+
         Args:
             event_type: 事件类型
             callback: 事件回调函数
-            
+
         Returns:
             bool: 是否成功订阅
         """
@@ -148,10 +170,10 @@ class ModuleInterface:
 
     def get_chat_type(self, update):
         """获取更新的聊天类型
-        
+
         Args:
             update: Telegram更新对象
-            
+
         Returns:
             str: 聊天类型 ("private", "group" 或 "global")
         """
@@ -166,11 +188,11 @@ class ModuleInterface:
 
     async def publish_event(self, event_type, **event_data):
         """发布事件
-        
+
         Args:
             event_type: 事件类型
             **event_data: 事件数据
-            
+
         Returns:
             int: 收到事件的订阅者数量
         """
@@ -180,10 +202,10 @@ class ModuleInterface:
 
     def save_state(self, state):
         """保存模块状态
-        
+
         Args:
             state: 要保存的状态（必须可序列化）
-            
+
         Returns:
             bool: 是否成功保存
         """
@@ -191,10 +213,10 @@ class ModuleInterface:
 
     def load_state(self, default=None):
         """加载模块状态
-        
+
         Args:
             default: 默认状态（如果没有保存的状态）
-            
+
         Returns:
             Any: 加载的状态或默认值
         """
@@ -282,10 +304,10 @@ class ModuleManager:
 
     async def load_module(self, module_name):
         """加载模块
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             bool: 是否成功加载
         """
@@ -352,10 +374,10 @@ class ModuleManager:
 
     async def unload_module(self, module_name):
         """卸载模块
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             bool: 是否成功卸载
         """
@@ -377,10 +399,10 @@ class ModuleManager:
 
     async def _unload_module(self, module_name):
         """卸载模块
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             bool: 是否成功卸载
         """
@@ -435,10 +457,10 @@ class ModuleManager:
 
     def get_module_info(self, module_name):
         """获取模块信息
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             dict: 模块信息或 None
         """
@@ -446,10 +468,10 @@ class ModuleManager:
 
     def is_module_loaded(self, module_name):
         """检查模块是否已加载
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             bool: 模块是否已加载
         """
@@ -457,7 +479,7 @@ class ModuleManager:
 
     def get_loaded_modules(self):
         """获取所有已加载模块的信息
-        
+
         Returns:
             dict: 模块名称 -> 模块信息
         """
@@ -465,7 +487,7 @@ class ModuleManager:
 
     def discover_modules(self):
         """发现可用模块
-        
+
         Returns:
             list: 可用模块列表
         """
@@ -495,10 +517,10 @@ class ModuleManager:
 
     def _get_module_lock(self, module_name):
         """获取模块的锁
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             asyncio.Lock: 模块锁
         """
@@ -508,10 +530,10 @@ class ModuleManager:
 
     async def _import_module(self, module_name):
         """导入模块
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             module: 导入的模块或 None
         """
@@ -531,10 +553,10 @@ class ModuleManager:
 
     async def _get_module_metadata(self, module_name):
         """获取模块元数据
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             dict: 模块元数据或 None
         """

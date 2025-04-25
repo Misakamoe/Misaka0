@@ -7,9 +7,10 @@ import asyncio
 import aiohttp
 import base64
 import telegram
+import re
 from typing import Dict, List, Optional, Any, Tuple, Callable, Union
 from utils.formatter import TextFormatter
-from telegram import Update, File
+from telegram import Update, File, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
@@ -18,6 +19,9 @@ MODULE_VERSION = "3.1.0"
 MODULE_DESCRIPTION = "支持多种 AI 的聊天助手"
 MODULE_COMMANDS = ["ai", "aiconfig", "aiclear", "aiwhitelist"]
 MODULE_CHAT_TYPES = ["private", "group"]  # 支持私聊和群组
+
+# 按钮回调前缀
+CALLBACK_PREFIX = "ai_cfg"
 
 # 模块接口引用
 _interface = None
@@ -1182,105 +1186,1432 @@ class AIManager:
             return None
 
 
+# 配置菜单和回调处理
+
+
+async def show_config_main_menu(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示 AI 配置主菜单"""
+    # 构建菜单文本
+    menu_text = "<b>🤖 AI 配置面板</b>\n\n"
+    menu_text += "请选择要配置的选项："
+
+    # 构建按钮 (水平排列)
+    keyboard = [
+        [
+            InlineKeyboardButton("View Config",
+                                 callback_data=f"{CALLBACK_PREFIX}_view"),
+            InlineKeyboardButton("View Stats",
+                                 callback_data=f"{CALLBACK_PREFIX}_stats")
+        ],
+        [
+            InlineKeyboardButton("Add Provider",
+                                 callback_data=f"{CALLBACK_PREFIX}_add"),
+            InlineKeyboardButton("Edit Provider",
+                                 callback_data=f"{CALLBACK_PREFIX}_edit")
+        ],
+        [
+            InlineKeyboardButton("Delete Provider",
+                                 callback_data=f"{CALLBACK_PREFIX}_delete"),
+            InlineKeyboardButton("Set Default",
+                                 callback_data=f"{CALLBACK_PREFIX}_default")
+        ],
+        [
+            InlineKeyboardButton("Set Timeout",
+                                 callback_data=f"{CALLBACK_PREFIX}_timeout"),
+            InlineKeyboardButton("Manage Whitelist",
+                                 callback_data=f"{CALLBACK_PREFIX}_whitelist")
+        ]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 检查是否是回调查询
+    if update.callback_query:
+        # 如果是回调查询，使用 edit_message_text
+        await update.callback_query.edit_message_text(
+            menu_text, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        # 如果是直接命令，使用 reply_text
+        message = update.message or update.edited_message
+        if message:
+            await message.reply_text(menu_text,
+                                     reply_markup=reply_markup,
+                                     parse_mode="HTML")
+        else:
+            _interface.logger.error("无法获取消息对象，无法显示配置菜单")
+
+
+async def show_provider_templates(update: Update,
+                                  context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示服务商模板选择界面"""
+    query = update.callback_query
+
+    # 构建模板选择文本
+    templates_text = "<b>🤖 选择服务商模板</b>\n\n"
+    templates_text += "请选择要创建的服务商类型："
+
+    # 构建模板按钮
+    keyboard = []
+    for template_id, template in PROVIDER_TEMPLATES.items():
+        if template_id != "custom":  # 将自定义模板放在最后
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{template['name']}",
+                    callback_data=f"{CALLBACK_PREFIX}_template_{template_id}")
+            ])
+
+    # 添加自定义模板和返回按钮
+    keyboard.append([
+        InlineKeyboardButton(
+            "Custom", callback_data=f"{CALLBACK_PREFIX}_template_custom")
+    ])
+    keyboard.append([
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 发送模板选择界面
+    try:
+        await query.edit_message_text(templates_text,
+                                      reply_markup=reply_markup,
+                                      parse_mode="HTML")
+    except telegram.error.BadRequest as e:
+        # 忽略"消息未修改"错误
+        if "Message is not modified" not in str(e):
+            _interface.logger.error(f"更新模板选择界面失败: {str(e)}")
+            await query.answer("更新消息失败，请重试")
+
+
+async def show_provider_list(update: Update,
+                             context: ContextTypes.DEFAULT_TYPE,
+                             action_type: str) -> None:
+    """显示服务商列表选择界面
+
+    Args:
+        update: 更新对象
+        context: 上下文对象
+        action_type: 操作类型 (edit, delete, default)
+    """
+    global _state
+    query = update.callback_query
+
+    # 构建标题和说明
+    if action_type == "edit":
+        title = "✏️ 编辑服务商"
+        description = "请选择要编辑的服务商："
+    elif action_type == "delete":
+        title = "🗑️ 删除服务商"
+        description = "请选择要删除的服务商："
+    elif action_type == "default":
+        title = "✅ 设置默认服务商"
+        description = "请选择要设置为默认的服务商："
+    else:
+        title = "选择服务商"
+        description = "请选择一个服务商："
+
+    # 构建列表文本
+    list_text = f"<b>{title}</b>\n\n{description}"
+
+    # 构建服务商按钮
+    keyboard = []
+
+    if not _state["providers"]:
+        list_text += "\n\n<i>暂无服务商配置</i>"
+    else:
+        for provider_id, provider in _state["providers"].items():
+            # 标记默认服务商和配置状态
+            is_default = "✅ " if provider_id == _state[
+                "default_provider"] else ""
+            is_configured = "🔑 " if provider.get("api_key") else "⚠️ "
+
+            # 按钮文本
+            button_text = f"{is_default}{is_configured}{provider_id} ({provider.get('name', provider_id)})"
+
+            # 按钮回调数据
+            callback_data = f"{CALLBACK_PREFIX}_{action_type}_{provider_id}"
+
+            keyboard.append([
+                InlineKeyboardButton(button_text, callback_data=callback_data)
+            ])
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 发送服务商列表
+    try:
+        await query.edit_message_text(list_text,
+                                      reply_markup=reply_markup,
+                                      parse_mode="HTML")
+    except telegram.error.BadRequest as e:
+        # 忽略"消息未修改"错误
+        if "Message is not modified" not in str(e):
+            _interface.logger.error(f"更新服务商列表失败: {str(e)}")
+            await query.answer("更新消息失败，请重试")
+
+
+async def show_timeout_options(update: Update,
+                               context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示超时时间选项"""
+    global _state
+    query = update.callback_query
+
+    # 当前超时时间
+    current_timeout = _state.get("conversation_timeout", 24 * 60 * 60) // 3600
+
+    # 构建超时选项文本
+    timeout_text = "<b>⏱️ 设置对话超时时间</b>\n\n"
+    timeout_text += f"当前超时时间: <code>{current_timeout}</code> 小时\n\n"
+    timeout_text += "请选择新的超时时间："
+
+    # 构建超时选项按钮 (水平排列)
+    keyboard = []
+    row = []
+    for i, hours in enumerate([1, 3, 6, 12, 24, 48, 72]):
+        # 标记当前选项
+        marker = "[*] " if hours == current_timeout else ""
+        row.append(
+            InlineKeyboardButton(
+                f"{marker}{hours} hours",
+                callback_data=f"{CALLBACK_PREFIX}_set_timeout_{hours}"))
+
+        # 每两个按钮一行
+        if i % 2 == 1 or i == 6:  # 最后一个按钮可能是单独一行
+            keyboard.append(row)
+            row = []
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 发送超时选项
+    try:
+        await query.edit_message_text(timeout_text,
+                                      reply_markup=reply_markup,
+                                      parse_mode="HTML")
+    except telegram.error.BadRequest as e:
+        # 忽略"消息未修改"错误
+        if "Message is not modified" not in str(e):
+            _interface.logger.error(f"更新超时选项失败: {str(e)}")
+            await query.answer("更新消息失败，请重试")
+
+
+async def show_usage_stats(update: Update,
+                           context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示使用统计数据"""
+    global _state
+    query = update.callback_query
+
+    stats = _state["usage_stats"]
+
+    stats_text = "<b>📊 AI 使用统计</b>\n\n"
+
+    # 总请求数
+    stats_text += f"<b>总请求数:</b> <code>{stats.get('total_requests', 0)}</code>\n\n"
+
+    # 按服务商统计
+    stats_text += "<b>按服务商统计:</b>\n"
+    if not stats.get('requests_by_provider'):
+        stats_text += "<i>暂无数据</i>\n"
+    else:
+        for provider, count in stats.get('requests_by_provider', {}).items():
+            provider_name = _state["providers"].get(provider, {}).get(
+                "name",
+                provider) if provider in _state["providers"] else provider
+            stats_text += f"• <code>{provider}</code> ({provider_name}): <code>{count}</code>\n"
+
+    # 按用户统计 (仅显示前 10 位活跃用户)
+    stats_text += "\n<b>按用户统计 (前 10 位):</b>\n"
+    if not stats.get('requests_by_user'):
+        stats_text += "<i>暂无数据</i>\n"
+    else:
+        # 按使用量排序
+        sorted_users = sorted(stats.get('requests_by_user', {}).items(),
+                              key=lambda x: x[1],
+                              reverse=True)[:10]
+
+        for user_id, count in sorted_users:
+            stats_text += f"• 用户 <code>{user_id}</code>: <code>{count}</code> 次请求\n"
+
+    # 添加返回按钮
+    keyboard = [[
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 发送统计数据
+    try:
+        await query.edit_message_text(stats_text,
+                                      reply_markup=reply_markup,
+                                      parse_mode="HTML")
+    except Exception as e:
+        _interface.logger.error(f"发送 AI 统计信息失败: {e}")
+        await query.edit_message_text("发送统计信息失败，请联系管理员查看日志",
+                                      reply_markup=reply_markup)
+
+
+async def show_whitelist_menu(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示白名单管理菜单"""
+    global _state
+
+    whitelist_text = "<b>👥 AI 白名单管理</b>\n\n"
+
+    # 显示当前白名单
+    if not _state["whitelist"]:
+        whitelist_text += "<i>白名单为空</i>\n\n"
+    else:
+        whitelist_text += "<b>当前白名单用户:</b>\n"
+        for i, user_id in enumerate(_state["whitelist"], 1):
+            whitelist_text += f"{i}. <code>{user_id}</code>\n"
+        whitelist_text += "\n"
+
+    whitelist_text += "请选择操作："
+
+    # 构建白名单管理按钮 (水平排列)
+    keyboard = [[
+        InlineKeyboardButton("Add User",
+                             callback_data=f"{CALLBACK_PREFIX}_whitelist_add"),
+        InlineKeyboardButton(
+            "Remove User", callback_data=f"{CALLBACK_PREFIX}_whitelist_remove")
+    ],
+                [
+                    InlineKeyboardButton(
+                        "Clear All",
+                        callback_data=f"{CALLBACK_PREFIX}_whitelist_clear"),
+                    InlineKeyboardButton(
+                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
+                ]]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 检查是否是回调查询
+    if update.callback_query:
+        # 如果是回调查询，使用 edit_message_text
+        query = update.callback_query
+        try:
+            await query.edit_message_text(whitelist_text,
+                                          reply_markup=reply_markup,
+                                          parse_mode="HTML")
+        except telegram.error.BadRequest as e:
+            # 忽略"消息未修改"错误
+            if "Message is not modified" not in str(e):
+                _interface.logger.error(f"更新白名单管理菜单失败: {str(e)}")
+                await query.answer("更新消息失败，请重试")
+    else:
+        # 如果是直接命令或文本输入，使用 reply_text
+        message = update.message or update.edited_message
+        if message:
+            await message.reply_text(whitelist_text,
+                                     reply_markup=reply_markup,
+                                     parse_mode="HTML")
+        else:
+            _interface.logger.error("无法获取消息对象，无法显示白名单管理菜单")
+
+
+async def handle_specific_actions(update: Update,
+                                  context: ContextTypes.DEFAULT_TYPE,
+                                  action: str, callback_data: str) -> None:
+    """处理特定的按钮操作"""
+    global _state
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await query.answer("系统错误：无法获取会话管理器")
+        return
+
+    # 解析回调数据
+    parts = callback_data.replace(f"{CALLBACK_PREFIX}_", "").split("_")
+
+    # 添加调试日志
+    _interface.logger.info(
+        f"处理特定操作: {callback_data}, 动作: {action}, 部分: {parts}")
+
+    # 处理模板选择
+    if action == "template" and len(parts) >= 2:
+        template_id = parts[1]
+
+        # 验证模板是否存在
+        if template_id not in PROVIDER_TEMPLATES and template_id != "custom":
+            _interface.logger.warning(
+                f"用户 {user_id} 尝试使用不存在的模板: {template_id}")
+            await show_provider_templates(update, context)
+            return
+
+        # 设置会话状态，记录选择的模板
+        await session_manager.set(user_id, "selected_template", template_id)
+
+        # 提示输入新服务商 ID
+        await query.edit_message_text(
+            f"<b>🤖 创建新服务商</b>\n\n"
+            f"已选择模板: <code>{template_id}</code>\n\n"
+            f"请输入新服务商的 ID (仅使用字母、数字和下划线):",
+            parse_mode="HTML")
+
+        # 设置会话状态，等待用户输入服务商 ID
+        await session_manager.set(user_id, "waiting_for", "provider_id")
+
+    # 处理设置超时时间
+    elif action == "set" and "timeout" in parts:
+        hours = int(parts[-1])
+
+        # 更新超时时间
+        _state["conversation_timeout"] = hours * 3600
+
+        # 保存配置
+        save_config()
+
+        await query.answer(f"已将对话超时时间设置为 {hours} 小时")
+        _interface.logger.info(f"用户 {user_id} 将对话超时时间设置为 {hours} 小时")
+
+        # 返回超时设置菜单
+        await show_timeout_options(update, context)
+
+    # 处理服务商操作
+    elif action in ["edit", "delete", "default"] and len(parts) >= 2:
+        # 添加调试日志
+        _interface.logger.debug(f"处理服务商操作: action={action}, parts={parts}")
+
+        # 检查回调数据格式
+        if parts[1] == "provider" and len(parts) >= 3:
+            # 格式: action_provider_id
+            provider_id = parts[2]
+        elif len(parts) >= 2:
+            # 格式: action_id
+            provider_id = parts[1]
+        else:
+            _interface.logger.warning(
+                f"用户 {user_id} 发送了格式错误的回调数据: {callback_data}")
+            await show_config_main_menu(update, context)
+            return
+
+        # 验证服务商是否存在
+        if provider_id not in _state["providers"]:
+            _interface.logger.warning(
+                f"用户 {user_id} 尝试操作不存在的服务商: {provider_id}")
+            await show_config_main_menu(update, context)
+            return
+
+        if action == "edit":
+            # 编辑服务商
+            _interface.logger.debug(f"编辑服务商: {provider_id}")
+            await session_manager.set(user_id, "editing_provider", provider_id)
+            await show_provider_edit_menu(update, context, provider_id)
+
+        elif action == "delete":
+            # 删除服务商
+            # 显示确认对话框
+            _interface.logger.debug(f"删除服务商: {provider_id}")
+            await show_delete_confirmation(update, context, provider_id)
+
+        elif action == "default":
+            # 设置默认服务商
+            _interface.logger.debug(f"设置默认服务商: {provider_id}")
+            _state["default_provider"] = provider_id
+
+            # 保存配置
+            save_config()
+
+            _interface.logger.info(f"用户 {user_id} 将默认服务商设置为 {provider_id}")
+
+            # 返回主菜单
+            await show_config_main_menu(update, context)
+
+    # 处理白名单操作
+    elif action == "whitelist":
+        whitelist_action = parts[-1]
+
+        if whitelist_action == "add":
+            # 提示输入用户 ID
+            await query.edit_message_text(
+                "<b>👥 添加用户到白名单</b>\n\n"
+                "请输入要添加的用户 ID (数字):",
+                parse_mode="HTML")
+
+            # 设置会话状态，等待用户输入用户 ID
+            await session_manager.set(user_id, "waiting_for",
+                                      "whitelist_add_user_id")
+
+        elif whitelist_action == "remove":
+            # 显示可移除的用户列表
+            await show_whitelist_remove_menu(update, context)
+
+        elif whitelist_action == "clear":
+            # 显示确认对话框 (水平排列)
+            keyboard = [[
+                InlineKeyboardButton(
+                    "◯ Confirm",
+                    callback_data=f"{CALLBACK_PREFIX}_whitelist_clear_confirm"
+                ),
+                InlineKeyboardButton(
+                    "⨉ Cancel", callback_data=f"{CALLBACK_PREFIX}_whitelist")
+            ]]
+
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            try:
+                await query.edit_message_text(
+                    "<b>⚠️ 确认清空白名单</b>\n\n"
+                    "您确定要清空整个白名单吗？此操作不可撤销",
+                    reply_markup=reply_markup,
+                    parse_mode="HTML")
+            except telegram.error.BadRequest as e:
+                # 忽略"消息未修改"错误
+                if "Message is not modified" not in str(e):
+                    _interface.logger.error(f"更新白名单清空确认对话框失败: {str(e)}")
+                    await query.answer("更新消息失败，请重试")
+
+        elif whitelist_action == "clear_confirm":
+            # 清空白名单
+            _state["whitelist"] = []
+
+            # 保存配置
+            save_config()
+
+            await query.answer("已清空白名单")
+            _interface.logger.info(f"用户 {user_id} 清空了 AI 白名单")
+
+            # 返回白名单管理菜单
+            await show_whitelist_menu(update, context)
+
+    # 处理编辑参数操作
+    elif action == "edit_param" and len(parts) >= 3:
+        # 获取参数
+        provider_id = parts[1]
+        param = parts[2]
+
+        # 添加调试日志
+        _interface.logger.debug(
+            f"编辑参数: provider_id={provider_id}, param={param}, parts={parts}")
+
+        # 验证服务商是否存在
+        if provider_id not in _state["providers"]:
+            _interface.logger.warning(
+                f"用户 {user_id} 尝试编辑不存在的服务商: {provider_id}")
+            await show_config_main_menu(update, context)
+            return
+
+        # 提示用户输入新值
+        current_value = _state["providers"][provider_id].get(param, "")
+
+        # 构建提示文本
+        prompt_text = f"<b>✏️ 编辑参数</b>\n\n"
+        prompt_text += f"服务商: <code>{provider_id}</code>\n"
+        prompt_text += f"参数: <code>{param}</code>\n"
+        prompt_text += f"当前值: <code>{current_value}</code>\n\n"
+
+        if param == "temperature":
+            prompt_text += "请输入新的温度值 (0.0-1.0):"
+        elif param == "supports_image":
+            prompt_text += "请输入是否支持图像 (yes/no):"
+        else:
+            prompt_text += "请输入新的值:"
+
+        # 发送提示
+        await query.edit_message_text(prompt_text, parse_mode="HTML")
+
+        # 设置会话状态，等待用户输入
+        await session_manager.set(user_id, "waiting_for",
+                                  f"edit_param_{provider_id}_{param}")
+
+    # 处理删除确认操作
+    elif action == "delete_confirm":
+        # 添加调试日志
+        _interface.logger.info(f"处理删除确认操作: parts={parts}")
+
+        # 确保回调数据格式正确
+        if len(parts) >= 3:
+            # 格式: delete_confirm_provider_id
+            provider_id = parts[2]
+
+            # 验证服务商是否存在
+            if provider_id not in _state["providers"]:
+                _interface.logger.warning(
+                    f"用户 {user_id} 尝试删除不存在的服务商: {provider_id}")
+                await show_config_main_menu(update, context)
+                return
+
+            # 删除服务商
+            del _state["providers"][provider_id]
+
+            # 如果删除的是默认服务商，重置默认服务商
+            if _state["default_provider"] == provider_id:
+                if _state["providers"]:
+                    # 设置第一个服务商为默认
+                    _state["default_provider"] = next(iter(
+                        _state["providers"]))
+                else:
+                    _state["default_provider"] = None
+
+            # 保存配置
+            save_config()
+
+            _interface.logger.info(f"用户 {user_id} 删除了服务商: {provider_id}")
+
+            # 返回主菜单
+            await show_config_main_menu(update, context)
+        else:
+            _interface.logger.warning(
+                f"用户 {user_id} 发送了格式错误的删除确认回调数据: {callback_data}")
+            await show_config_main_menu(update, context)
+
+    # 处理白名单用户移除操作
+    elif action == "whitelist_remove_user":
+        # 检查回调数据格式
+        if len(parts) >= 2:
+            # 尝试从最后一个部分获取用户 ID
+            try:
+                user_id_to_remove = int(parts[-1])
+
+                # 验证用户是否在白名单中
+                if user_id_to_remove not in _state["whitelist"]:
+                    _interface.logger.warning(
+                        f"用户 {user_id} 尝试移除不在白名单中的用户: {user_id_to_remove}")
+                    await show_whitelist_menu(update, context)
+                    return
+
+                # 从白名单中移除
+                _state["whitelist"].remove(user_id_to_remove)
+
+                # 保存配置
+                save_config()
+
+                _interface.logger.info(
+                    f"用户 {user_id} 将用户 {user_id_to_remove} 从白名单中移除")
+
+                # 返回白名单菜单
+                try:
+                    await query.edit_message_text(
+                        f"<b>✅ 已将用户 {user_id_to_remove} 从白名单中移除</b>",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                "⇠ Back",
+                                callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                        ]]),
+                        parse_mode="HTML")
+                except telegram.error.BadRequest as e:
+                    # 忽略"消息未修改"错误
+                    if "Message is not modified" not in str(e):
+                        _interface.logger.error(f"更新白名单用户移除消息失败: {str(e)}")
+                        # 尝试发送新消息
+                        try:
+                            message = update.message or update.edited_message
+                            if message:
+                                await message.reply_text(
+                                    f"<b>✅ 已将用户 {user_id_to_remove} 从白名单中移除</b>",
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton(
+                                            "⇠ Back",
+                                            callback_data=
+                                            f"{CALLBACK_PREFIX}_whitelist")
+                                    ]]),
+                                    parse_mode="HTML")
+                        except Exception as e2:
+                            _interface.logger.error(
+                                f"发送白名单用户移除消息失败: {str(e2)}")
+            except ValueError:
+                _interface.logger.warning(
+                    f"用户 {user_id} 发送了无效的用户 ID: {parts[-1]}")
+                await show_whitelist_menu(update, context)
+        else:
+            _interface.logger.warning(
+                f"用户 {user_id} 发送了格式错误的移除用户回调数据: {callback_data}")
+            await show_whitelist_menu(update, context)
+
+    # 处理测试服务商操作
+    elif action == "test_provider":
+        provider_id = parts[-1]
+
+        # 验证服务商是否存在
+        if provider_id not in _state["providers"]:
+            await show_provider_edit_menu(update, context, provider_id)
+            return
+
+        # 检查服务商是否配置完整
+        provider = _state["providers"][provider_id]
+        if not provider.get("api_key"):
+            await show_provider_edit_menu(update, context, provider_id)
+            return
+
+        # 发送测试消息
+        await query.edit_message_text(
+            f"<b>🧪 测试服务商: {provider_id}</b>\n\n"
+            f"正在发送测试请求...",
+            parse_mode="HTML")
+
+        # 准备测试消息
+        test_messages = [{
+            "role":
+            "user",
+            "content":
+            "Hello, this is a test message. Please respond with a short greeting."
+        }]
+
+        try:
+            # 调用 API
+            response = await AIManager.call_ai_api(provider_id, test_messages,
+                                                   [], False, None)
+
+            # 显示结果
+            result_text = f"<b>🧪 测试结果: {provider_id}</b>\n\n"
+            result_text += f"<b>状态:</b> ✅ 成功\n\n"
+            result_text += f"<b>响应:</b>\n<code>{response[:200]}</code>"
+
+            # 添加返回按钮
+            keyboard = [[
+                InlineKeyboardButton("⇠ Back",
+                                     callback_data=f"{CALLBACK_PREFIX}_back")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(result_text,
+                                          reply_markup=reply_markup,
+                                          parse_mode="HTML")
+
+        except Exception as e:
+            # 显示错误
+            error_text = f"<b>🧪 测试结果: {provider_id}</b>\n\n"
+            error_text += f"<b>状态:</b> ❌ 失败\n\n"
+            error_text += f"<b>错误:</b>\n<code>{str(e)[:200]}</code>"
+
+            # 添加返回按钮
+            keyboard = [[
+                InlineKeyboardButton("⇠ Back",
+                                     callback_data=f"{CALLBACK_PREFIX}_back")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(error_text,
+                                          reply_markup=reply_markup,
+                                          parse_mode="HTML")
+
+    # 处理编辑服务商返回操作
+    elif action == "edit_provider":
+        provider_id = parts[-1]
+
+        # 验证服务商是否存在
+        if provider_id not in _state["providers"]:
+            await show_config_main_menu(update, context)
+            return
+
+        # 显示编辑菜单
+        await show_provider_edit_menu(update, context, provider_id)
+
+    # 处理其他未知操作
+    else:
+        _interface.logger.warning(f"用户 {user_id} 尝试执行未实现的操作: {action}")
+
+
+async def show_provider_edit_menu(update: Update,
+                                  context: ContextTypes.DEFAULT_TYPE,
+                                  provider_id: str) -> None:
+    """显示服务商编辑菜单"""
+    global _state
+
+    provider = _state["providers"].get(provider_id, {})
+
+    # 构建编辑菜单文本
+    edit_text = f"<b>✏️ 编辑服务商: {provider_id}</b>\n\n"
+    edit_text += "请选择要编辑的参数："
+
+    # 构建编辑选项按钮 (水平排列)
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "Name",
+                callback_data=f"{CALLBACK_PREFIX}_edit_param_{provider_id}_name"
+            ),
+            InlineKeyboardButton(
+                "Model",
+                callback_data=
+                f"{CALLBACK_PREFIX}_edit_param_{provider_id}_model")
+        ],
+        [
+            InlineKeyboardButton(
+                "API URL",
+                callback_data=
+                f"{CALLBACK_PREFIX}_edit_param_{provider_id}_api_url"),
+            InlineKeyboardButton(
+                "API Key",
+                callback_data=
+                f"{CALLBACK_PREFIX}_edit_param_{provider_id}_api_key")
+        ],
+        [
+            InlineKeyboardButton(
+                "Temperature",
+                callback_data=
+                f"{CALLBACK_PREFIX}_edit_param_{provider_id}_temperature"),
+            InlineKeyboardButton(
+                "Request Format",
+                callback_data=
+                f"{CALLBACK_PREFIX}_edit_param_{provider_id}_request_format")
+        ],
+        [
+            InlineKeyboardButton(
+                "System Prompt",
+                callback_data=
+                f"{CALLBACK_PREFIX}_edit_param_{provider_id}_system_prompt"),
+            InlineKeyboardButton(
+                "Image Support",
+                callback_data=
+                f"{CALLBACK_PREFIX}_edit_param_{provider_id}_supports_image")
+        ],
+        [
+            InlineKeyboardButton(
+                "Test Provider",
+                callback_data=f"{CALLBACK_PREFIX}_test_provider_{provider_id}"
+            ),
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}_back")
+        ]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 检查是否是回调查询
+    if update.callback_query:
+        # 如果是回调查询，使用 edit_message_text
+        query = update.callback_query
+        try:
+            await query.edit_message_text(edit_text,
+                                          reply_markup=reply_markup,
+                                          parse_mode="HTML")
+        except telegram.error.BadRequest as e:
+            # 忽略"消息未修改"错误
+            if "Message is not modified" not in str(e):
+                _interface.logger.error(f"更新编辑菜单失败: {str(e)}")
+                await query.answer("更新消息失败，请重试")
+    else:
+        # 如果是直接命令或文本输入，使用 reply_text
+        message = update.message or update.edited_message
+        if message:
+            await message.reply_text(edit_text,
+                                     reply_markup=reply_markup,
+                                     parse_mode="HTML")
+        else:
+            _interface.logger.error(f"无法获取消息对象，无法显示服务商编辑菜单: {provider_id}")
+
+
+async def show_delete_confirmation(update: Update,
+                                   context: ContextTypes.DEFAULT_TYPE,
+                                   provider_id: str) -> None:
+    """显示删除确认对话框"""
+    query = update.callback_query
+
+    # 构建确认对话框 (水平排列)
+    keyboard = [[
+        InlineKeyboardButton(
+            "◯ Confirm",
+            callback_data=f"{CALLBACK_PREFIX}_delete_confirm_{provider_id}"),
+        InlineKeyboardButton("⨉ Cancel",
+                             callback_data=f"{CALLBACK_PREFIX}_back")
+    ]]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        await query.edit_message_text(
+            f"<b>⚠️ 确认删除</b>\n\n"
+            f"您确定要删除服务商 <code>{provider_id}</code> 吗？此操作不可撤销",
+            reply_markup=reply_markup,
+            parse_mode="HTML")
+    except telegram.error.BadRequest as e:
+        # 忽略"消息未修改"错误
+        if "Message is not modified" not in str(e):
+            _interface.logger.error(f"更新删除确认对话框失败: {str(e)}")
+            await query.answer("更新消息失败，请重试")
+
+
+async def show_whitelist_remove_menu(
+        update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示白名单移除菜单"""
+    global _state
+
+    # 构建移除菜单文本
+    remove_text = "<b>➖ 从白名单中移除用户</b>\n\n"
+
+    if not _state["whitelist"]:
+        remove_text += "<i>白名单为空</i>"
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}_whitelist")
+        ]]
+    else:
+        remove_text += "请选择要移除的用户："
+
+        # 构建用户按钮
+        keyboard = []
+        for user_id in _state["whitelist"]:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"User {user_id}",
+                    callback_data=
+                    f"{CALLBACK_PREFIX}_whitelist_remove_user_{user_id}")
+            ])
+
+        # 添加返回按钮
+        keyboard.append([
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}_whitelist")
+        ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 检查是否是回调查询
+    if update.callback_query:
+        # 如果是回调查询，使用 edit_message_text
+        query = update.callback_query
+        try:
+            await query.edit_message_text(remove_text,
+                                          reply_markup=reply_markup,
+                                          parse_mode="HTML")
+        except telegram.error.BadRequest as e:
+            # 忽略"消息未修改"错误
+            if "Message is not modified" not in str(e):
+                _interface.logger.error(f"更新白名单移除菜单失败: {str(e)}")
+                await query.answer("更新消息失败，请重试")
+    else:
+        # 如果是直接命令或文本输入，使用 reply_text
+        message = update.message or update.edited_message
+        if message:
+            await message.reply_text(remove_text,
+                                     reply_markup=reply_markup,
+                                     parse_mode="HTML")
+        else:
+            _interface.logger.error("无法获取消息对象，无法显示白名单移除菜单")
+
+
+async def handle_config_callback(update: Update,
+                                 context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理配置按钮回调"""
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await query.answer("系统错误：无法获取会话管理器")
+        return
+
+    # 检查是否是活跃的 AI 配置会话
+    is_active = await session_manager.get(user_id, "ai_config_active", False)
+    if not is_active:
+        # 自动重新激活会话状态
+        await session_manager.set(user_id, "ai_config_active", True)
+        _interface.logger.info(f"用户 {user_id} 的 AI 配置会话已自动重新激活")
+
+    # 解析回调数据
+    callback_data = query.data
+    parts = callback_data.replace(f"{CALLBACK_PREFIX}_", "").split("_")
+
+    # 特殊处理各种操作
+    if len(parts) >= 2 and parts[0] == "delete" and parts[1] == "confirm":
+        action = "delete_confirm"
+    elif len(parts) >= 2 and parts[0] == "edit" and parts[1] == "param":
+        action = "edit_param"
+    elif len(parts) >= 2 and parts[0] == "test" and parts[1] == "provider":
+        action = "test_provider"
+    elif len(parts) >= 3 and parts[0] == "whitelist" and parts[
+            1] == "remove" and parts[2] == "user":
+        action = "whitelist_remove_user"
+    elif len(parts) >= 3 and parts[0] == "whitelist" and parts[
+            1] == "clear" and parts[2] == "confirm":
+        action = "whitelist_clear_confirm"
+    else:
+        action = parts[0]
+
+    # 记录操作日志
+    _interface.logger.debug(f"处理配置回调: {callback_data}, 动作: {action}")
+
+    # 根据不同操作处理
+    if action == "view":
+        # 查看当前配置
+        await show_current_config(update, context)
+
+    elif action == "add":
+        # 添加服务商
+        await show_provider_templates(update, context)
+
+    elif action == "edit":
+        # 检查是否是选择服务商
+        if len(parts) == 1:
+            # 显示服务商列表
+            await show_provider_list(update, context, "edit")
+        else:
+            # 直接处理服务商编辑
+            provider_id = parts[1]
+            if provider_id in _state["providers"]:
+                await session_manager.set(user_id, "editing_provider",
+                                          provider_id)
+                await show_provider_edit_menu(update, context, provider_id)
+            else:
+                _interface.logger.warning(
+                    f"用户 {user_id} 尝试编辑不存在的服务商: {provider_id}")
+                await show_provider_list(update, context, "edit")
+
+    elif action == "delete":
+        # 检查是否是选择服务商
+        if len(parts) == 1:
+            # 显示服务商列表
+            await show_provider_list(update, context, "delete")
+        else:
+            # 直接处理服务商删除
+            provider_id = parts[1]
+            if provider_id in _state["providers"]:
+                await show_delete_confirmation(update, context, provider_id)
+            else:
+                _interface.logger.warning(
+                    f"用户 {user_id} 尝试删除不存在的服务商: {provider_id}")
+                await show_provider_list(update, context, "delete")
+
+    elif action == "delete_confirm":
+        # 处理删除确认操作
+        if len(parts) >= 3:
+            provider_id = parts[2]
+
+            # 验证服务商是否存在
+            if provider_id not in _state["providers"]:
+                _interface.logger.warning(
+                    f"用户 {user_id} 尝试删除不存在的服务商: {provider_id}")
+                await show_config_main_menu(update, context)
+                return
+
+            # 删除服务商
+            del _state["providers"][provider_id]
+
+            # 如果删除的是默认服务商，重置默认服务商
+            if _state["default_provider"] == provider_id:
+                if _state["providers"]:
+                    # 设置第一个服务商为默认
+                    _state["default_provider"] = next(iter(
+                        _state["providers"]))
+                else:
+                    _state["default_provider"] = None
+
+            # 保存配置
+            save_config()
+
+            _interface.logger.info(f"用户 {user_id} 删除了服务商: {provider_id}")
+
+            # 返回主菜单
+            await show_config_main_menu(update, context)
+        else:
+            _interface.logger.warning(
+                f"用户 {user_id} 发送了格式错误的删除确认回调数据: {callback_data}")
+            await show_config_main_menu(update, context)
+
+    elif action == "default":
+        # 检查是否是选择服务商
+        if len(parts) == 1:
+            # 显示服务商列表
+            await show_provider_list(update, context, "default")
+        else:
+            # 直接设置默认服务商
+            provider_id = parts[1]
+            if provider_id in _state["providers"]:
+                _state["default_provider"] = provider_id
+                save_config()
+                _interface.logger.info(f"用户 {user_id} 将默认服务商设置为 {provider_id}")
+                await show_config_main_menu(update, context)
+            else:
+                _interface.logger.warning(
+                    f"用户 {user_id} 尝试设置不存在的服务商为默认: {provider_id}")
+                await show_provider_list(update, context, "default")
+
+    elif action == "timeout":
+        # 设置超时时间
+        await show_timeout_options(update, context)
+
+    elif action == "stats":
+        # 查看使用统计
+        await show_usage_stats(update, context)
+
+    elif action == "whitelist_clear_confirm":
+        # 清空白名单
+        _state["whitelist"] = []
+
+        # 保存配置
+        save_config()
+
+        _interface.logger.info(f"用户 {user_id} 清空了 AI 白名单")
+
+        # 发送成功消息
+        try:
+            await query.edit_message_text(
+                "<b>✅ 白名单已清空</b>\n\n"
+                "所有用户已从白名单中移除",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                ]]),
+                parse_mode="HTML")
+        except telegram.error.BadRequest as e:
+            # 忽略"消息未修改"错误
+            if "Message is not modified" not in str(e):
+                _interface.logger.error(f"更新白名单清空确认消息失败: {str(e)}")
+                # 尝试发送新消息
+                try:
+                    message = update.message or update.edited_message
+                    if message:
+                        await message.reply_text(
+                            "<b>✅ 白名单已清空</b>\n\n"
+                            "所有用户已从白名单中移除",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton(
+                                    "⇠ Back",
+                                    callback_data=f"{CALLBACK_PREFIX}_whitelist"
+                                )
+                            ]]),
+                            parse_mode="HTML")
+                except Exception as e2:
+                    _interface.logger.error(f"发送白名单清空确认消息失败: {str(e2)}")
+
+    elif action == "whitelist":
+        # 管理白名单
+        if len(parts) == 1:
+            # 显示白名单主菜单
+            await show_whitelist_menu(update, context)
+        elif len(parts) >= 2:
+            whitelist_action = parts[1]
+
+            if whitelist_action == "add":
+                # 提示输入用户 ID
+                try:
+                    await query.edit_message_text(
+                        "<b>👥 添加用户到白名单</b>\n\n"
+                        "请输入要添加的用户 ID (数字):",
+                        parse_mode="HTML")
+
+                    # 设置会话状态，等待用户输入用户 ID
+                    await session_manager.set(user_id, "waiting_for",
+                                              "whitelist_add_user_id")
+                except telegram.error.BadRequest as e:
+                    # 忽略"消息未修改"错误
+                    if "Message is not modified" not in str(e):
+                        _interface.logger.error(f"更新添加用户到白名单提示失败: {str(e)}")
+                        # 尝试发送新消息
+                        try:
+                            message = update.message or update.edited_message
+                            if message:
+                                await message.reply_text(
+                                    "<b>👥 添加用户到白名单</b>\n\n"
+                                    "请输入要添加的用户 ID (数字):",
+                                    parse_mode="HTML")
+
+                                # 设置会话状态，等待用户输入用户 ID
+                                await session_manager.set(
+                                    user_id, "waiting_for",
+                                    "whitelist_add_user_id")
+                        except Exception as e2:
+                            _interface.logger.error(
+                                f"发送添加用户到白名单提示失败: {str(e2)}")
+
+            elif whitelist_action == "remove":
+                # 显示可移除的用户列表
+                await show_whitelist_remove_menu(update, context)
+
+            elif whitelist_action == "clear":
+                # 显示确认对话框
+                keyboard = [[
+                    InlineKeyboardButton(
+                        "◯ Confirm",
+                        callback_data=
+                        f"{CALLBACK_PREFIX}_whitelist_clear_confirm"),
+                    InlineKeyboardButton(
+                        "⨉ Cancel",
+                        callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                ]]
+
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                try:
+                    await query.edit_message_text(
+                        "<b>⚠️ 确认清空白名单</b>\n\n"
+                        "您确定要清空整个白名单吗？此操作不可撤销",
+                        reply_markup=reply_markup,
+                        parse_mode="HTML")
+                except telegram.error.BadRequest as e:
+                    # 忽略"消息未修改"错误
+                    if "Message is not modified" not in str(e):
+                        _interface.logger.error(f"更新白名单清空确认对话框失败: {str(e)}")
+                        # 尝试发送新消息
+                        try:
+                            message = update.message or update.edited_message
+                            if message:
+                                await message.reply_text(
+                                    "<b>⚠️ 确认清空白名单</b>\n\n"
+                                    "您确定要清空整个白名单吗？此操作不可撤销",
+                                    reply_markup=reply_markup,
+                                    parse_mode="HTML")
+                        except Exception as e2:
+                            _interface.logger.error(
+                                f"发送白名单清空确认对话框失败: {str(e2)}")
+
+            else:
+                _interface.logger.warning(
+                    f"用户 {user_id} 尝试执行未知的白名单操作: {whitelist_action}")
+                await show_whitelist_menu(update, context)
+
+    elif action == "edit_param":
+        # 处理编辑参数操作
+        if len(parts) >= 4:
+            provider_id = parts[2]
+            param_name = parts[3]
+
+            # 处理特殊参数名称
+            if param_name == "system":
+                param_name = "system_prompt"
+            elif param_name == "supports":
+                param_name = "supports_image"
+
+            # 记录操作日志
+            _interface.logger.debug(
+                f"编辑参数: provider_id={provider_id}, param={param_name}")
+
+            # 验证服务商是否存在
+            if provider_id not in _state["providers"]:
+                _interface.logger.warning(
+                    f"用户 {user_id} 尝试编辑不存在的服务商: {provider_id}")
+                await show_config_main_menu(update, context)
+                return
+
+            # 提示用户输入新值
+            current_value = _state["providers"][provider_id].get(
+                param_name, "")
+
+            # 构建提示文本
+            prompt_text = f"<b>✏️ 编辑参数</b>\n\n"
+            prompt_text += f"服务商: <code>{provider_id}</code>\n"
+            prompt_text += f"参数: <code>{param_name}</code>\n"
+            prompt_text += f"当前值: <code>{current_value}</code>\n\n"
+
+            if param_name == "temperature":
+                prompt_text += "请输入新的温度值 (0.0-1.0):"
+            elif param_name == "supports_image":
+                prompt_text += "请输入是否支持图像 (yes/no):"
+            else:
+                prompt_text += "请输入新的值:"
+
+            # 发送提示
+            await query.edit_message_text(prompt_text, parse_mode="HTML")
+
+            # 设置会话状态，等待用户输入
+            await session_manager.set(
+                user_id, "waiting_for",
+                f"edit_param_{provider_id}_{param_name}")
+        else:
+            _interface.logger.warning(
+                f"用户 {user_id} 发送了格式错误的编辑参数回调数据: {callback_data}")
+            await show_config_main_menu(update, context)
+
+    elif action == "test_provider":
+        # 处理测试服务商操作
+        if len(parts) >= 3:
+            provider_id = parts[2]
+
+            # 验证服务商是否存在
+            if provider_id not in _state["providers"]:
+                _interface.logger.warning(
+                    f"用户 {user_id} 尝试测试不存在的服务商: {provider_id}")
+                await show_config_main_menu(update, context)
+                return
+
+            # 检查服务商是否配置完整
+            provider = _state["providers"][provider_id]
+            if not provider.get("api_key"):
+                _interface.logger.warning(
+                    f"用户 {user_id} 尝试测试未配置 API 密钥的服务商: {provider_id}")
+                await show_provider_edit_menu(update, context, provider_id)
+                return
+
+            # 发送测试消息
+            await query.edit_message_text(
+                f"<b>🧪 测试服务商: {provider_id}</b>\n\n"
+                f"正在发送测试请求...",
+                parse_mode="HTML")
+
+            # 准备测试消息
+            test_messages = [{
+                "role":
+                "user",
+                "content":
+                "Hello, this is a test message. Please respond with a short greeting."
+            }]
+
+            try:
+                # 调用 API
+                response = await AIManager.call_ai_api(provider_id,
+                                                       test_messages, [],
+                                                       False, None)
+
+                # 显示结果
+                result_text = f"<b>🧪 测试结果: {provider_id}</b>\n\n"
+                result_text += f"<b>状态:</b> ✅ 成功\n\n"
+                result_text += f"<b>响应:</b>\n<code>{response[:200]}</code>"
+
+                # 添加返回按钮
+                keyboard = [[
+                    InlineKeyboardButton(
+                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
+                ]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(result_text,
+                                              reply_markup=reply_markup,
+                                              parse_mode="HTML")
+
+            except Exception as e:
+                # 显示错误
+                error_text = f"<b>🧪 测试结果: {provider_id}</b>\n\n"
+                error_text += f"<b>状态:</b> ❌ 失败\n\n"
+                error_text += f"<b>错误:</b>\n<code>{str(e)[:200]}</code>"
+
+                # 添加返回按钮
+                keyboard = [[
+                    InlineKeyboardButton(
+                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
+                ]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(error_text,
+                                              reply_markup=reply_markup,
+                                              parse_mode="HTML")
+        else:
+            _interface.logger.warning(
+                f"用户 {user_id} 发送了格式错误的测试服务商回调数据: {callback_data}")
+            await show_config_main_menu(update, context)
+
+    elif action == "back":
+        # 返回主菜单
+        await show_config_main_menu(update, context)
+
+    else:
+        # 处理其他特定操作
+        await handle_specific_actions(update, context, action, callback_data)
+
+
+async def show_current_config(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示当前 AI 配置"""
+    global _state
+    query = update.callback_query
+
+    # 构建配置信息（使用 HTML 格式）
+    config_text = "<b>🤖 当前 AI 配置</b>\n\n"
+
+    # 默认服务商
+    default_provider = _state["default_provider"]
+    if default_provider and default_provider in _state["providers"]:
+        provider_name = _state["providers"][default_provider].get(
+            "name", default_provider)
+        config_text += f"<b>当前默认服务商:</b> <code>{default_provider}</code> ({provider_name})\n\n"
+    else:
+        config_text += f"<b>当前默认服务商:</b> <i>未设置</i>\n\n"
+
+    # 对话超时设置
+    timeout_hours = _state.get("conversation_timeout", 24 * 60 * 60) // 3600
+    config_text += f"<b>对话超时时间:</b> <code>{timeout_hours}</code> 小时\n\n"
+
+    # 服务商列表
+    config_text += "<b>已配置的服务商:</b>\n"
+
+    if not _state["providers"]:
+        config_text += "<i>暂无服务商配置</i>\n"
+    else:
+        # 检查是否有完全配置的服务商（有 API 密钥的）
+        configured_providers = [
+            p for p, data in _state["providers"].items() if data.get("api_key")
+        ]
+
+        if not configured_providers:
+            config_text += "<i>已创建服务商，但尚未配置 API 密钥</i>\n\n"
+
+        # 显示所有服务商
+        for provider_id, provider in _state["providers"].items():
+            # 标记默认服务商和配置状态
+            is_default = "✅ " if provider_id == default_provider else ""
+            is_configured = "🔑 " if provider.get("api_key") else "⚠️ "
+
+            config_text += f"\n{is_default}{is_configured}<b>{provider_id}</b>\n"
+            config_text += f"  📝 名称: <code>{provider.get('name', provider_id)}</code>\n"
+            config_text += f"  🤖 模型: <code>{provider.get('model', '未设置')}</code>\n"
+
+            # API URL (可能很长，截断显示)
+            api_url = provider.get('api_url', '未设置')
+            if len(api_url) > 20:
+                api_url = api_url[:17] + "..."
+            config_text += f"  🔗 API URL: <code>{api_url}</code>\n"
+
+            # API Key (隐藏显示)
+            api_key = provider.get('api_key', '')
+            if api_key:
+                masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(
+                    api_key) > 8 else "****"
+                config_text += f"  🔑 API Key: <code>{masked_key}</code>\n"
+            else:
+                config_text += "  🔑 API Key: <code>未设置</code> ⚠️\n"
+
+            config_text += f"  🌡️ 温度: <code>{provider.get('temperature', 0.7)}</code>\n"
+
+            # 系统提示 (可能很长，截断显示)
+            system_prompt = provider.get('system_prompt', '未设置')
+            if len(system_prompt) > 12:
+                system_prompt = system_prompt[:9] + "..."
+            config_text += f"  💬 系统提示: <code>{system_prompt}</code>\n"
+
+            config_text += f"  📋 请求格式: <code>{provider.get('request_format', 'openai')}</code>\n"
+
+            # 图像支持
+            supports_image = "✅" if provider.get("supports_image",
+                                                 False) else "❌"
+            config_text += f"  🖼️ 图像支持: {supports_image}\n"
+
+    # 添加返回按钮
+    keyboard = [[
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        await query.edit_message_text(config_text,
+                                      reply_markup=reply_markup,
+                                      parse_mode="HTML")
+    except telegram.error.BadRequest as e:
+        # 忽略"消息未修改"错误
+        if "Message is not modified" in str(e):
+            pass
+        else:
+            # 如果是其他错误（可能是 HTML 格式问题），发送纯文本
+            _interface.logger.error(f"发送 AI 配置信息失败: {e}")
+            await query.edit_message_text("发送配置信息失败，请联系管理员查看日志",
+                                          reply_markup=reply_markup)
+    except Exception as e:
+        # 处理其他异常
+        _interface.logger.error(f"发送 AI 配置信息失败: {e}")
+        await query.edit_message_text("发送配置信息失败，请联系管理员查看日志",
+                                      reply_markup=reply_markup)
+
+
 class ConfigHandler:
     """配置命令处理器"""
 
     @staticmethod
     async def show_config(update: Update,
                           context: ContextTypes.DEFAULT_TYPE) -> None:
-        """显示当前 AI 配置"""
-        global _state
-        # 获取消息对象（可能是新消息或编辑的消息）
-        message = update.message or update.edited_message
-
-        # 构建配置信息（使用 HTML 格式）
-        config_text = "<b>🤖 AI 配置面板</b>\n\n"
-
-        # 默认服务商
-        default_provider = _state["default_provider"]
-        if default_provider and default_provider in _state["providers"]:
-            provider_name = _state["providers"][default_provider].get(
-                "name", default_provider)
-            config_text += f"<b>当前默认服务商:</b> <code>{default_provider}</code> ({provider_name})\n\n"
-        else:
-            config_text += f"<b>当前默认服务商:</b> <i>未设置</i>\n\n"
-
-        # 对话超时设置
-        timeout_hours = _state.get("conversation_timeout",
-                                   24 * 60 * 60) // 3600
-        config_text += f"<b>对话超时时间:</b> <code>{timeout_hours}</code> 小时\n\n"
-
-        # 服务商列表
-        config_text += "<b>已配置的服务商:</b>\n"
-
-        if not _state["providers"]:
-            config_text += "<i>暂无服务商配置，请使用</i> <code>/aiconfig new</code> <i>创建服务商</i>\n"
-        else:
-            # 检查是否有完全配置的服务商（有 API 密钥的）
-            configured_providers = [
-                p for p, data in _state["providers"].items()
-                if data.get("api_key")
-            ]
-
-            if not configured_providers:
-                config_text += "<i>已创建服务商，但尚未配置 API 密钥。请使用</i> <code>/aiconfig provider &lt;ID&gt; api_key YOUR_KEY</code> <i>配置</i>\n\n"
-
-            # 显示所有服务商
-            for provider_id, provider in _state["providers"].items():
-                # 标记默认服务商和配置状态
-                is_default = "✅ " if provider_id == default_provider else ""
-                is_configured = "🔑 " if provider.get("api_key") else "⚠️ "
-
-                config_text += f"\n{is_default}{is_configured}<b>{provider_id}</b>\n"
-                config_text += f"  📝 名称: <code>{provider.get('name', provider_id)}</code>\n"
-                config_text += f"  🤖 模型: <code>{provider.get('model', '未设置')}</code>\n"
-
-                # API URL (可能很长，截断显示)
-                api_url = provider.get('api_url', '未设置')
-                if len(api_url) > 20:
-                    api_url = api_url[:17] + "..."
-                config_text += f"  🔗 API URL: <code>{api_url}</code>\n"
-
-                # API Key (隐藏显示)
-                api_key = provider.get('api_key', '')
-                if api_key:
-                    masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(
-                        api_key) > 8 else "****"
-                    config_text += f"  🔑 API Key: <code>{masked_key}</code>\n"
-                else:
-                    config_text += "  🔑 API Key: <code>未设置</code> ⚠️\n"
-
-                config_text += f"  🌡️ 温度: <code>{provider.get('temperature', 0.7)}</code>\n"
-
-                # 系统提示 (可能很长，截断显示)
-                system_prompt = provider.get('system_prompt', '未设置')
-                if len(system_prompt) > 12:
-                    system_prompt = system_prompt[:9] + "..."
-                config_text += f"  💬 系统提示: <code>{system_prompt}</code>\n"
-
-                config_text += f"  📋 请求格式: <code>{provider.get('request_format', 'openai')}</code>\n"
-
-                # 图像支持
-                supports_image = "✅" if provider.get("supports_image",
-                                                     False) else "❌"
-                config_text += f"  🖼️ 图像支持: {supports_image}\n"
-
-        # 添加使用说明
-        config_text += "\n<b>📚 配置命令:</b>\n"
-        config_text += "• <code>/aiconfig provider &lt;ID&gt; &lt;参数&gt; &lt;值&gt;</code> - 配置服务商参数\n"
-        config_text += "• <code>/aiconfig new &lt;ID&gt; [模板]</code> - 创建新服务商\n"
-        config_text += "• <code>/aiconfig default &lt;ID&gt;</code> - 设置默认服务商\n"
-        config_text += "• <code>/aiconfig delete &lt;ID&gt;</code> - 删除服务商\n"
-        config_text += "• <code>/aiconfig test &lt;ID&gt;</code> - 测试服务商\n"
-        config_text += "• <code>/aiconfig stats</code> - 查看使用统计\n"
-        config_text += "• <code>/aiconfig timeout &lt;小时数&gt;</code> - 设置对话超时时间\n"
-
-        try:
-            await message.reply_text(config_text, parse_mode="HTML")
-        except Exception as e:
-            # 如果发送失败（可能是 HTML 格式问题），发送纯文本
-            _interface.logger.error(f"发送 AI 配置信息失败: {e}")
-            await message.reply_text("发送配置信息失败，请联系管理员查看日志")
+        """显示当前 AI 配置（旧版本，保留兼容性）"""
+        # 直接调用新的基于按钮的配置界面
+        await show_config_main_menu(update, context)
 
     @staticmethod
     async def show_stats(update: Update,
@@ -1328,309 +2659,39 @@ class ConfigHandler:
             _interface.logger.error(f"发送 AI 统计信息失败: {e}")
             await message.reply_text("发送统计信息失败，请联系管理员查看日志")
 
-    @staticmethod
-    async def show_whitelist(update: Update,
-                             context: ContextTypes.DEFAULT_TYPE) -> None:
-        """显示当前 AI 白名单"""
-        global _state
-        # 获取消息对象（可能是新消息或编辑的消息）
-        message = update.message or update.edited_message
-
-        whitelist_text = "<b>👥 AI 白名单用户</b>\n\n"
-
-        if not _state["whitelist"]:
-            whitelist_text += "<i>白名单为空</i>\n"
-        else:
-            for i, user_id in enumerate(_state["whitelist"], 1):
-                whitelist_text += f"{i}. <code>{user_id}</code>\n"
-
-        whitelist_text += "\n<b>📚 白名单管理命令:</b>\n"
-        whitelist_text += "• <code>/aiwhitelist add &lt;用户ID&gt;</code> - 添加用户到白名单\n"
-        whitelist_text += "• <code>/aiwhitelist remove &lt;用户ID&gt;</code> - 从白名单中移除用户\n"
-        whitelist_text += "• <code>/aiwhitelist clear</code> - 清空白名单\n"
-        whitelist_text += "\n💡 提示：回复用户消息并使用 <code>/aiwhitelist add</code> 可快速添加该用户\n"
-
-        try:
-            await message.reply_text(whitelist_text, parse_mode="HTML")
-        except Exception as e:
-            _interface.logger.error(f"发送 AI 白名单信息失败: {e}")
-            await message.reply_text("发送白名单信息失败，请联系管理员查看日志")
-
 
 # 命令处理函数
 
 
 async def ai_config_command(update: Update,
                             context: ContextTypes.DEFAULT_TYPE) -> None:
-    """处理 /aiconfig 命令 - 配置 AI 设置"""
+    """处理 /aiconfig 命令 - 配置 AI 设置（使用按钮和会话）"""
     global _state
 
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
+    user_id = update.effective_user.id
 
     # 检查是否是私聊
     if update.effective_chat.type != "private":
         await message.reply_text("⚠️ 出于安全考虑，AI 配置只能在私聊中进行")
         return
 
-    # 解析参数
-    if not context.args:
-        # 显示当前配置
-        await ConfigHandler.show_config(update, context)
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        _interface.logger.error("无法获取会话管理器")
+        await message.reply_text("⚠️ 系统错误：无法获取会话管理器")
         return
 
-    # 配置命令格式: /aiconfig <操作> [参数...]
-    operation = context.args[0].lower()
+    # 清除之前的会话状态（如果有）
+    await session_manager.clear(user_id)
 
-    if operation == "provider":
-        # 配置服务商: /aiconfig provider <provider_id> <参数> <值>
-        if len(context.args) < 4:
-            await update.message.reply_text(
-                "用法: `/aiconfig provider <provider_id> <参数> <值>`\n"
-                "参数可以是: name, api\\_url, api\\_key, model, temperature, system\\_prompt, request\\_format, supports\\_image",
-                parse_mode="MARKDOWN")
-            return
+    # 设置会话状态，表示正在配置 AI
+    await session_manager.set(user_id, "ai_config_active", True)
 
-        provider_id = context.args[1]
-        param = context.args[2]
-        value = " ".join(context.args[3:])
-
-        # 检查服务商是否存在
-        if provider_id not in _state[
-                "providers"] and provider_id not in PROVIDER_TEMPLATES:
-            await update.message.reply_text(f"未知的服务商 ID: `{provider_id}`",
-                                            parse_mode="MARKDOWN")
-            return
-
-        # 如果是新服务商，从模板创建
-        if provider_id not in _state["providers"]:
-            if provider_id in PROVIDER_TEMPLATES:
-                _state["providers"][provider_id] = PROVIDER_TEMPLATES[
-                    provider_id].copy()
-            else:
-                _state["providers"][provider_id] = PROVIDER_TEMPLATES[
-                    "custom"].copy()
-                _state["providers"][provider_id]["name"] = provider_id
-
-        # 更新参数
-        valid_params = [
-            "name", "api_url", "api_key", "model", "temperature",
-            "system_prompt", "request_format", "supports_image"
-        ]
-
-        if param not in valid_params:
-            # 转义参数名称，防止被解释为 Markdown 格式
-            valid_params_escaped = [
-                p.replace("_", "\\_") for p in valid_params
-            ]
-            await update.message.reply_text(
-                f"无效的参数: `{param}`\n"
-                f"有效参数: {', '.join(valid_params_escaped)}",
-                parse_mode="MARKDOWN")
-            return
-
-        # 特殊处理 temperature (转换为浮点数)
-        if param == "temperature":
-            try:
-                value = float(value)
-                if not (0.0 <= value <= 1.0):
-                    await update.message.reply_text(
-                        "temperature 必须在 0.0 到 1.0 之间")
-                    return
-            except ValueError:
-                await update.message.reply_text("temperature 必须是有效的浮点数")
-                return
-
-        # 特殊处理 supports_image (转换为布尔值)
-        if param == "supports_image":
-            value = value.lower() in ["true", "yes", "1", "y", "t"]
-
-        # 更新参数
-        _state["providers"][provider_id][param] = value
-
-        # 保存配置
-        save_config()
-
-        await update.message.reply_text(
-            f"✅ 已更新服务商 `{provider_id}` 的 `{param}` 参数", parse_mode="MARKDOWN")
-        _interface.logger.info(
-            f"用户 {update.effective_user.id} 更新了服务商 {provider_id} 的 {param} 参数")
-
-    elif operation == "default":
-        # 设置默认服务商: /aiconfig default <provider_id>
-        if len(context.args) < 2:
-            await update.message.reply_text(
-                "用法: `/aiconfig default <provider_id>`", parse_mode="MARKDOWN")
-            return
-
-        provider_id = context.args[1]
-
-        # 检查服务商是否存在
-        if provider_id not in _state["providers"]:
-            await update.message.reply_text(f"未知的服务商 ID: `{provider_id}`",
-                                            parse_mode="MARKDOWN")
-            return
-
-        # 更新默认服务商
-        _state["default_provider"] = provider_id
-
-        # 保存配置
-        save_config()
-
-        await update.message.reply_text(f"✅ 已将默认服务商设置为: `{provider_id}`",
-                                        parse_mode="MARKDOWN")
-        _interface.logger.info(
-            f"用户 {update.effective_user.id} 将默认服务商设置为 {provider_id}")
-
-    elif operation == "delete":
-        # 删除服务商: /aiconfig delete <provider_id>
-        if len(context.args) < 2:
-            await update.message.reply_text(
-                "用法: `/aiconfig delete <provider_id>`", parse_mode="MARKDOWN")
-            return
-
-        provider_id = context.args[1]
-
-        # 检查服务商是否存在
-        if provider_id not in _state["providers"]:
-            await update.message.reply_text(f"未知的服务商 ID: `{provider_id}`",
-                                            parse_mode="MARKDOWN")
-            return
-
-        # 如果删除的是默认服务商，重置默认服务商
-        if _state["default_provider"] == provider_id:
-            _state["default_provider"] = None
-
-        # 删除服务商
-        del _state["providers"][provider_id]
-
-        # 保存配置
-        save_config()
-
-        await update.message.reply_text(f"✅ 已删除服务商: `{provider_id}`",
-                                        parse_mode="MARKDOWN")
-        _interface.logger.info(
-            f"用户 {update.effective_user.id} 删除了服务商 {provider_id}")
-
-    elif operation == "new":
-        # 创建新服务商: /aiconfig new <provider_id> [template]
-        if len(context.args) < 2:
-            await update.message.reply_text(
-                "用法: `/aiconfig new <provider_id> [template]`\n"
-                f"可用模板: {', '.join(PROVIDER_TEMPLATES.keys())}",
-                parse_mode="MARKDOWN")
-            return
-
-        provider_id = context.args[1]
-        template = context.args[2] if len(context.args) > 2 else "custom"
-
-        # 检查服务商 ID 是否已存在
-        if provider_id in _state["providers"]:
-            await update.message.reply_text(f"服务商 ID 已存在: `{provider_id}`",
-                                            parse_mode="MARKDOWN")
-            return
-
-        # 检查模板是否存在
-        if template not in PROVIDER_TEMPLATES:
-            await update.message.reply_text(
-                f"未知的模板: `{template}`\n"
-                f"可用模板: {', '.join(PROVIDER_TEMPLATES.keys())}",
-                parse_mode="MARKDOWN")
-            return
-
-        # 创建新服务商
-        _state["providers"][provider_id] = PROVIDER_TEMPLATES[template].copy()
-        _state["providers"][provider_id]["name"] = provider_id
-
-        # 如果没有默认服务商，设置为默认
-        if not _state["default_provider"]:
-            _state["default_provider"] = provider_id
-
-        # 保存配置
-        save_config()
-
-        await update.message.reply_text(
-            f"✅ 已创建新服务商: `{provider_id}` (使用 {template} 模板)\n"
-            f"请使用 `/aiconfig provider {provider_id} api_key YOUR_API_KEY` 设置 API 密钥",
-            parse_mode="MARKDOWN")
-        _interface.logger.info(
-            f"用户 {update.effective_user.id} 创建了新服务商 {provider_id}")
-
-    elif operation == "test":
-        # 测试服务商: /aiconfig test <provider_id>
-        if len(context.args) < 2:
-            await update.message.reply_text(
-                "用法: `/aiconfig test <provider_id>`", parse_mode="MARKDOWN")
-            return
-
-        provider_id = context.args[1]
-
-        # 检查服务商是否存在
-        if provider_id not in _state["providers"]:
-            await update.message.reply_text(f"未知的服务商 ID: `{provider_id}`",
-                                            parse_mode="MARKDOWN")
-            return
-
-        # 发送测试消息
-        await update.message.reply_text(f"🔄 正在测试服务商 `{provider_id}`...",
-                                        parse_mode="MARKDOWN")
-
-        # 准备测试消息
-        test_messages = [{
-            "role":
-            "user",
-            "content":
-            "Hello, can you introduce yourself briefly?"
-        }]
-
-        # 调用 API
-        response = await AIManager.call_ai_api(provider_id, test_messages)
-
-        # 显示响应
-        await update.message.reply_text(f"📝 测试结果:\n\n{response}")
-
-        _interface.logger.info(
-            f"用户 {update.effective_user.id} 测试了服务商 {provider_id}")
-
-    elif operation == "stats":
-        # 查看使用统计: /aiconfig stats
-        await ConfigHandler.show_stats(update, context)
-
-    elif operation == "timeout":
-        # 设置对话超时时间: /aiconfig timeout <小时数>
-        if len(context.args) < 2:
-            await update.message.reply_text(
-                "用法: `/aiconfig timeout <小时数>`\n"
-                "当前超时时间: " +
-                str(_state.get("conversation_timeout", 24 * 60 * 60) // 3600) +
-                " 小时",
-                parse_mode="MARKDOWN")
-            return
-
-        try:
-            hours = float(context.args[1])
-            if hours <= 0:
-                await update.message.reply_text("超时时间必须大于 0 小时")
-                return
-
-            # 更新超时时间 (转换为秒)
-            _state["conversation_timeout"] = int(hours * 3600)
-
-            # 保存配置
-            save_config()
-
-            await update.message.reply_text(f"✅ 已将对话超时时间设置为 {hours} 小时")
-            _interface.logger.info(
-                f"用户 {update.effective_user.id} 将对话超时时间设置为 {hours} 小时")
-        except ValueError:
-            await update.message.reply_text("小时数必须是有效的数字")
-
-    else:
-        # 未知操作
-        await update.message.reply_text(
-            f"未知操作: `{operation}`\n"
-            "可用操作: provider, default, delete, new, test, stats, timeout",
-            parse_mode="MARKDOWN")
+    # 显示主菜单
+    await show_config_main_menu(update, context)
 
 
 async def ai_whitelist_command(update: Update,
@@ -1641,36 +2702,11 @@ async def ai_whitelist_command(update: Update,
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
 
-    if not context.args:
-        # 显示当前白名单
-        await ConfigHandler.show_whitelist(update, context)
-        return
-
-    # 解析命令: /aiwhitelist <操作> <用户ID>
-    operation = context.args[0].lower()
-
-    if operation == "add":
-        # 添加用户到白名单
-        if len(context.args) < 2 and not message.reply_to_message:
-            await message.reply_text(
-                "用法: `/aiwhitelist add <用户ID>`\n或回复某人的消息添加他们",
-                parse_mode="MARKDOWN")
-            return
-
-        # 检查是否是回复某人的消息
-        if message.reply_to_message and message.reply_to_message.from_user:
-            user_id = message.reply_to_message.from_user.id
-            username = message.reply_to_message.from_user.username or "未知用户名"
-            full_name = message.reply_to_message.from_user.full_name or "未知姓名"
-        else:
-            # 从参数获取用户 ID
-            try:
-                user_id = int(context.args[1])
-                username = "未知用户名"
-                full_name = "未知姓名"
-            except ValueError:
-                await message.reply_text("用户 ID 必须是数字")
-                return
+    # 检查是否是回复某人的消息
+    if message.reply_to_message and message.reply_to_message.from_user:
+        user_id = message.reply_to_message.from_user.id
+        username = message.reply_to_message.from_user.username or "未知用户名"
+        full_name = message.reply_to_message.from_user.full_name or "未知姓名"
 
         # 检查用户是否已在白名单中
         if user_id in _state["whitelist"]:
@@ -1693,52 +2729,9 @@ async def ai_whitelist_command(update: Update,
             parse_mode="MARKDOWN")
         _interface.logger.info(
             f"用户 {update.effective_user.id} 将用户 {user_id} 添加到 AI 白名单")
-
-    elif operation == "remove":
-        # 从白名单中移除用户
-        if len(context.args) < 2:
-            await message.reply_text("用法: `/aiwhitelist remove <用户ID>`",
-                                     parse_mode="MARKDOWN")
-            return
-
-        try:
-            user_id = int(context.args[1])
-
-            # 检查用户是否在白名单中
-            if user_id not in _state["whitelist"]:
-                await message.reply_text(f"用户 `{user_id}` 不在白名单中",
-                                         parse_mode="MARKDOWN")
-                return
-
-            # 从白名单中移除
-            _state["whitelist"].remove(user_id)
-
-            # 保存配置
-            save_config()
-
-            await message.reply_text(f"✅ 已将用户 `{user_id}` 从白名单中移除",
-                                     parse_mode="MARKDOWN")
-            _interface.logger.info(
-                f"用户 {update.effective_user.id} 将用户 {user_id} 从 AI 白名单中移除")
-        except ValueError:
-            await message.reply_text("用户 ID 必须是数字")
-
-    elif operation == "clear":
-        # 清空白名单
-        _state["whitelist"] = []
-
-        # 保存配置
-        save_config()
-
-        await message.reply_text("✅ 已清空 AI 白名单")
-        _interface.logger.info(f"用户 {update.effective_user.id} 清空了 AI 白名单")
-
     else:
-        # 未知操作
-        await message.reply_text(
-            f"未知操作: `{operation}`\n"
-            "可用操作: add, remove, clear",
-            parse_mode="MARKDOWN")
+        # 如果不是回复消息，则显示白名单管理界面
+        await show_whitelist_menu(update, context)
 
 
 async def ai_clear_command(update: Update,
@@ -1783,7 +2776,7 @@ async def ai_command(update: Update,
             "请输入要发送给 AI 的消息\n"
             "例如: `/ai 你好，请介绍一下自己`\n\n"
             "🔄 使用 `/aiclear` 可清除对话历史\n"
-            "📷 在私聊中可以发送图片并附加文字描述使用多模态功能",
+            "📷 在私聊中可以发送图片使用多模态功能",
             parse_mode="MARKDOWN")
         return
 
@@ -1917,6 +2910,181 @@ async def ai_command(update: Update,
     _interface.logger.info(f"用户 {user_id} 使用 {provider_id} 服务商获得了 AI 回复")
 
 
+async def handle_config_input(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE,
+                              waiting_for: str) -> None:
+    """处理配置过程中的用户输入"""
+    global _state
+    user_id = update.effective_user.id
+    message = update.message
+    message_text = message.text
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        _interface.logger.error("无法获取会话管理器")
+        await message.reply_text("⚠️ 系统错误：无法获取会话管理器")
+        return
+
+    # 处理不同类型的输入
+    if waiting_for == "provider_id":
+        # 处理新服务商 ID 输入
+        provider_id = message_text.strip()
+
+        # 验证 ID 格式
+        if not re.match(r'^[a-zA-Z0-9_]+$', provider_id):
+            await message.reply_text("⚠️ 服务商 ID 只能包含字母、数字和下划线，请重新输入：")
+            return
+
+        # 检查 ID 是否已存在
+        if provider_id in _state["providers"]:
+            await message.reply_text(
+                f"⚠️ 服务商 ID `{provider_id}` 已存在，请使用其他 ID：",
+                parse_mode="MARKDOWN")
+            return
+
+        # 获取选择的模板
+        template_id = await session_manager.get(user_id, "selected_template",
+                                                "custom")
+
+        # 创建新服务商
+        _state["providers"][provider_id] = PROVIDER_TEMPLATES[
+            template_id].copy()
+        _state["providers"][provider_id]["name"] = provider_id
+
+        # 如果没有默认服务商，设置为默认
+        if not _state["default_provider"]:
+            _state["default_provider"] = provider_id
+
+        # 保存配置
+        save_config()
+
+        # 清除等待状态
+        await session_manager.delete(user_id, "waiting_for")
+        await session_manager.delete(user_id, "selected_template")
+
+        # 发送成功消息并直接显示编辑菜单
+        await message.reply_text(
+            f"✅ 已创建新服务商: `{provider_id}` (使用 {template_id} 模板)\n\n"
+            f"请编辑服务商的详细配置：",
+            parse_mode="MARKDOWN")
+
+        # 直接显示编辑菜单
+        await show_provider_edit_menu(update, context, provider_id)
+
+    elif waiting_for.startswith("edit_param_"):
+        # 处理编辑参数输入
+        parts = waiting_for.split("_")
+
+        # 记录操作日志
+        _interface.logger.debug(f"处理编辑参数输入: waiting_for={waiting_for}")
+
+        # 确保格式正确
+        if len(parts) >= 4:
+            provider_id = parts[2]
+            param_name = parts[3]
+
+            # 处理特殊参数名称
+            if param_name == "system":
+                param_name = "system_prompt"
+            elif param_name == "supports":
+                param_name = "supports_image"
+
+            # 验证服务商是否存在
+            if provider_id not in _state["providers"]:
+                await message.reply_text(f"⚠️ 服务商 `{provider_id}` 不存在",
+                                         parse_mode="MARKDOWN")
+                await session_manager.delete(user_id, "waiting_for")
+                await show_config_main_menu(update, context)
+                return
+
+            # 处理不同参数的输入
+            if param_name == "temperature":
+                # 验证温度值
+                try:
+                    value = float(message_text)
+                    if not (0.0 <= value <= 1.0):
+                        await message.reply_text(
+                            "⚠️ 温度值必须在 0.0 到 1.0 之间，请重新输入：")
+                        return
+                except ValueError:
+                    await message.reply_text("⚠️ 温度值必须是有效的浮点数，请重新输入：")
+                    return
+
+            elif param_name == "supports_image":
+                # 转换为布尔值
+                value = message_text.lower() in [
+                    "true", "yes", "1", "y", "t", "是", "支持"
+                ]
+
+            else:
+                # 其他参数直接使用输入值
+                value = message_text
+
+            # 更新参数
+            _state["providers"][provider_id][param_name] = value
+
+            # 保存配置
+            save_config()
+
+            # 清除等待状态
+            await session_manager.delete(user_id, "waiting_for")
+
+            # 发送成功消息
+            await message.reply_text(
+                f"✅ 已更新服务商 `{provider_id}` 的 `{param_name}` 参数",
+                parse_mode="MARKDOWN")
+
+            # 直接返回编辑菜单，不需要再次选择服务商
+            await show_provider_edit_menu(update, context, provider_id)
+        else:
+            # 格式错误
+            _interface.logger.warning(f"编辑参数输入格式错误: {waiting_for}")
+            await message.reply_text("⚠️ 参数格式错误，已取消操作")
+            await session_manager.delete(user_id, "waiting_for")
+            await show_config_main_menu(update, context)
+
+    elif waiting_for == "whitelist_add_user_id":
+        # 处理添加白名单用户 ID 输入
+        try:
+            user_id_to_add = int(message_text)
+
+            # 检查用户是否已在白名单中
+            if user_id_to_add in _state["whitelist"]:
+                await message.reply_text(f"用户 `{user_id_to_add}` 已在白名单中",
+                                         parse_mode="MARKDOWN")
+            else:
+                # 添加到白名单
+                _state["whitelist"].append(user_id_to_add)
+
+                # 保存配置
+                save_config()
+
+                await message.reply_text(f"✅ 已将用户 `{user_id_to_add}` 添加到白名单",
+                                         parse_mode="MARKDOWN")
+
+            # 清除等待状态
+            await session_manager.delete(user_id, "waiting_for")
+
+            # 发送新消息而不是编辑现有消息
+            await message.reply_text(
+                "✅ 已将用户添加到白名单",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                ]]))
+
+        except ValueError:
+            await message.reply_text("⚠️ 用户 ID 必须是数字，请重新输入：")
+            return
+
+    else:
+        # 未知的等待状态
+        await message.reply_text("⚠️ 未知的输入状态，已取消操作")
+        await session_manager.delete(user_id, "waiting_for")
+        await show_config_main_menu(update, context)
+
+
 async def handle_private_message(update: Update,
                                  context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理私聊消息，直接回复 AI 回答"""
@@ -1929,15 +3097,26 @@ async def handle_private_message(update: Update,
     if update.edited_message:
         return
 
-    # 检查权限 - 仅超级管理员和白名单用户可用
-    if not AIManager.is_user_authorized(user_id, context):
-        # 不回复非白名单用户
-        return
-
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
     if not session_manager:
         _interface.logger.error("无法获取会话管理器")
+        return
+
+    # 检查是否在配置会话中
+    is_config_active = await session_manager.get(user_id, "ai_config_active",
+                                                 False)
+    if is_config_active:
+        # 检查是否在等待用户输入
+        waiting_for = await session_manager.get(user_id, "waiting_for", None)
+        if waiting_for:
+            # 处理用户输入
+            await handle_config_input(update, context, waiting_for)
+            return
+
+    # 检查权限 - 仅超级管理员和白名单用户可用
+    if not AIManager.is_user_authorized(user_id, context):
+        # 不回复非白名单用户
         return
 
     # 检查是否有其他模块的活跃会话
@@ -2027,9 +3206,6 @@ async def handle_private_photo(update: Update,
                                context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理私聊中的图片消息"""
     user_id = update.effective_user.id
-
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
 
     # 如果是编辑的消息，不处理
     if update.edited_message:
@@ -2274,6 +3450,12 @@ async def setup(module_interface):
     photo_handler = MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE,
                                    handle_private_photo)
     await module_interface.register_handler(photo_handler)
+
+    # 注册配置按钮回调处理器（带权限验证）
+    await module_interface.register_callback_handler(
+        handle_config_callback,
+        pattern=f"^{CALLBACK_PREFIX}",
+        admin_level="super_admin")
 
     # 设置定期任务
     async def _periodic_tasks():

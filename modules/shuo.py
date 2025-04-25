@@ -6,18 +6,27 @@ import re
 import aiohttp
 from datetime import datetime
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ContextTypes, CallbackQueryHandler
+from telegram.ext import ContextTypes, MessageHandler, filters
 from utils.formatter import TextFormatter
+from utils.pagination import PaginationHelper
 
 # 模块元数据
 MODULE_NAME = "shuo"
 MODULE_VERSION = "3.0.0"
 MODULE_DESCRIPTION = "发布说说到 GitHub 仓库"
-MODULE_COMMANDS = ["shuo", "shuoconfig", "shuodel"]
+MODULE_COMMANDS = ["shuo"]
 MODULE_CHAT_TYPES = ["private"]  # 仅限私聊使用
 
 # 模块配置文件路径
 CONFIG_FILE = "config/shuo_config.json"
+
+# 按钮回调前缀
+CALLBACK_PREFIX = "shuo_"
+
+# 会话状态常量
+SESSION_WAITING_CONTENT = "waiting_content"
+SESSION_WAITING_CONFIG = "waiting_config"
+SESSION_CONFIG_TYPE = "config_type"
 
 # 默认配置
 DEFAULT_CONFIG = {
@@ -72,20 +81,69 @@ async def shuo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
+    user_id = update.effective_user.id
 
     # 检查是否配置了 GitHub 信息
     if not _config["github_token"] or not _config[
             "github_repo"] or not _config["json_path"]:
-        await message.reply_text("⚠️ 模块配置不完整，请先设置 GitHub 令牌、仓库和文件路径。\n"
-                                 "使用 /shuoconfig 命令进行配置。")
+        # 创建配置按钮
+        keyboard = [[
+            InlineKeyboardButton("Config",
+                                 callback_data=f"{CALLBACK_PREFIX}open_config")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await message.reply_text("⚠️ 模块配置不完整，请先设置 GitHub 令牌、仓库和文件路径",
+                                 reply_markup=reply_markup)
         return
 
-    # 获取说说内容
-    if not context.args:
-        await show_help(update, context)
+    # 如果有参数，直接处理
+    if context.args:
+        content = " ".join(context.args)
+        await publish_shuo(update, None, content)
         return
 
-    content = " ".join(context.args)
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await message.reply_text("系统错误，请联系管理员")
+        return
+
+    # 设置会话状态，等待用户输入说说内容
+    await session_manager.set(user_id, "shuo_active", True)
+    await session_manager.set(user_id, "shuo_step", SESSION_WAITING_CONTENT)
+
+    # 创建按钮面板
+    keyboard = [[
+        InlineKeyboardButton("Config",
+                             callback_data=f"{CALLBACK_PREFIX}open_config"),
+        InlineKeyboardButton("Manage",
+                             callback_data=f"{CALLBACK_PREFIX}open_manage")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 发送提示消息
+    await message.reply_text(
+        "📝 *请输入要发布的说说内容*\n\n"
+        "• 可以使用 #标签 添加标签\n"
+        "• 支持 HTML 标签进行格式化：\n"
+        "  `<b>粗体</b>` `<i>斜体</i>` `<u>下划线</u>`\n"
+        "  `<s>删除线</s>` `<code>代码</code>`\n"
+        "  `<a href=\"链接\">文本</a>`\n\n"
+        "• 使用 /cancel 命令可以取消操作",
+        reply_markup=reply_markup,
+        parse_mode="MARKDOWN")
+
+
+async def publish_shuo(update: Update, _: ContextTypes.DEFAULT_TYPE,
+                       content: str):
+    """发布说说的核心功能"""
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+
+    # 如果是回调查询，使用原始消息
+    if update.callback_query:
+        message = update.callback_query.message
 
     # 检查是否包含标签
     tags = []
@@ -137,76 +195,84 @@ async def shuo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"*内容:*\n{content}",
                 parse_mode="MARKDOWN")
         else:
-            await waiting_message.edit_text("❌ 发布失败，请稍后重试或检查 GitHub 配置。")
+            await waiting_message.edit_text("❌ 发布失败，请稍后重试或检查 GitHub 配置")
 
     except Exception as e:
         _module_interface.logger.error(f"发布说说失败: {e}")
         await waiting_message.edit_text(f"❌ 发布过程中出现错误: {str(e)}")
 
 
-async def shuodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """删除说说命令"""
-    # 由于 MODULE_CHAT_TYPES = ["private"]，此命令只会在私聊中被调用
-    # 框架会自动处理聊天类型检查
+async def show_config(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    """显示配置界面"""
+    # 检查是从回调查询还是从命令调用
+    is_callback = update.callback_query is not None
 
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
+    # 显示当前配置和按钮界面
+    repo = TextFormatter.escape_markdown(
+        _config['github_repo']) if _config['github_repo'] else '未设置'
+    path = TextFormatter.escape_markdown(
+        _config['json_path']) if _config['json_path'] else '未设置'
+    branch = TextFormatter.escape_markdown(_config['github_branch'])
+    token = "已设置" if _config['github_token'] else '未设置'
 
-    # 检查是否配置了 GitHub 信息
-    if not _config["github_token"] or not _config[
-            "github_repo"] or not _config["json_path"]:
-        await message.reply_text("⚠️ 模块配置不完整，请先设置 GitHub 令牌、仓库和文件路径。\n"
-                                 "使用 /shuoconfig 命令进行配置。")
-        return
+    config_text = ("*📝 说说模块配置*\n\n"
+                   f"*GitHub 令牌:* {token}\n"
+                   f"*GitHub 仓库:* {repo}\n"
+                   f"*分支:* {branch}\n"
+                   f"*JSON 路径:* {path}\n"
+                   f"*当前 Key:* {_config['last_key']}\n\n"
+                   "请选择要修改的配置项：")
 
-    # 如果有参数，则尝试删除特定 key 的说说
-    if context.args:
-        post_key = context.args[0]
-        await delete_post(update, context, post_key)
-    else:
-        # 否则列出最近的说说
-        await list_posts(update, context, page=0)
+    # 创建配置按钮
+    keyboard = [[
+        InlineKeyboardButton("Token",
+                             callback_data=f"{CALLBACK_PREFIX}config_token"),
+        InlineKeyboardButton("Repo",
+                             callback_data=f"{CALLBACK_PREFIX}config_repo")
+    ],
+                [
+                    InlineKeyboardButton(
+                        "Path", callback_data=f"{CALLBACK_PREFIX}config_path"),
+                    InlineKeyboardButton(
+                        "Branch",
+                        callback_data=f"{CALLBACK_PREFIX}config_branch")
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⇠ Back",
+                        callback_data=f"{CALLBACK_PREFIX}back_to_main")
+                ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        if is_callback:
+            # 如果是从回调查询调用，使用 edit_message_text
+            await update.callback_query.edit_message_text(
+                config_text, parse_mode="MARKDOWN", reply_markup=reply_markup)
+        else:
+            # 如果是从命令调用，使用 reply_text
+            message = update.message or update.edited_message
+            await message.reply_text(config_text,
+                                     parse_mode="MARKDOWN",
+                                     reply_markup=reply_markup)
+    except Exception as e:
+        _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
+        # 如果 Markdown 解析失败，尝试使用纯文本发送
+        plain_text = TextFormatter.markdown_to_plain(config_text)
+
+        if is_callback:
+            await update.callback_query.edit_message_text(
+                plain_text, reply_markup=reply_markup)
+        else:
+            message = update.message or update.edited_message
+            await message.reply_text(plain_text, reply_markup=reply_markup)
 
 
-async def shuoconfig_command(update: Update,
-                             context: ContextTypes.DEFAULT_TYPE):
-    """配置说说模块"""
-    # 由于 MODULE_CHAT_TYPES = ["private"]，此命令只会在私聊中被调用
-    # 框架会自动处理聊天类型检查
-
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
-
-    if not context.args or len(context.args) < 2:
-        # 显示当前配置
-        repo = TextFormatter.escape_markdown(
-            _config['github_repo']) if _config['github_repo'] else '未设置'
-        path = TextFormatter.escape_markdown(
-            _config['json_path']) if _config['json_path'] else '未设置'
-        branch = TextFormatter.escape_markdown(_config['github_branch'])
-
-        config_text = ("*📝 说说模块配置*\n\n"
-                       f"*GitHub 仓库:* {repo}\n"
-                       f"*分支:* {branch}\n"
-                       f"*JSON 路径:* {path}\n"
-                       f"*当前 Key:* {_config['last_key']}\n\n"
-                       "*配置命令:*\n"
-                       "`/shuoconfig token YOUR_TOKEN` - 设置 GitHub 令牌\n"
-                       "`/shuoconfig repo 用户名/仓库名` - 设置仓库\n"
-                       "`/shuoconfig path 文件路径` - 设置 JSON 文件路径\n"
-                       "`/shuoconfig branch 分支名` - 设置分支（默认 master）")
-
-        try:
-            await message.reply_text(config_text, parse_mode="MARKDOWN")
-        except Exception as e:
-            _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
-            # 如果 Markdown 解析失败，尝试使用纯文本发送
-            plain_text = TextFormatter.markdown_to_plain(config_text)
-            await message.reply_text(plain_text)
-        return
-
-    key = context.args[0].lower()
-    value = " ".join(context.args[1:])
+async def update_config(update: Update, _: ContextTypes.DEFAULT_TYPE, key: str,
+                        value: str):
+    """更新配置项"""
+    # 检查是从回调查询还是从命令调用
+    is_callback = update.callback_query is not None
 
     # 映射简化命令到配置项
     key_mapping = {
@@ -225,63 +291,195 @@ async def shuoconfig_command(update: Update,
         _config[config_key] = value
         save_config()
 
-        await message.reply_text(f"✅ 已设置 {key} = {log_value}")
+        # 发送成功消息
+        success_message = f"✅ 已设置 {key} = {log_value}"
+
+        if is_callback:
+            # 如果是从回调查询调用，使用 answer 方法
+            await update.callback_query.answer(success_message)
+
+        # 显示更新后的配置
+        await show_config(update, None)
     else:
-        await message.reply_text(f"❌ 未知配置项: {key}\n\n"
-                                 "可用配置项: token, repo, path, branch")
+        error_message = f"❌ 未知配置项: {key}\n\n可用配置项: token, repo, path, branch"
+
+        if is_callback:
+            # 如果是从回调查询调用，使用 answer 方法
+            await update.callback_query.answer(error_message)
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理按钮回调"""
     query = update.callback_query
+    user_id = update.effective_user.id
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+
+    # 确保回调查询得到响应
     await query.answer()
 
     # 解析回调数据
     data = query.data
 
-    if data.startswith("shuo_page_"):
+    if data.startswith(f"{CALLBACK_PREFIX}page_"):
         # 翻页
-        page = int(data.replace("shuo_page_", ""))
+        page = int(data.replace(f"{CALLBACK_PREFIX}page_", ""))
         await show_posts_page(query, context, page)
 
-    elif data.startswith("shuo_confirm_delete_"):
+    elif data.startswith(f"{CALLBACK_PREFIX}delete_"):
+        # 显示删除确认界面
+        post_key = data.replace(f"{CALLBACK_PREFIX}delete_", "")
+
+        # 调用显示确认删除界面函数
+        await show_confirm_delete(update, context, post_key)
+
+    elif data.startswith(f"{CALLBACK_PREFIX}confirm_delete_"):
         # 确认删除
-        post_key = data.replace("shuo_confirm_delete_", "")
+        post_key = data.replace(f"{CALLBACK_PREFIX}confirm_delete_", "")
 
-        # 获取 JSON 数据
-        json_data = await fetch_json_from_github()
+        # 调用删除函数
+        await delete_post(update, context, post_key)
 
-        if not json_data:
-            await query.edit_message_text("⚠️ 无法获取说说数据。")
+    elif data == f"{CALLBACK_PREFIX}cancel_delete":
+        # 取消删除，返回说说列表
+        await list_posts(update, context, page=0)
+
+    elif data == f"{CALLBACK_PREFIX}back_to_config":
+        # 返回配置面板，清除会话状态
+        if session_manager:
+            await session_manager.delete(user_id, "shuo_active")
+            await session_manager.delete(user_id, "shuo_step")
+            await session_manager.delete(user_id, "shuo_config_type")
+
+        # 重新显示配置面板
+        await show_config(update, None)
+
+    elif data == f"{CALLBACK_PREFIX}back_to_list":
+        # 返回说说列表，清除会话状态
+        if session_manager:
+            await session_manager.delete(user_id, "shuo_active")
+            await session_manager.delete(user_id, "shuo_step")
+
+        # 显示说说列表
+        await list_posts(update, context, page=0)
+
+    elif data == f"{CALLBACK_PREFIX}back_to_main":
+        # 返回主菜单，清除会话状态
+        if session_manager:
+            await session_manager.delete(user_id, "shuo_active")
+            await session_manager.delete(user_id, "shuo_step")
+            await session_manager.delete(user_id, "shuo_config_type")
+
+        # 重新显示主菜单
+        # 获取消息对象
+        message = update.callback_query.message
+
+        # 创建按钮面板
+        keyboard = [[
+            InlineKeyboardButton(
+                "Config", callback_data=f"{CALLBACK_PREFIX}open_config"),
+            InlineKeyboardButton("Manage",
+                                 callback_data=f"{CALLBACK_PREFIX}open_manage")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # 设置会话状态，等待用户输入说说内容
+        if session_manager:
+            await session_manager.set(user_id, "shuo_active", True)
+            await session_manager.set(user_id, "shuo_step",
+                                      SESSION_WAITING_CONTENT)
+
+        # 发送主菜单消息
+        await message.edit_text(
+            "📝 *请输入要发布的说说内容*\n\n"
+            "• 可以使用 #标签 添加标签\n"
+            "• 支持 HTML 标签进行格式化：\n"
+            "  `<b>粗体</b>` `<i>斜体</i>` `<u>下划线</u>`\n"
+            "  `<s>删除线</s>` `<code>代码</code>`\n"
+            "  `<a href=\"链接\">文本</a>`\n\n"
+            "• 使用 /cancel 命令可以取消操作",
+            reply_markup=reply_markup,
+            parse_mode="MARKDOWN")
+
+    elif data == f"{CALLBACK_PREFIX}open_config":
+        # 打开配置面板，清除会话状态
+        if session_manager:
+            await session_manager.delete(user_id, "shuo_active")
+            await session_manager.delete(user_id, "shuo_step")
+
+        # 显示配置面板
+        await show_config(update, None)
+
+    elif data == f"{CALLBACK_PREFIX}open_manage":
+        # 打开管理面板，清除会话状态
+        if session_manager:
+            await session_manager.delete(user_id, "shuo_active")
+            await session_manager.delete(user_id, "shuo_step")
+
+        # 显示说说列表
+        await list_posts(update, context, page=0)
+
+    elif data.startswith(f"{CALLBACK_PREFIX}config_"):
+        # 配置操作
+        config_type = data.replace(f"{CALLBACK_PREFIX}config_", "")
+
+        if not session_manager:
+            await query.edit_message_text("系统错误，请联系管理员")
             return
 
-        # 查找并删除特定 key 的说说
-        post_index = next((i for i, item in enumerate(json_data)
-                           if item.get("key") == post_key), -1)
+        # 设置会话状态，等待用户输入配置值
+        await session_manager.set(user_id, "shuo_active", True)
+        await session_manager.set(user_id, "shuo_step", SESSION_WAITING_CONFIG)
+        await session_manager.set(user_id, "shuo_config_type", config_type)
 
-        if post_index == -1:
-            await query.edit_message_text(f"⚠️ 未找到 key 为 {post_key} 的说说。")
-            return
+        # 创建返回按钮
+        keyboard = [[
+            InlineKeyboardButton(
+                "⇠ Back", callback_data=f"{CALLBACK_PREFIX}back_to_config")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # 删除说说
-        del json_data[post_index]
-
-        # 更新 GitHub 上的文件
-        success = await update_github_json(json_data)
-
-        if success:
-            await query.edit_message_text(f"✅ 成功删除 key 为 {post_key} 的说说！")
+        # 根据配置类型显示不同的提示
+        if config_type == "token":
+            await query.edit_message_text(
+                "请输入 GitHub 个人访问令牌：\n\n"
+                "您可以在 GitHub 的 Settings > Developer settings > Personal access tokens 中创建",
+                reply_markup=reply_markup)
+        elif config_type == "repo":
+            await query.edit_message_text(
+                "请输入 GitHub 仓库名称：\n\n"
+                "格式：用户名/仓库名，例如：username/repo",
+                reply_markup=reply_markup)
+        elif config_type == "path":
+            await query.edit_message_text(
+                "请输入 JSON 文件在仓库中的路径：\n\n"
+                "例如：data/posts.json",
+                reply_markup=reply_markup)
+        elif config_type == "branch":
+            await query.edit_message_text("请输入分支名称：\n\n"
+                                          "默认为 master 或 main",
+                                          reply_markup=reply_markup)
         else:
-            await query.edit_message_text("❌ 删除失败，请稍后重试。")
-
-    elif data == "shuo_cancel_delete":
-        # 取消删除
-        await query.edit_message_text("❌ 已取消删除操作。")
+            await query.edit_message_text(f"未知配置类型: {config_type}")
+            await session_manager.delete(user_id, "shuo_active")
+            await session_manager.delete(user_id, "shuo_step")
+            await session_manager.delete(user_id, "shuo_config_type")
 
 
 # 辅助函数
-async def list_posts(update: Update, _: ContextTypes.DEFAULT_TYPE, page=0):
-    """列出说说，支持翻页"""
+async def list_posts(update: Update,
+                     context: ContextTypes.DEFAULT_TYPE,
+                     page=0):
+    """列出说说，支持翻页，使用PaginationHelper"""
+    # 检查是从回调查询还是从命令调用
+    is_callback = update.callback_query is not None
+
+    if is_callback:
+        # 如果是从回调查询调用，直接使用 show_posts_page
+        await show_posts_page(update.callback_query, context, page)
+        return
+
     # 获取消息对象（可能是新消息或编辑的消息）
     msg = update.message or update.edited_message
 
@@ -292,31 +490,17 @@ async def list_posts(update: Update, _: ContextTypes.DEFAULT_TYPE, page=0):
     json_data = await fetch_json_from_github()
 
     if not json_data:
-        await waiting_message.edit_text("⚠️ 没有找到任何说说，或无法获取数据。")
+        await waiting_message.edit_text("⚠️ 没有找到任何说说，或无法获取数据")
         return
 
-    # 计算分页 - 每页 4 条
-    items_per_page = 4
-    total_pages = (len(json_data) + items_per_page - 1) // items_per_page
-
-    # 确保页码有效
-    page = max(0, min(page, total_pages - 1))
-
-    # 获取当前页的数据
-    start_idx = page * items_per_page
-    end_idx = min(start_idx + items_per_page, len(json_data))
-    current_page_data = json_data[start_idx:end_idx]
-
-    # 构建更美观的说说列表
-    list_text = f"*📝 说说列表 (第 {page+1}/{total_pages} 页)*\n\n"
-
-    for i, post in enumerate(current_page_data, start_idx + 1):
+    # 创建格式化函数
+    def format_post(post):
         key = post.get("key", "")
         date = post.get("date", "")
         content = post.get("content", "")
         tags = post.get("tags", [])
 
-        # 使用 TextFormatter.strip_html 去除 HTML 标签后再截断
+        # 处理内容预览
         plain_content = TextFormatter.normalize_whitespace(content)
         if len(plain_content) > 30:
             preview_content = plain_content[:27] + "..."
@@ -328,78 +512,125 @@ async def list_posts(update: Update, _: ContextTypes.DEFAULT_TYPE, page=0):
         safe_date = TextFormatter.escape_markdown(date)
         safe_preview = TextFormatter.escape_markdown(preview_content)
 
-        # 美化格式
-        list_text += f"*{i}. Key: {safe_key}*\n"
-        list_text += f"📅 {safe_date}\n"
-        list_text += f"📝 {safe_preview}\n"
+        # 构建格式化文本
+        formatted_text = f"*Key: {safe_key}*\n"
+        formatted_text += f"📅 {safe_date}\n"
+        formatted_text += f"📝 {safe_preview}\n"
 
         # 显示标签
         if tags:
             safe_tags = [TextFormatter.escape_markdown(tag) for tag in tags]
             tags_text = " ".join([f"#{tag}" for tag in safe_tags])
-            list_text += f"🏷 {tags_text}\n"
+            formatted_text += f"🏷 {tags_text}\n"
 
-        list_text += "\n"
+        return formatted_text
 
-    # 添加使用说明
-    list_text += "_使用 /shuodel 数字 key 删除特定说说_"
+    # 创建自定义键盘生成函数
+    def create_custom_keyboard(posts_subset, current_page, total_pages):
+        keyboard_buttons = []
 
-    # 创建翻页按钮
-    buttons = []
-    if page > 0:
-        buttons.append(
-            InlineKeyboardButton("◁ Prev",
-                                 callback_data=f"shuo_page_{page-1}"))
-    if page < total_pages - 1:
-        buttons.append(
-            InlineKeyboardButton("Next ▷",
-                                 callback_data=f"shuo_page_{page+1}"))
+        # 为每个说说添加删除按钮
+        delete_buttons = []
+        for post in posts_subset:
+            post_key = post.get("key", "")
+            if post_key:
+                delete_buttons.append(
+                    InlineKeyboardButton(
+                        f"Del #{post_key}",
+                        callback_data=f"{CALLBACK_PREFIX}delete_{post_key}"))
 
-    keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
+        # 添加删除按钮，每行两个
+        for i in range(0, len(delete_buttons), 2):
+            row = delete_buttons[i:i + 2]
+            keyboard_buttons.append(row)
+
+        # 添加导航按钮
+        nav_buttons = []
+        if current_page > 0:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    "◁ Prev",
+                    callback_data=f"{CALLBACK_PREFIX}page_{current_page-1}"))
+        else:
+            nav_buttons.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        nav_buttons.append(
+            InlineKeyboardButton(f"{current_page + 1}/{total_pages}",
+                                 callback_data="noop"))
+
+        if current_page < total_pages - 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    "Next ▷",
+                    callback_data=f"{CALLBACK_PREFIX}page_{current_page+1}"))
+        else:
+            nav_buttons.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        keyboard_buttons.append(nav_buttons)
+
+        # 添加返回按钮
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                "⇠ Back", callback_data=f"{CALLBACK_PREFIX}back_to_main")
+        ])
+
+        return InlineKeyboardMarkup(keyboard_buttons)
+
+    # 创建分页助手
+    pagination = PaginationHelper(
+        items=json_data,
+        page_size=4,  # 每页4条说说
+        format_item=format_post,
+        title="📝 说说列表",
+        callback_prefix=f"{CALLBACK_PREFIX}page")
+
+    # 确保页码有效
+    page = max(0, min(page, pagination.total_pages - 1))
+
+    # 获取当前页的数据范围
+    start_idx = page * pagination.page_size
+    end_idx = min(start_idx + pagination.page_size, len(json_data))
+    current_page_data = json_data[start_idx:end_idx]
+
+    # 获取页面内容
+    content, _ = pagination.get_page_content(page)
+
+    # 创建自定义键盘
+    custom_keyboard = create_custom_keyboard(current_page_data, page,
+                                             pagination.total_pages)
 
     # 使用普通 Markdown 格式
     try:
-        await waiting_message.edit_text(list_text,
+        await waiting_message.edit_text(content,
                                         parse_mode="MARKDOWN",
-                                        reply_markup=keyboard)
+                                        reply_markup=custom_keyboard,
+                                        disable_web_page_preview=True)
     except Exception as e:
         _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
         # 回退到纯文本
-        plain_text = TextFormatter.markdown_to_plain(list_text)
-        await waiting_message.edit_text(plain_text, reply_markup=keyboard)
+        plain_text = TextFormatter.markdown_to_plain(content)
+        await waiting_message.edit_text(plain_text,
+                                        reply_markup=custom_keyboard,
+                                        disable_web_page_preview=True)
 
 
-async def show_posts_page(query, _, page=0):
-    """显示特定页的说说列表"""
+async def show_posts_page(query, context, page=0):
+    """显示特定页的说说列表，使用PaginationHelper"""
     # 获取 JSON 数据
     json_data = await fetch_json_from_github()
 
     if not json_data:
-        await query.edit_message_text("⚠️ 没有找到任何说说，或无法获取数据。")
+        await query.edit_message_text("⚠️ 没有找到任何说说，或无法获取数据")
         return
 
-    # 计算分页 - 每页 4 条
-    items_per_page = 4
-    total_pages = (len(json_data) + items_per_page - 1) // items_per_page
-
-    # 确保页码有效
-    page = max(0, min(page, total_pages - 1))
-
-    # 获取当前页的数据
-    start_idx = page * items_per_page
-    end_idx = min(start_idx + items_per_page, len(json_data))
-    current_page_data = json_data[start_idx:end_idx]
-
-    # 构建更美观的说说列表
-    list_text = f"*📝 说说列表 (第 {page+1}/{total_pages} 页)*\n\n"
-
-    for i, post in enumerate(current_page_data, start_idx + 1):
+    # 创建格式化函数
+    def format_post(post):
         key = post.get("key", "")
         date = post.get("date", "")
         content = post.get("content", "")
         tags = post.get("tags", [])
 
-        # 使用 TextFormatter.normalize_whitespace 处理文本
+        # 处理内容预览
         plain_content = TextFormatter.normalize_whitespace(content)
         if len(plain_content) > 30:
             preview_content = plain_content[:27] + "..."
@@ -411,61 +642,123 @@ async def show_posts_page(query, _, page=0):
         safe_date = TextFormatter.escape_markdown(date)
         safe_preview = TextFormatter.escape_markdown(preview_content)
 
-        # 美化格式
-        list_text += f"*{i}. Key: {safe_key}*\n"
-        list_text += f"📅 {safe_date}\n"
-        list_text += f"📝 {safe_preview}\n"
+        # 构建格式化文本
+        formatted_text = f"*Key: {safe_key}*\n"
+        formatted_text += f"📅 {safe_date}\n"
+        formatted_text += f"📝 {safe_preview}\n"
 
         # 显示标签
         if tags:
             safe_tags = [TextFormatter.escape_markdown(tag) for tag in tags]
             tags_text = " ".join([f"#{tag}" for tag in safe_tags])
-            list_text += f"🏷 {tags_text}\n"
+            formatted_text += f"🏷 {tags_text}\n"
 
-        list_text += "\n"
+        return formatted_text
 
-    # 添加使用说明
-    list_text += "_使用 /shuodel 数字 key 删除特定说说_"
+    # 创建自定义键盘生成函数
+    def create_custom_keyboard(posts_subset, current_page, total_pages):
+        keyboard_buttons = []
 
-    # 创建翻页按钮
-    buttons = []
-    if page > 0:
-        buttons.append(
-            InlineKeyboardButton("◁ Prev",
-                                 callback_data=f"shuo_page_{page-1}"))
-    if page < total_pages - 1:
-        buttons.append(
-            InlineKeyboardButton("Next ▷",
-                                 callback_data=f"shuo_page_{page+1}"))
+        # 为每个说说添加删除按钮
+        delete_buttons = []
+        for post in posts_subset:
+            post_key = post.get("key", "")
+            if post_key:
+                delete_buttons.append(
+                    InlineKeyboardButton(
+                        f"Del #{post_key}",
+                        callback_data=f"{CALLBACK_PREFIX}delete_{post_key}"))
 
-    keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
+        # 添加删除按钮，每行两个
+        for i in range(0, len(delete_buttons), 2):
+            row = delete_buttons[i:i + 2]
+            keyboard_buttons.append(row)
+
+        # 添加导航按钮
+        nav_buttons = []
+        if current_page > 0:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    "◁ Prev",
+                    callback_data=f"{CALLBACK_PREFIX}page_{current_page-1}"))
+        else:
+            nav_buttons.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        nav_buttons.append(
+            InlineKeyboardButton(f"{current_page + 1}/{total_pages}",
+                                 callback_data="noop"))
+
+        if current_page < total_pages - 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    "Next ▷",
+                    callback_data=f"{CALLBACK_PREFIX}page_{current_page+1}"))
+        else:
+            nav_buttons.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        keyboard_buttons.append(nav_buttons)
+
+        # 添加返回按钮
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                "⇠ Back", callback_data=f"{CALLBACK_PREFIX}back_to_main")
+        ])
+
+        return InlineKeyboardMarkup(keyboard_buttons)
+
+    # 创建分页助手
+    pagination = PaginationHelper(
+        items=json_data,
+        page_size=4,  # 每页4条说说
+        format_item=format_post,
+        title="📝 说说列表",
+        callback_prefix=f"{CALLBACK_PREFIX}page")
+
+    # 确保页码有效
+    page = max(0, min(page, pagination.total_pages - 1))
+
+    # 获取当前页的数据范围
+    start_idx = page * pagination.page_size
+    end_idx = min(start_idx + pagination.page_size, len(json_data))
+    current_page_data = json_data[start_idx:end_idx]
+
+    # 获取页面内容
+    content, _ = pagination.get_page_content(page)
+
+    # 创建自定义键盘
+    custom_keyboard = create_custom_keyboard(current_page_data, page,
+                                             pagination.total_pages)
 
     # 使用普通 Markdown 格式
     try:
-        await query.edit_message_text(list_text,
+        await query.edit_message_text(content,
                                       parse_mode="MARKDOWN",
-                                      reply_markup=keyboard)
+                                      reply_markup=custom_keyboard,
+                                      disable_web_page_preview=True)
     except Exception as e:
         _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
         # 回退到纯文本
-        plain_text = TextFormatter.markdown_to_plain(list_text)
-        await query.edit_message_text(plain_text, reply_markup=keyboard)
+        plain_text = TextFormatter.markdown_to_plain(content)
+        await query.edit_message_text(plain_text,
+                                      reply_markup=custom_keyboard,
+                                      disable_web_page_preview=True)
 
 
-async def delete_post(update: Update, _: ContextTypes.DEFAULT_TYPE,
-                      post_key: str):
-    """删除特定 key 的说说"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    msg = update.message or update.edited_message
+async def show_confirm_delete(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE,
+                              post_key: str):
+    """显示删除确认界面"""
+    # 获取消息对象
+    query = update.callback_query
 
     # 发送处理中消息
-    waiting_message = await msg.reply_text("🔄 正在处理...")
+    await query.edit_message_text("🔄 正在获取说说信息...")
 
     # 获取 JSON 数据
     json_data = await fetch_json_from_github()
 
     if not json_data:
-        await waiting_message.edit_text("⚠️ 无法获取说说数据。")
+        await query.edit_message_text("⚠️ 无法获取说说数据")
         return
 
     # 查找特定 key 的说说
@@ -474,14 +767,16 @@ async def delete_post(update: Update, _: ContextTypes.DEFAULT_TYPE,
         -1)
 
     if post_index == -1:
-        await waiting_message.edit_text(f"⚠️ 未找到 key 为 {post_key} 的说说。")
+        await query.edit_message_text(f"⚠️ 未找到 key 为 {post_key} 的说说")
         return
 
     # 创建确认按钮
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("◯ Confirm",
-                             callback_data=f"shuo_confirm_delete_{post_key}"),
-        InlineKeyboardButton("⨉ Cancel", callback_data="shuo_cancel_delete")
+        InlineKeyboardButton(
+            "◯ Confirm",
+            callback_data=f"{CALLBACK_PREFIX}confirm_delete_{post_key}"),
+        InlineKeyboardButton("⨉ Cancel",
+                             callback_data=f"{CALLBACK_PREFIX}cancel_delete")
     ]])
 
     # 获取说说内容预览
@@ -501,47 +796,53 @@ async def delete_post(update: Update, _: ContextTypes.DEFAULT_TYPE,
     safe_date = TextFormatter.escape_markdown(date)
     safe_preview = TextFormatter.escape_markdown(preview_content)
 
-    await waiting_message.edit_text(
+    await query.edit_message_text(
         f"⚠️ *确定要删除这条说说吗？*\n\n"
         f"*Key:* {safe_key}\n"
         f"*时间:* {safe_date}\n"
         f"*内容:* {safe_preview}\n\n"
         f"此操作不可撤销！",
         reply_markup=keyboard,
-        parse_mode="MARKDOWN")
+        parse_mode="MARKDOWN",
+        disable_web_page_preview=True)
 
 
-async def show_help(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    """显示帮助信息，包含 HTML 标签说明"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
+async def delete_post(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                      post_key: str):
+    """删除特定 key 的说说"""
+    # 获取消息对象
+    query = update.callback_query
 
-    help_text = ("*📝 说说发布帮助*\n\n"
-                 "使用此功能可以发布说说到您的 GitHub 仓库。\n\n"
-                 "*基本命令:*\n"
-                 "`/shuo 你的内容` - 发布一条说说\n\n"
-                 "*添加标签:*\n"
-                 "在内容中使用 #标签 格式添加标签\n"
-                 "例如: `/shuo 今天天气真好 #日常 #心情`\n\n"
-                 "*支持 HTML 标签:*\n"
-                 "• `<b>粗体</b>` - 粗体文本\n"
-                 "• `<i>斜体</i>` - 斜体文本\n"
-                 "• `<u>下划线</u>` - 带下划线文本\n"
-                 "• `<s>删除线</s>` - 带删除线文本\n"
-                 "• `<code>代码</code>` - 等宽字体\n"
-                 "• `<pre>预格式化</pre>` - 预格式化文本\n"
-                 "• `<a href=\"链接地址\">链接文本</a>` - 超链接\n\n"
-                 "*管理命令:*\n"
-                 "`/shuoconfig` - 配置模块参数\n"
-                 "`/shuodel` - 查看和删除说说")
+    # 发送处理中消息
+    await query.edit_message_text("🔄 正在处理...")
 
-    try:
-        await message.reply_text(help_text, parse_mode="MARKDOWN")
-    except Exception as e:
-        _module_interface.logger.error(f"发送 Markdown 格式消息失败: {e}")
-        # 回退到纯文本
-        plain_text = TextFormatter.markdown_to_plain(help_text)
-        await message.reply_text(plain_text)
+    # 获取 JSON 数据
+    json_data = await fetch_json_from_github()
+
+    if not json_data:
+        await query.edit_message_text("⚠️ 无法获取说说数据")
+        return
+
+    # 查找特定 key 的说说
+    post_index = next(
+        (i for i, item in enumerate(json_data) if item.get("key") == post_key),
+        -1)
+
+    if post_index == -1:
+        await query.edit_message_text(f"⚠️ 未找到 key 为 {post_key} 的说说")
+        return
+
+    # 删除说说
+    del json_data[post_index]
+
+    # 更新 GitHub 上的文件
+    success = await update_github_json(json_data)
+
+    if success:
+        # 删除成功后，返回说说列表
+        await list_posts(update, context, page=0)
+    else:
+        await query.edit_message_text("❌ 删除失败，请稍后重试")
 
 
 # GitHub 操作函数
@@ -657,6 +958,125 @@ async def update_github_json(json_data):
 # 状态管理函数已移除，使用框架的状态管理功能
 
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理用户消息（用于会话流程）"""
+    # 检查是否有活动会话
+    user_id = update.effective_user.id
+    session_manager = context.bot_data.get("session_manager")
+
+    if not session_manager:
+        return
+
+    # 检查是否是说说模块的活跃会话
+    is_active = await session_manager.get(user_id, "shuo_active", False)
+    if not is_active:
+        return
+
+    # 获取当前步骤
+    step = await session_manager.get(user_id, "shuo_step")
+
+    # 处理不同步骤的输入
+    if step == SESSION_WAITING_CONTENT:
+        # 处理说说内容输入
+        content = update.message.text.strip()
+
+        # 清除会话状态
+        await session_manager.delete(user_id, "shuo_active")
+        await session_manager.delete(user_id, "shuo_step")
+
+        # 发布说说
+        await publish_shuo(update, None, content)
+
+    elif step == SESSION_WAITING_CONFIG:
+        # 处理配置值输入
+        config_type = await session_manager.get(user_id, "shuo_config_type")
+        value = update.message.text.strip()
+
+        # 清除会话状态
+        await session_manager.delete(user_id, "shuo_active")
+        await session_manager.delete(user_id, "shuo_step")
+        await session_manager.delete(user_id, "shuo_config_type")
+
+        # 更新配置
+        await update_config(update, None, config_type, value)
+
+    elif step == "waiting_for_delete_keys":
+        # 处理要删除的说说 key 输入
+        text = update.message.text.strip()
+
+        # 清除会话状态
+        await session_manager.delete(user_id, "shuo_active")
+        await session_manager.delete(user_id, "shuo_step")
+
+        # 解析输入的 key
+        # 支持空格分隔和换行分隔
+        keys = []
+
+        # 先按换行分割
+        lines = text.split('\n')
+        for line in lines:
+            # 再按空格分割每一行
+            line_keys = line.strip().split()
+            keys.extend(line_keys)
+
+        # 去重
+        keys = list(set(keys))
+
+        if not keys:
+            await update.message.reply_text("❌ 未提供有效的 key，操作已取消")
+            return
+
+        # 发送处理中消息
+        waiting_message = await update.message.reply_text(
+            f"🔄 正在处理 {len(keys)} 个删除请求...")
+
+        # 获取 JSON 数据
+        json_data = await fetch_json_from_github()
+
+        if not json_data:
+            await waiting_message.edit_text("⚠️ 无法获取说说数据")
+            return
+
+        # 记录删除结果
+        success_keys = []
+        failed_keys = []
+
+        # 查找并删除特定 key 的说说
+        for key in keys:
+            post_index = next((i for i, item in enumerate(json_data)
+                               if item.get("key") == key), -1)
+
+            if post_index != -1:
+                # 找到了，删除
+                del json_data[post_index]
+                success_keys.append(key)
+            else:
+                # 没找到
+                failed_keys.append(key)
+
+        # 如果有成功删除的，更新 GitHub 上的文件
+        if success_keys:
+            success = await update_github_json(json_data)
+
+            if success:
+                success_text = f"✅ 成功删除 {len(success_keys)} 条说说：\n" + ", ".join(
+                    success_keys)
+            else:
+                success_text = "❌ 删除操作失败，请稍后重试"
+        else:
+            success_text = "❌ 没有找到要删除的说说"
+
+        # 构建结果消息
+        result_text = success_text
+
+        if failed_keys:
+            result_text += f"\n\n⚠️ 未找到 {len(failed_keys)} 条说说：\n" + ", ".join(
+                failed_keys)
+
+        # 显示结果
+        await waiting_message.edit_text(result_text)
+
+
 async def setup(interface):
     """模块初始化"""
     global _module_interface, _state
@@ -675,22 +1095,17 @@ async def setup(interface):
     await interface.register_command("shuo",
                                      shuo_command,
                                      admin_level="super_admin",
-                                     description="发布说说到 GitHub 仓库")
+                                     description="发布、管理和配置说说")
 
-    await interface.register_command("shuoconfig",
-                                     shuoconfig_command,
-                                     admin_level="super_admin",
-                                     description="配置说说模块参数")
+    # 注册带权限验证的回调处理器
+    await interface.register_callback_handler(button_callback,
+                                              pattern=f"^{CALLBACK_PREFIX}",
+                                              admin_level="super_admin")
 
-    await interface.register_command("shuodel",
-                                     shuodel_command,
-                                     admin_level="super_admin",
-                                     description="查看和删除说说")
-
-    # 注册回调查询处理器
-    await interface.register_handler(CallbackQueryHandler(button_callback,
-                                                          pattern=r"^shuo_"),
-                                     group=0)
+    # 注册消息处理器（用于会话流程）
+    message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                     handle_message)
+    await interface.register_handler(message_handler, group=6)
 
     interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 

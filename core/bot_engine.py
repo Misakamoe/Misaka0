@@ -165,6 +165,11 @@ class BotEngine:
         cleanup_task = asyncio.create_task(self.periodic_cleanup())
         self.tasks.append(cleanup_task)
 
+        # 启动配置文件监控任务
+        config_watch_task = asyncio.create_task(self.watch_config_changes())
+        self.tasks.append(config_watch_task)
+        self.logger.info("已启动配置文件监控，修改配置文件将自动生效")
+
         self.logger.info("机器人已成功启动")
 
     async def stop(self):
@@ -209,7 +214,7 @@ class BotEngine:
         # 尝试发送错误消息
         if update and hasattr(
                 update, 'effective_message') and update.effective_message:
-            await update.effective_message.reply_text("处理命令时发生错误，请查看日志获取详情。")
+            await update.effective_message.reply_text("处理命令时发生错误，请查看日志获取详情")
 
     def polling_error_callback(self, error):
         """轮询错误回调"""
@@ -309,11 +314,11 @@ class BotEngine:
                 self.config_manager.add_allowed_group(chat.id, user.id)
                 self.logger.info(f"Bot 被超级管理员 {user.id} 添加到群组 {chat.id}")
                 await context.bot.send_message(chat_id=chat.id,
-                                               text="✅ Bot 已被授权在此群组使用。")
+                                               text="✅ Bot 已被授权在此群组使用")
             else:
                 self.logger.warning(f"Bot 被非超级管理员 {user.id} 添加到群组 {chat.id}")
                 await context.bot.send_message(
-                    chat_id=chat.id, text="⚠️ Bot 只能由超级管理员添加到群组。将自动退出。")
+                    chat_id=chat.id, text="⚠️ Bot 只能由超级管理员添加到群组，将自动退出")
                 # 尝试离开群组
                 try:
                     await context.bot.leave_chat(chat.id)
@@ -336,7 +341,7 @@ class BotEngine:
         allowed_groups = self.config_manager.list_allowed_groups()
 
         if not allowed_groups:
-            await message_obj.reply_text("当前没有允许的群组。")
+            await message_obj.reply_text("当前没有允许的群组")
             return
 
         groups_message = "📋 *允许使用 Bot 的群组列表:*\n\n"
@@ -374,10 +379,10 @@ class BotEngine:
                 # 添加到白名单
                 self.logger.info(f"尝试添加当前群组 {chat.id} 到白名单")
                 if self.config_manager.add_allowed_group(chat.id, user_id):
-                    await message_obj.reply_text(f"✅ 已将当前群组 {chat.id} 添加到白名单。")
+                    await message_obj.reply_text(f"✅ 已将当前群组 {chat.id} 添加到白名单")
                     self.logger.info(f"成功添加群组 {chat.id} 到白名单")
                 else:
-                    await message_obj.reply_text(f"❌ 添加当前群组到白名单失败。")
+                    await message_obj.reply_text(f"❌ 添加当前群组到白名单失败")
                     self.logger.error(f"添加群组 {chat.id} 到白名单失败")
             else:
                 await message_obj.reply_text("当前不在群组中。用法: /addgroup [群组 ID]")
@@ -390,13 +395,13 @@ class BotEngine:
 
             # 添加到白名单
             if self.config_manager.add_allowed_group(group_id, user_id):
-                await message_obj.reply_text(f"✅ 已将群组 {group_id} 添加到白名单。")
+                await message_obj.reply_text(f"✅ 已将群组 {group_id} 添加到白名单")
                 self.logger.info(f"成功添加群组 {group_id} 到白名单")
             else:
-                await message_obj.reply_text(f"❌ 添加群组到白名单失败。")
+                await message_obj.reply_text(f"❌ 添加群组到白名单失败")
                 self.logger.error(f"添加群组 {group_id} 到白名单失败")
         except ValueError:
-            await message_obj.reply_text("群组 ID 必须是数字。")
+            await message_obj.reply_text("群组 ID 必须是数字")
         except Exception as e:
             self.logger.error(f"添加群组失败: {e}", exc_info=True)
             await message_obj.reply_text(f"添加群组失败: {e}")
@@ -419,25 +424,25 @@ class BotEngine:
 
             # 检查群组是否在白名单中
             if not self.config_manager.is_allowed_group(group_id):
-                await message_obj.reply_text(f"❌ 群组 {group_id} 不在白名单中。")
+                await message_obj.reply_text(f"❌ 群组 {group_id} 不在白名单中")
                 return
 
             # 如果是在目标群组中执行命令，先发送预警
             if is_in_target_group:
-                await message_obj.reply_text(f"⚠️ 正在将此群组从授权列表中移除，Bot 将退出。")
+                await message_obj.reply_text(f"⚠️ 正在将此群组从授权列表中移除，Bot 将退出")
 
             # 从白名单移除
             removed = self.config_manager.remove_allowed_group(group_id)
             if not removed:
                 if not is_in_target_group:  # 只有在非目标群组中才发送失败消息
-                    await message_obj.reply_text(f"❌ 从白名单移除群组 {group_id} 失败。")
+                    await message_obj.reply_text(f"❌ 从白名单移除群组 {group_id} 失败")
                 return
 
             # 如果不是在目标群组中执行命令，尝试向目标群组发送通知
             if not is_in_target_group:
                 try:
                     await context.bot.send_message(
-                        chat_id=group_id, text="⚠️ 此群组已从授权列表中移除，Bot 将退出。")
+                        chat_id=group_id, text="⚠️ 此群组已从授权列表中移除，Bot 将退出")
                 except Exception as e:
                     self.logger.warning(f"向群组 {group_id} 发送退出通知失败: {e}")
 
@@ -449,7 +454,7 @@ class BotEngine:
                 # 只有在非目标群组中才发送成功退出的消息
                 if not is_in_target_group:
                     await message_obj.reply_text(
-                        f"✅ 已将群组 {group_id} 从白名单移除并退出该群组。")
+                        f"✅ 已将群组 {group_id} 从白名单移除并退出该群组")
             except Exception as e:
                 self.logger.error(f"退出群组 {group_id} 失败: {e}")
                 # 只有在非目标群组中才发送退出失败的消息
@@ -458,7 +463,7 @@ class BotEngine:
                         f"✅ 已将群组 {group_id} 从白名单移除，但退出群组失败: {e}")
 
         except ValueError:
-            await message_obj.reply_text("群组 ID 必须是数字。")
+            await message_obj.reply_text("群组 ID 必须是数字")
         except Exception as e:
             self.logger.error(f"移除群组命令处理失败: {e}", exc_info=True)
             # 只有在非目标群组中才尝试发送错误消息

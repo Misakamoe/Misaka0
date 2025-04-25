@@ -7,21 +7,25 @@ import time
 import re
 import pytz
 from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
 MODULE_NAME = "reminder"
-MODULE_VERSION = "3.0.0"
+MODULE_VERSION = "3.1.0"
 MODULE_DESCRIPTION = "周期性和一次性提醒功能"
 MODULE_COMMANDS = ["remind", "remindonce", "reminders", "delreminder"]
 MODULE_CHAT_TYPES = ["private", "group"]  # 支持所有聊天类型
 
+# 按钮回调前缀
+CALLBACK_PREFIX = "reminder_"
+
+# 模块接口引用
+_module_interface = None
+
 # 模块常量
 MIN_INTERVAL = 10  # 最小提醒间隔（秒）
 DEFAULT_TIMEZONE = 'Asia/Hong_Kong'  # 默认时区
-CONFIG_FILE = "config/reminders.json"  # 配置文件路径
-DATA_FILE = "data/reminders.json"  # 数据存储文件
 AUTOSAVE_INTERVAL = 300  # 自动保存间隔（秒）
 
 # 模块全局变量
@@ -113,11 +117,13 @@ class PeriodicReminder(ReminderBase):
                  chat_id,
                  chat_type,
                  interval,
+                 first_reminder_time=None,
                  title=None):
         super().__init__(reminder_id, message, creator_id, creator_name,
                          chat_id, chat_type, title)
         self.interval = interval
         self.last_reminded = None
+        self.first_reminder_time = first_reminder_time  # 第一次提醒的时间戳
         self.type = "periodic"
 
     def to_dict(self):
@@ -125,7 +131,8 @@ class PeriodicReminder(ReminderBase):
         data.update({
             "type": "periodic",
             "interval": self.interval,
-            "last_reminded": self.last_reminded
+            "last_reminded": self.last_reminded,
+            "first_reminder_time": self.first_reminder_time
         })
         return data
 
@@ -135,7 +142,7 @@ class PeriodicReminder(ReminderBase):
                        data.get("creator_name", "未知用户"),
                        data.get("chat_id", "unknown"),
                        data.get("chat_type", "unknown"), data["interval"],
-                       data.get("title"))
+                       data.get("first_reminder_time"), data.get("title"))
         reminder.created_at = data.get("created_at", time.time())
         reminder.enabled = data.get("enabled", True)
         reminder.task_running = data.get("task_running", False)
@@ -151,6 +158,54 @@ class PeriodicReminder(ReminderBase):
         task_generation = self.update_generation
 
         try:
+            # 如果设置了第一次提醒时间，先等待到那个时间
+            if self.first_reminder_time and self.first_reminder_time > time.time(
+            ):
+                first_wait_time = self.first_reminder_time - time.time()
+
+                if first_wait_time > 0:
+                    module_interface.logger.debug(
+                        f"周期性提醒 {self.id} 将在 {first_wait_time:.1f} 秒后首次发送")
+
+                    # 分段等待，便于检查模块状态
+                    remaining_time = first_wait_time
+                    check_interval = min(remaining_time, 60)  # 最多等待60秒后检查一次
+
+                    while remaining_time > 0:
+                        await asyncio.sleep(check_interval)
+                        remaining_time -= check_interval
+
+                        # 检查代数
+                        if task_generation < _update_generation:
+                            module_interface.logger.debug(
+                                f"周期性提醒任务 {self.id} 检测到代数变化，停止")
+                            return
+
+                        # 检查聊天是否在白名单中（如果是群组）
+                        chat_id_int = int(self.chat_id)
+                        if chat_id_int < 0 and not context.bot_data.get(
+                                "config_manager").is_allowed_group(
+                                    chat_id_int):
+                            module_interface.logger.debug(
+                                f"提醒模块在聊天 {self.chat_id} 中不在白名单中，暂停计时")
+                            # 不减少时间，等下一次检查
+                            continue
+
+                        # 更新下一次检查间隔
+                        check_interval = min(remaining_time, 60)
+
+                    # 发送第一次提醒
+                    success = await self.send_reminder(context,
+                                                       module_interface)
+
+                    if success:
+                        module_interface.logger.debug(
+                            f"已发送周期性提醒 {self.id} 的首次提醒到聊天 {self.chat_id}")
+
+                    # 更新最后提醒时间并保存
+                    self.last_reminded = time.time()
+                    save_reminders(module_interface)
+
             while True:
                 # 检查是否是当前代数的任务
                 if task_generation < _update_generation:
@@ -328,81 +383,33 @@ def get_all_reminders_dict():
     return reminders_dict
 
 
-def load_reminders(interface):
-    """加载提醒数据（优先从配置文件加载，如果不存在则从数据文件加载）"""
-    # 优先从配置文件加载
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                reminder_count = sum(
-                    len(chat_reminders) for chat_reminders in data.values())
-                interface.logger.info(
-                    f"从配置文件 {CONFIG_FILE} 加载了 {reminder_count} 个提醒")
-
-                # 确保数据目录存在
-                os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-
-                # 同步到数据文件
-                with open(DATA_FILE, 'w', encoding='utf-8') as df:
-                    json.dump(data, df, indent=2, ensure_ascii=False)
-                    interface.logger.debug(f"已同步配置文件数据到数据文件 {DATA_FILE}")
-
-                return data
-        except Exception as e:
-            interface.logger.error(f"从配置文件加载提醒数据失败: {e}")
-            # 如果从配置文件加载失败，尝试从数据文件加载
-
-    # 如果配置文件不存在或加载失败，尝试从数据文件加载
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                reminder_count = sum(
-                    len(chat_reminders) for chat_reminders in data.values())
-                interface.logger.info(
-                    f"从数据文件 {DATA_FILE} 加载了 {reminder_count} 个提醒")
-                return data
-        except Exception as e:
-            interface.logger.error(f"从数据文件加载提醒数据失败: {e}")
-    else:
-        interface.logger.warning(f"提醒数据文件 {DATA_FILE} 不存在，将创建新文件")
-
-    # 如果两个文件都不存在或加载失败，返回空字典
-    return {}
-
-
-def save_reminders(interface, save_to_config=False):
-    """保存提醒数据到数据文件（持久化存储）
+def save_reminders(interface, save_to_config=True):
+    """保存提醒数据（使用框架提供的 save_state 方法）
 
     Args:
         interface: 模块接口
-        save_to_config: 是否同时保存到配置文件（默认为 False）
+        save_to_config: 是否同时保存到配置文件（默认为 True）
     """
-    # 确保数据目录存在
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-
-    # 如果需要保存到配置文件，确保配置目录存在
-    if save_to_config:
-        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-
     try:
         # 获取所有提醒数据
         reminders_data = get_all_reminders_dict()
         reminder_count = sum(
             len(chat_reminders) for chat_reminders in reminders_data.values())
 
-        # 写入数据文件
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(reminders_data, f, indent=2, ensure_ascii=False)
-        interface.logger.debug(f"已保存 {reminder_count} 个提醒数据到数据文件 {DATA_FILE}")
+        # 使用框架提供的 save_state 方法保存数据
+        interface.save_state(reminders_data)
+        interface.logger.debug(f"已保存 {reminder_count} 个提醒数据到框架状态")
 
         # 如果需要，同时保存到配置文件
         if save_to_config:
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            import os
+            import json
+            config_file = "config/reminders.json"
+            os.makedirs(os.path.dirname(config_file), exist_ok=True)
+            with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(reminders_data, f, indent=2, ensure_ascii=False)
             interface.logger.debug(
-                f"已同步 {reminder_count} 个提醒数据到配置文件 {CONFIG_FILE}")
+                f"已同步 {reminder_count} 个提醒数据到配置文件 {config_file}")
 
         return True
     except Exception as e:
@@ -444,115 +451,230 @@ def delete_reminder(chat_id, reminder_id, interface):
 
 
 def parse_interval(interval_str):
-    """解析时间间隔字符串为秒数"""
-    # 处理特殊情况：如 "4月5日" 这种日期格式，不是时间间隔
-    if re.search(r"\d+月\d+日|\d+[-/]\d+", interval_str):
-        return None
+    """解析时间间隔字符串为秒数或元组 (秒数, 第一次提醒时间戳)"""
+    now = datetime.now(pytz.timezone(DEFAULT_TIMEZONE))
 
-    # 尝试匹配中英文复合格式
-    patterns = [
-        # 中文复合格式 "2年3月4天5小时6分钟7秒"
-        (r"(\d+)(年|月|周|天|小时|分钟|秒)", {
-            "年": 31536000,
-            "月": 2592000,
-            "周": 604800,
-            "天": 86400,
-            "小时": 3600,
-            "分钟": 60,
-            "秒": 1
-        }),
-        # 英文复合格式 "2y3mon4d5h6min7s"
-        (
-            r"(\d+)(y|year|mon|month|w|week|d|day|h|hr|hour|m|min|minute|s|sec|second)",
-            {
-                "y": 31536000,
-                "year": 31536000,
-                "mon": 2592000,
-                "month": 2592000,
-                "w": 604800,
-                "week": 604800,
-                "d": 86400,
-                "day": 86400,
-                "h": 3600,
-                "hr": 3600,
-                "hour": 3600,
-                "min": 60,
-                "minute": 60,
-                "m": 60,  # m 是分钟而不是月
-                "s": 1,
-                "sec": 1,
-                "second": 1
-            })
-    ]
+    # 处理日期格式 "6月25日16:00" (每年6月25日16:00)
+    match = re.match(r"(\d+)月(\d+)日(?:(\d+)[:](\d+)(?:[:](\d+))?)?$",
+                     interval_str)
+    if match:
+        month, day = int(match.group(1)), int(match.group(2))
+        hour, minute, second = 0, 0, 0
 
-    for pattern, unit_map in patterns:
-        matches = re.findall(pattern, interval_str, re.IGNORECASE)
-        if matches:
-            # 检查完整性：所有文本都必须匹配有效的时间格式
-            matched_text = ""
-            for value, unit in matches:
-                matched_text += value + unit
+        if match.group(3):
+            hour = int(match.group(3))
+        if match.group(4):
+            minute = int(match.group(4))
+        if match.group(5):
+            second = int(match.group(5))
 
-            # 如果有未匹配的部分，认为是无效格式
-            if len(matched_text) != len(interval_str):
-                return None
+        try:
+            # 计算今年的这个日期
+            this_year = datetime(now.year, month, day, hour, minute, second)
+            this_year_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(this_year)
 
-            total_seconds = 0
-            for value, unit in matches:
-                unit = unit.lower()
-                if unit in unit_map:
-                    total_seconds += int(value) * unit_map[unit]
+            # 计算明年的这个日期
+            next_year = datetime(now.year + 1, month, day, hour, minute,
+                                 second)
+            next_year_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(next_year)
 
-            if total_seconds > 0:
-                return total_seconds
+            # 确定下一次提醒的时间
+            if this_year_tz > now:
+                # 如果今年的日期还没到，使用今年的
+                next_reminder_time = this_year_tz.timestamp()
+            else:
+                # 如果今年的日期已过，使用明年的
+                next_reminder_time = next_year_tz.timestamp()
 
-    # 单一时间单位格式 "30分钟", "2小时", "1d", "5min"
-    simple_patterns = [
-        # 中文单一格式
-        (r"^(\d+)(分钟|小时|天|周|月|年)$", {
-            "分钟": 60,
-            "小时": 3600,
-            "天": 86400,
-            "周": 604800,
-            "月": 2592000,
-            "年": 31536000
-        }),
-        # 英文单一格式
-        (
-            r"^(\d+)(s|sec|m|min|h|hr|d|day|w|week|mon|month|y|year)$",
-            {
-                "s": 1,
-                "sec": 1,
-                "min": 60,
-                "m": 60,  # m 是分钟而不是月
-                "h": 3600,
-                "hr": 3600,
-                "d": 86400,
-                "day": 86400,
-                "w": 604800,
-                "week": 604800,
-                "mon": 2592000,
-                "month": 2592000,
-                "y": 31536000,
-                "year": 31536000
-            })
-    ]
+            # 返回一年的秒数和第一次提醒时间
+            return {
+                "interval": 31536000,
+                "first_time": next_reminder_time
+            }  # 365 * 24 * 60 * 60
+        except ValueError:
+            # 无效日期
+            return None
 
-    for pattern, unit_map in simple_patterns:
-        match = re.match(pattern, interval_str, re.IGNORECASE)
-        if match:
-            value, unit = match.groups()
-            unit = unit.lower()
-            if unit in unit_map:
-                return int(value) * unit_map[unit]
+    # 处理日期格式 "25日" (每月25日)
+    match = re.match(r"(\d+)日$", interval_str)
+    if match:
+        day = int(match.group(1))
 
-    # 无法识别
+        try:
+            # 计算本月的这个日期
+            this_month = datetime(now.year, now.month, day)
+            this_month_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(
+                this_month)
+
+            # 计算下个月的这个日期
+            if now.month == 12:
+                next_month = datetime(now.year + 1, 1, day)
+            else:
+                next_month = datetime(now.year, now.month + 1, day)
+            next_month_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(
+                next_month)
+
+            # 确定下一次提醒的时间
+            if this_month_tz > now:
+                # 如果本月的日期还没到，使用本月的
+                next_reminder_time = this_month_tz.timestamp()
+            else:
+                # 如果本月的日期已过，使用下个月的
+                next_reminder_time = next_month_tz.timestamp()
+
+            # 返回一个月的秒数和第一次提醒时间
+            return {
+                "interval": 2592000,
+                "first_time": next_reminder_time
+            }  # 30 * 24 * 60 * 60
+        except ValueError:
+            # 无效日期
+            return None
+
+    # 处理时间格式 "16:00" (每天16:00)
+    match = re.match(r"(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$", interval_str)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        second = int(match.group(3)) if match.group(3) else 0
+
+        try:
+            # 计算今天的这个时间
+            today = now.replace(hour=hour,
+                                minute=minute,
+                                second=second,
+                                microsecond=0)
+
+            # 如果今天的时间已过，则使用明天的
+            if today < now:
+                today = today + timedelta(days=1)
+
+            # 返回一天的秒数和第一次提醒时间
+            return {
+                "interval": 86400,
+                "first_time": today.timestamp()
+            }  # 24 * 60 * 60
+        except ValueError:
+            # 无效时间
+            return None
+
+    # 处理标准时间间隔格式
+    # 中文单位
+    chinese_units = {
+        "秒": 1,
+        "分钟": 60,
+        "小时": 3600,
+        "天": 86400,
+        "周": 604800,
+        "月": 2592000,  # 30天
+        "年": 31536000  # 365天
+    }
+
+    # 英文单位（支持多种写法）
+    english_units = {
+        "s": 1,
+        "sec": 1,
+        "second": 1,
+        "seconds": 1,
+        "m": 60,
+        "min": 60,
+        "minute": 60,
+        "minutes": 60,
+        "h": 3600,
+        "hr": 3600,
+        "hour": 3600,
+        "hours": 3600,
+        "d": 86400,
+        "day": 86400,
+        "days": 86400,
+        "w": 604800,
+        "week": 604800,
+        "weeks": 604800,
+        "mon": 2592000,
+        "month": 2592000,
+        "months": 2592000,
+        "y": 31536000,
+        "year": 31536000,
+        "years": 31536000
+    }
+
+    # 处理中文格式
+    total_seconds = 0
+    remaining = interval_str
+
+    for unit, seconds in chinese_units.items():
+        parts = remaining.split(unit, 1)
+        if len(parts) > 1:
+            try:
+                value = float(parts[0])
+                total_seconds += value * seconds
+                remaining = parts[1]
+            except ValueError:
+                pass
+
+    if total_seconds > 0 and not remaining.strip():
+        return total_seconds
+
+    # 处理英文格式
+    # 尝试匹配 "1h2m3s" 这种格式
+    pattern = r"(\d+)([a-zA-Z]+)"
+    matches = re.findall(pattern, interval_str)
+
+    if matches:
+        total_seconds = 0
+        for value, unit in matches:
+            if unit in english_units:
+                total_seconds += int(value) * english_units[unit]
+
+        if total_seconds > 0:
+            return total_seconds
+
+    # 尝试匹配纯数字 + 单位格式，如 "30min"
+    match = re.match(r"^(\d+)([a-zA-Z]+)$", interval_str)
+    if match:
+        value, unit = match.groups()
+        if unit in english_units:
+            return int(value) * english_units[unit]
+
+    # 尝试匹配纯数字（假设是秒）
+    if interval_str.isdigit():
+        return int(interval_str)
+
     return None
 
 
 def parse_datetime(datetime_str):
     """解析日期时间字符串为 datetime 对象"""
     now = datetime.now(pytz.timezone(DEFAULT_TIMEZONE))
+
+    # 处理时间间隔格式（如 "30s", "5min", "1h" 等）
+    interval_seconds = parse_interval(datetime_str)
+    if interval_seconds is not None:
+        # 计算目标时间 = 当前时间 + 间隔
+        target_time = now + timedelta(seconds=interval_seconds)
+        return target_time
+
+    # 处理 "6-25 16:00" 或 "6/25 16:00" 格式
+    match = re.match(
+        r"^(\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$",
+        datetime_str)
+    if match:
+        month, day = int(match.group(1)), int(match.group(2))
+        hour, minute = int(match.group(3)), int(match.group(4))
+        second = int(match.group(5)) if match.group(5) else 0
+
+        try:
+            dt = datetime(now.year, month, day, hour, minute, second)
+            dt_with_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(dt)
+
+            # 如果日期已过，假设是明年
+            if dt_with_tz < now:
+                dt = datetime(now.year + 1, month, day, hour, minute, second)
+                dt_with_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(dt)
+
+            return dt_with_tz
+        except ValueError:
+            # 无效日期
+            return None
 
     # 处理中文月日格式 "4月5日16:00"
     match = re.match(r"(\d+)月(\d+)日(?:(\d+)[:](\d+)(?:[:](\d+))?)?$",
@@ -603,6 +725,34 @@ def parse_datetime(datetime_str):
             # 无效日期
             return None
 
+    # 处理日期格式 "25日" (每月25日)
+    match = re.match(r"(\d+)日$", datetime_str)
+    if match:
+        day = int(match.group(1))
+
+        try:
+            # 尝试当前月份
+            dt = datetime(now.year, now.month, day, 0, 0, 0)
+            dt_with_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(dt)
+
+            # 如果日期已过，则使用下个月
+            if dt_with_tz < now:
+                # 计算下个月
+                if now.month == 12:
+                    next_month = 1
+                    next_year = now.year + 1
+                else:
+                    next_month = now.month + 1
+                    next_year = now.year
+
+                dt = datetime(next_year, next_month, day, 0, 0, 0)
+                dt_with_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(dt)
+
+            return dt_with_tz
+        except ValueError:
+            # 无效日期
+            return None
+
     # 处理各种标准格式
     formats = [
         '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y/%m/%d %H:%M:%S',
@@ -631,8 +781,42 @@ def parse_datetime(datetime_str):
     return None
 
 
-def format_interval(seconds):
-    """将秒数格式化为可读的时间间隔"""
+def format_interval(seconds, original_str=None, first_time=None):
+    """将秒数格式化为可读的时间间隔
+
+    Args:
+        seconds: 间隔秒数
+        original_str: 原始输入字符串
+        first_time: 第一次提醒的时间戳
+    """
+    # 如果有原始字符串，优先使用
+    if original_str:
+        # 检查是否是日期格式
+        if re.match(r"(\d+)月(\d+)日", original_str):
+            return f"每年{original_str}"
+        elif re.match(r"(\d+)日$", original_str):
+            return f"每月{original_str}"
+        elif re.match(r"(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$", original_str):
+            return f"每天{original_str}"
+
+    # 如果有第一次提醒时间，检查是否是特殊周期
+    if first_time:
+        dt = datetime.fromtimestamp(first_time,
+                                    pytz.timezone(DEFAULT_TIMEZONE))
+
+        # 检查是否是每年的特定日期
+        if seconds == 31536000:  # 365天
+            return f"每年{dt.month}月{dt.day}日{dt.hour:02d}:{dt.minute:02d}"
+
+        # 检查是否是每月的特定日期
+        elif seconds == 2592000:  # 30天
+            return f"每月{dt.day}日{dt.hour:02d}:{dt.minute:02d}"
+
+        # 检查是否是每天的特定时间
+        elif seconds == 86400:  # 24小时
+            return f"每天{dt.hour:02d}:{dt.minute:02d}"
+
+    # 处理标准时间间隔
     units = [(31536000, "年"), (2592000, "月"), (604800, "周"), (86400, "天"),
              (3600, "小时"), (60, "分钟"), (1, "秒")]
 
@@ -665,8 +849,38 @@ async def start_reminder_tasks(context, interface):
 
     interface.logger.info("正在启动提醒任务...")
 
-    # 优先从配置文件加载提醒数据，如果不存在则从数据文件加载
-    reminders_data = load_reminders(interface)
+    # 加载提醒数据
+    reminders_data = {}
+    config_file = "config/reminders.json"
+
+    # 尝试从框架状态加载
+    try:
+        state_data = interface.load_state()
+        if state_data:
+            reminders_data = state_data
+            reminder_count = sum(
+                len(chat_reminders)
+                for chat_reminders in reminders_data.values())
+            interface.logger.info(f"已从框架状态加载 {reminder_count} 个提醒")
+        # 如果框架状态中没有数据，尝试从配置文件加载
+        elif os.path.exists(config_file):
+            try:
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    reminders_data = json.load(f)
+                    reminder_count = sum(
+                        len(chat_reminders)
+                        for chat_reminders in reminders_data.values())
+                    interface.logger.info(f"已从配置文件加载 {reminder_count} 个提醒")
+
+                    # 同步到框架状态
+                    interface.save_state(reminders_data)
+            except Exception as e:
+                interface.logger.error(f"从配置文件加载提醒数据失败: {e}")
+        else:
+            interface.logger.warning("没有找到提醒数据，将创建新文件")
+    except Exception as e:
+        interface.logger.error(f"加载提醒数据失败: {e}")
+
     task_count = 0
 
     for chat_id_str, chat_reminders in reminders_data.items():
@@ -737,88 +951,29 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
 
-    # 获取模块接口
-    interface = context.bot_data["module_manager"].get_module_info(
-        "reminder")["interface"]
-
-    # 如果没有参数，显示帮助信息
-    if not context.args or len(context.args) < 2:
-        help_text = ("📅 *提醒功能帮助*\n\n"
-                     "*创建周期性提醒:*\n"
-                     "/remind 间隔 内容\n"
-                     "例如: `/remind 30min 该喝水了！`\n"
-                     "复合时间: `/remind 2天3小时 长期任务！`\n"
-                     "英文复合: `/remind 1y2mon3d 长期任务！`\n\n"
-                     "*创建一次性提醒:*\n"
-                     "/remindonce 时间 内容\n"
-                     "例如: `/remindonce 8:30 晨会！`\n"
-                     "或: `/remindonce 2025年4月5日18:30 提交报告！`\n"
-                     "或: `/remindonce 6-25 16:00 提交报告！`\n\n"
-                     "*查看提醒:*\n"
-                     "/reminders - 列出所有提醒\n\n"
-                     "*删除提醒:*\n"
-                     "/delreminder ID - 删除指定 ID 的提醒")
-        await message.reply_text(help_text, parse_mode="MARKDOWN")
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await message.reply_text("系统错误，请联系管理员")
         return
 
-    # 解析参数
-    interval_str = context.args[0]
-    reminder_message = " ".join(context.args[1:])
+    # 显示主菜单
+    keyboard = [[
+        InlineKeyboardButton("Periodic",
+                             callback_data=f"{CALLBACK_PREFIX}periodic"),
+        InlineKeyboardButton("One-time",
+                             callback_data=f"{CALLBACK_PREFIX}onetime")
+    ], [InlineKeyboardButton("List", callback_data=f"{CALLBACK_PREFIX}list")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # 解析时间间隔
-    interval_seconds = parse_interval(interval_str)
-    if interval_seconds is None:
-        await message.reply_text(
-            "⚠️ 无法识别的时间格式，请使用如:\n"
-            "- 中文: 分钟、小时、天、周、月、年\n"
-            "- 英文: s/sec, m/min, h/hr, d/day, w/week, mon/month, y/year\n"
-            "- 复合时间: 2年3月、1天12小时30分钟\n"
-            "- 英文复合: 1y2mon3d、1d12h30min")
-        return
-
-    # 检查最小间隔
-    if interval_seconds < MIN_INTERVAL:
-        await message.reply_text(f"⚠️ 提醒间隔太短，最小间隔为 {MIN_INTERVAL} 秒。")
-        return
-
-    # 生成提醒 ID
-    reminder_id = str(int(time.time()))
-
-    # 创建周期性提醒
-    chat_id = update.effective_chat.id
-    chat_id_str = str(chat_id)
-    reminder = PeriodicReminder(
-        reminder_id, reminder_message, update.effective_user.id,
-        update.effective_user.full_name or update.effective_user.username
-        or "未知用户", chat_id_str, update.effective_chat.type, interval_seconds)
-
-    # 初始化聊天记录
-    if chat_id_str not in _tasks:
-        _tasks[chat_id_str] = {}
-
-    # 启动任务
-    task = asyncio.create_task(reminder.start_task(context, interface))
-    _tasks[chat_id_str][reminder_id] = {"reminder": reminder, "task": task}
-
-    # 保存更新
-    save_reminders(interface)
-
-    # 格式化时间间隔
-    interval_text = format_interval(interval_seconds)
-
-    # 发送确认消息
     await message.reply_text(
-        f"✅ 周期性提醒已创建!\n\n"
-        f"⏰ *间隔:* {interval_text}\n"
-        f"📝 *内容:* {reminder_message}\n"
-        f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
-        f"每 {interval_text}，我会发送一次提醒。\n"
-        f"如需删除，请使用 `/delreminder {reminder_id}`",
+        "📅 *提醒功能*\n\n"
+        "请选择要创建的提醒类型：\n\n"
+        "• *周期性提醒*：按固定时间间隔重复提醒\n"
+        "• *一次性提醒*：在指定时间提醒一次\n"
+        "• *查看提醒*：列出当前所有提醒",
+        reply_markup=reply_markup,
         parse_mode="MARKDOWN")
-
-    interface.logger.info(
-        f"用户 {update.effective_user.id} 创建了周期性提醒 {reminder_id}，"
-        f"间隔 {interval_text}")
 
 
 async def remind_once_command(update: Update,
@@ -827,128 +982,31 @@ async def remind_once_command(update: Update,
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
 
-    # 获取模块接口
-    interface = context.bot_data["module_manager"].get_module_info(
-        "reminder")["interface"]
-
-    if not context.args or len(context.args) < 2:
-        await message.reply_text(
-            "用法: /remindonce 时间 内容\n"
-            "例如: `/remindonce 8:30 晨会！`\n"
-            "或: `/remindonce 2025年4月5日18:30 提交报告！`\n"
-            "或: `/remindonce 6-25 16:00 提交报告！`",
-            parse_mode="MARKDOWN")
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await message.reply_text("系统错误，请联系管理员")
         return
 
-    # 特殊处理 "6-25 16:00" 这种格式
-    full_input = " ".join(context.args)
-    special_format_match = re.match(
-        r"^(\d{1,2})[-/](\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?\s+(.*)",
-        full_input)
+    # 设置会话状态，等待用户输入一次性提醒信息
+    user_id = update.effective_user.id
+    await session_manager.set(user_id, "reminder_type", "onetime")
+    await session_manager.set(user_id, "reminder_step", "datetime")
+    await session_manager.set(user_id, "reminder_active", True)
 
-    target_datetime = None
-    reminder_message = ""
+    # 发送提示消息
+    keyboard = [[
+        InlineKeyboardButton("⇠ Back",
+                             callback_data=f"{CALLBACK_PREFIX}cancel")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if special_format_match:
-        month, day = int(special_format_match.group(1)), int(
-            special_format_match.group(2))
-        hour, minute = int(special_format_match.group(3)), int(
-            special_format_match.group(4))
-        second = int(special_format_match.group(
-            5)) if special_format_match.group(5) else 0
-        reminder_message = special_format_match.group(6)
-
-        now = datetime.now(pytz.timezone(DEFAULT_TIMEZONE))
-
-        try:
-            dt = datetime(now.year, month, day, hour, minute, second)
-            dt_with_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(dt)
-
-            # 如果日期已过，假设是明年
-            if dt_with_tz < now:
-                dt = datetime(now.year + 1, month, day, hour, minute, second)
-                dt_with_tz = pytz.timezone(DEFAULT_TIMEZONE).localize(dt)
-
-            target_datetime = dt_with_tz
-        except ValueError:
-            target_datetime = None
-    else:
-        # 常规解析过程
-        datetime_str = context.args[0]
-        target_datetime = parse_datetime(datetime_str)
-        reminder_message = " ".join(context.args[1:])
-
-        # 如果第一个参数无法解析为日期，尝试合并前两个参数
-        if target_datetime is None and len(context.args) >= 2:
-            datetime_str = f"{context.args[0]} {context.args[1]}"
-            target_datetime = parse_datetime(datetime_str)
-
-            if target_datetime is not None:
-                reminder_message = " ".join(context.args[2:])
-
-    if target_datetime is None:
-        await message.reply_text("⚠️ 无法识别的时间格式，请使用如:\n"
-                                 "- 2025年4月5日18:30\n"
-                                 "- 4月5日16:00\n"
-                                 "- 6-25 16:00\n"
-                                 "- 2025/04/05 18:30\n"
-                                 "- 18:30 (今天或明天)")
-        return
-
-    if not reminder_message:
-        await message.reply_text("⚠️ 请提供提醒内容。")
-        return
-
-    # 转换为时间戳
-    target_timestamp = target_datetime.timestamp()
-
-    # 检查是否是过去的时间
-    now_timestamp = time.time()
-    if target_timestamp <= now_timestamp:
-        await message.reply_text("⚠️ 提醒时间不能是过去的时间。")
-        return
-
-    # 生成提醒 ID
-    reminder_id = str(int(time.time()))
-
-    # 创建一次性提醒
-    chat_id = update.effective_chat.id
-    chat_id_str = str(chat_id)
-    reminder = OneTimeReminder(
-        reminder_id, reminder_message, update.effective_user.id,
-        update.effective_user.full_name or update.effective_user.username
-        or "未知用户", chat_id_str, update.effective_chat.type, target_timestamp,
-        target_datetime.strftime("%Y-%m-%d %H:%M:%S"))
-
-    # 初始化聊天记录
-    if chat_id_str not in _tasks:
-        _tasks[chat_id_str] = {}
-
-    # 启动任务
-    task = asyncio.create_task(reminder.start_task(context, interface))
-    _tasks[chat_id_str][reminder_id] = {"reminder": reminder, "task": task}
-
-    # 保存更新
-    save_reminders(interface)
-
-    # 计算等待时间
-    wait_seconds = target_timestamp - now_timestamp
-    wait_text = format_interval(int(wait_seconds))
-
-    # 发送确认消息
     await message.reply_text(
-        f"✅ 一次性提醒已创建!\n\n"
-        f"⏰ *时间:* {target_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"⏳ *等待:* {wait_text}\n"
-        f"📝 *内容:* {reminder_message}\n"
-        f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
-        f"到时间我会发送一次提醒。\n"
-        f"如需删除，请使用 `/delreminder {reminder_id}`",
-        parse_mode="MARKDOWN")
-
-    interface.logger.info(
-        f"用户 {update.effective_user.id} 创建了一次性提醒 {reminder_id}，"
-        f"时间 {target_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+        "请输入提醒时间：\n\n"
+        "例如：8:30、明天9:00、2025年4月5日18:30\n"
+        "或：4月5日16:00、6-25 16:00等\n"
+        "时间间隔：30s、5min、1h（从现在开始计时）",
+        reply_markup=reply_markup)
 
 
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -965,7 +1023,14 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 检查是否有提醒
     if chat_id_str not in _tasks or not _tasks[chat_id_str]:
-        await message.reply_text("当前聊天没有创建任何提醒。")
+        # 添加返回按钮
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}cancel")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await message.reply_text("当前聊天没有创建任何提醒", reply_markup=reply_markup)
         return
 
     # 分类提醒
@@ -1003,7 +1068,8 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reminder_list_message += "*周期性提醒:*\n"
         for reminder in periodic_reminders:
             status = "✅ 已启用" if reminder.enabled else "❌ 已禁用"
-            interval_text = format_interval(reminder.interval)
+            interval_text = format_interval(reminder.interval, None,
+                                            reminder.first_reminder_time)
             creator_info = f" (由 {reminder.creator_name} 创建)" if update.effective_chat.type != "private" else ""
 
             reminder_list_message += (f"🔹 *{reminder.title}*{creator_info}\n"
@@ -1014,19 +1080,41 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 如果没有任何提醒
     if not one_time_reminders and not periodic_reminders:
-        await message.reply_text("当前聊天没有创建任何提醒。")
+        # 添加返回按钮
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}cancel")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await message.reply_text("当前聊天没有创建任何提醒", reply_markup=reply_markup)
         return
 
-    reminder_list_message += "要删除提醒，请使用 `/delreminder ID`"
+    reminder_list_message += "点击下方的 \"Delete Reminders\" 按钮可以删除提醒"
+
+    # 添加删除和返回按钮
+    keyboard = [[
+        InlineKeyboardButton("Delete Reminders",
+                             callback_data=f"{CALLBACK_PREFIX}delete")
+    ],
+                [
+                    InlineKeyboardButton(
+                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}cancel")
+                ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
     # 发送消息
     try:
-        await message.reply_text(reminder_list_message, parse_mode="MARKDOWN")
+        await message.reply_text(reminder_list_message,
+                                 reply_markup=reply_markup,
+                                 parse_mode="MARKDOWN")
     except Exception as e:
         interface.logger.error(f"发送提醒列表失败: {e}")
         # 尝试发送纯文本
-        await message.reply_text(
-            reminder_list_message.replace("*", "").replace("`", ""))
+        await message.reply_text(reminder_list_message.replace("*",
+                                                               "").replace(
+                                                                   "`", ""),
+                                 reply_markup=reply_markup)
 
 
 async def delete_reminder_command(update: Update,
@@ -1039,55 +1127,687 @@ async def delete_reminder_command(update: Update,
     interface = context.bot_data["module_manager"].get_module_info(
         "reminder")["interface"]
 
-    if not context.args or len(context.args) < 1:
-        await message.reply_text("用法: /delreminder ID")
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await message.reply_text("系统错误，请联系管理员")
         return
 
-    reminder_id = context.args[0]
     chat_id = update.effective_chat.id
     chat_id_str = str(chat_id)
 
-    # 检查提醒是否存在
-    if (chat_id_str not in _tasks or reminder_id not in _tasks[chat_id_str]):
-        await message.reply_text("❌ 找不到该提醒或已被删除。")
+    # 检查是否有提醒
+    if chat_id_str not in _tasks or not _tasks[chat_id_str]:
+        await message.reply_text("当前聊天没有创建任何提醒")
         return
 
-    # 获取提醒对象
-    reminder = _tasks[chat_id_str][reminder_id].get("reminder")
-    if not reminder:
-        await message.reply_text("❌ 找不到该提醒或已被删除。")
-        return
+    # 构建提醒列表按钮
+    keyboard = []
 
-    # 检查权限（群组中只有创建者或管理员可以删除）
+    # 分类提醒
+    one_time_reminders = []
+    periodic_reminders = []
+
+    for reminder_id, task_info in _tasks[chat_id_str].items():
+        reminder = task_info.get("reminder")
+        if not reminder:
+            continue
+
+        if isinstance(reminder, OneTimeReminder):
+            one_time_reminders.append(reminder)
+        else:
+            periodic_reminders.append(reminder)
+
+    # 添加一次性提醒按钮
+    if one_time_reminders:
+        for reminder in one_time_reminders:
+            button_text = f"🕒 {reminder.title} ({reminder.target_time_str})"
+            keyboard.append([
+                InlineKeyboardButton(
+                    button_text,
+                    callback_data=f"{CALLBACK_PREFIX}del_{reminder.id}")
+            ])
+
+    # 添加周期性提醒按钮
+    if periodic_reminders:
+        for reminder in periodic_reminders:
+            interval_text = format_interval(reminder.interval, None,
+                                            reminder.first_reminder_time)
+            button_text = f"🔄 {reminder.title} ({interval_text})"
+            keyboard.append([
+                InlineKeyboardButton(
+                    button_text,
+                    callback_data=f"{CALLBACK_PREFIX}del_{reminder.id}")
+            ])
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton("⇠ Back",
+                             callback_data=f"{CALLBACK_PREFIX}cancel")
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await message.reply_text("请选择要删除的提醒：", reply_markup=reply_markup)
+
+
+# 模块使用框架的状态管理器和配置文件同时保存数据，确保数据持久化
+
+
+async def handle_reminder_input(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE):
+    """处理用户输入的提醒信息"""
+    # 只处理私聊消息
     if update.effective_chat.type != "private":
-        user_id = update.effective_user.id
+        return
 
-        if reminder.creator_id != user_id:
-            chat_member = await context.bot.get_chat_member(chat_id, user_id)
-            is_admin = chat_member.status in ["creator", "administrator"]
+    message = update.message
+    if not message:
+        return
 
-            if not is_admin:
-                await message.reply_text("⚠️ 您没有权限删除此提醒，只有提醒创建者或群组管理员可以删除。")
+    user_id = update.effective_user.id
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        return
+
+    # 检查是否是 reminder 模块的活跃会话
+    is_active = await session_manager.get(user_id, "reminder_active", False)
+    if not is_active:
+        return
+
+    # 获取会话状态
+    reminder_type = await session_manager.get(user_id, "reminder_type")
+    reminder_step = await session_manager.get(user_id, "reminder_step")
+
+    # 获取模块接口
+    interface = context.bot_data["module_manager"].get_module_info(
+        "reminder")["interface"]
+
+    # 处理周期性提醒
+    if reminder_type == "periodic":
+        if reminder_step == "interval":
+            # 解析时间间隔
+            interval_str = message.text.strip()
+            interval_result = parse_interval(interval_str)
+
+            if interval_result is None:
+                await message.reply_text(
+                    "⚠️ 无法识别的时间格式，请使用如:\n"
+                    "- 中文: 分钟、小时、天、周、月、年\n"
+                    "- 英文: s/sec, m/min, h/hr, d/day, w/week, mon/month, y/year\n"
+                    "- 复合时间: 2年3月、1天12小时30分钟\n"
+                    "- 英文复合: 1y2mon3d、1d12h30min\n"
+                    "- 日期格式: 6月25日16:00（每年）、25日（每月）、16:00（每天）")
                 return
 
-    # 删除提醒
-    reminder_title = reminder.title
-    if delete_reminder(chat_id, reminder_id, interface):
-        await message.reply_text(f"✅ 提醒 \"{reminder_title}\" 已删除。")
-        interface.logger.info(
-            f"用户 {update.effective_user.id} 删除了提醒 {reminder_id}")
-    else:
-        await message.reply_text("❌ 删除提醒失败，请稍后再试。")
+            # 处理不同格式的返回值
+            first_reminder_time = None
+            if isinstance(interval_result, dict):
+                # 日期格式返回字典 {"interval": 秒数, "first_time": 时间戳}
+                interval_seconds = interval_result["interval"]
+                first_reminder_time = interval_result["first_time"]
+            else:
+                # 标准时间间隔格式返回秒数
+                interval_seconds = interval_result
+
+            # 检查最小间隔
+            if interval_seconds < MIN_INTERVAL:
+                await message.reply_text(f"⚠️ 提醒间隔太短，最小间隔为 {MIN_INTERVAL} 秒")
+                return
+
+            # 保存间隔、原始字符串和第一次提醒时间并进入下一步
+            await session_manager.set(user_id, "reminder_interval",
+                                      interval_seconds)
+            await session_manager.set(user_id, "reminder_interval_str",
+                                      interval_str)
+            if first_reminder_time:
+                await session_manager.set(user_id, "reminder_first_time",
+                                          first_reminder_time)
+            await session_manager.set(user_id, "reminder_step", "message")
+
+            # 发送提示消息
+            keyboard = [[
+                InlineKeyboardButton("⇠ Back",
+                                     callback_data=f"{CALLBACK_PREFIX}cancel")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await message.reply_text("请输入提醒内容：", reply_markup=reply_markup)
+
+        elif reminder_step == "message":
+            # 获取提醒内容
+            reminder_message = message.text.strip()
+
+            if not reminder_message:
+                await message.reply_text("⚠️ 提醒内容不能为空")
+                return
+
+            # 获取之前保存的间隔和第一次提醒时间
+            interval_seconds = await session_manager.get(
+                user_id, "reminder_interval")
+            first_reminder_time = await session_manager.get(
+                user_id, "reminder_first_time")
+
+            # 清除会话状态
+            await session_manager.delete(user_id, "reminder_type")
+            await session_manager.delete(user_id, "reminder_step")
+            await session_manager.delete(user_id, "reminder_interval")
+            await session_manager.delete(user_id, "reminder_interval_str")
+            await session_manager.delete(user_id, "reminder_first_time")
+            await session_manager.delete(user_id, "reminder_active")
+
+            # 生成提醒 ID
+            reminder_id = str(int(time.time()))
+
+            # 创建周期性提醒
+            chat_id = update.effective_chat.id
+            chat_id_str = str(chat_id)
+            reminder = PeriodicReminder(
+                reminder_id, reminder_message, update.effective_user.id,
+                update.effective_user.full_name
+                or update.effective_user.username or "未知用户", chat_id_str,
+                update.effective_chat.type, interval_seconds,
+                first_reminder_time)
+
+            # 初始化聊天记录
+            if chat_id_str not in _tasks:
+                _tasks[chat_id_str] = {}
+
+            # 启动任务
+            task = asyncio.create_task(reminder.start_task(context, interface))
+            _tasks[chat_id_str][reminder_id] = {
+                "reminder": reminder,
+                "task": task
+            }
+
+            # 保存更新
+            save_reminders(interface)
+
+            # 获取原始输入字符串
+            interval_str = await session_manager.get(user_id,
+                                                     "reminder_interval_str")
+
+            # 格式化时间间隔
+            interval_text = format_interval(interval_seconds, interval_str,
+                                            first_reminder_time)
+
+            # 发送确认消息
+            await message.reply_text(
+                f"✅ 周期性提醒已创建!\n\n"
+                f"⏰ *间隔:* {interval_text}\n"
+                f"📝 *内容:* {reminder_message}\n"
+                f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
+                f"我会按照 {interval_text} 发送提醒\n"
+                f"如需删除，请使用 `/delreminder` 命令",
+                parse_mode="MARKDOWN")
+
+            interface.logger.info(
+                f"用户 {update.effective_user.id} 创建了周期性提醒 {reminder_id}，"
+                f"间隔 {interval_text}")
+
+    # 处理一次性提醒
+    elif reminder_type == "onetime":
+        if reminder_step == "datetime":
+            # 解析日期时间
+            datetime_str = message.text.strip()
+            target_datetime = parse_datetime(datetime_str)
+
+            if target_datetime is None:
+                await message.reply_text("⚠️ 无法识别的时间格式，请使用如:\n"
+                                         "- 2025年4月5日18:30\n"
+                                         "- 4月5日16:00\n"
+                                         "- 6-25 16:00\n"
+                                         "- 2025/04/05 18:30\n"
+                                         "- 18:30 (今天或明天)\n"
+                                         "- 30s、5min、1h (从现在开始计时)")
+                return
+
+            # 转换为时间戳
+            target_timestamp = target_datetime.timestamp()
+
+            # 检查是否是过去的时间
+            now_timestamp = time.time()
+            if target_timestamp <= now_timestamp:
+                await message.reply_text("⚠️ 提醒时间不能是过去的时间")
+                return
+
+            # 保存时间戳并进入下一步
+            await session_manager.set(user_id, "reminder_datetime",
+                                      target_timestamp)
+            await session_manager.set(
+                user_id, "reminder_datetime_str",
+                target_datetime.strftime("%Y-%m-%d %H:%M:%S"))
+            await session_manager.set(user_id, "reminder_step", "message")
+
+            # 发送提示消息
+            keyboard = [[
+                InlineKeyboardButton("⇠ Back",
+                                     callback_data=f"{CALLBACK_PREFIX}cancel")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await message.reply_text("请输入提醒内容：", reply_markup=reply_markup)
+
+        elif reminder_step == "message":
+            # 获取提醒内容
+            reminder_message = message.text.strip()
+
+            if not reminder_message:
+                await message.reply_text("⚠️ 提醒内容不能为空")
+                return
+
+            # 获取之前保存的时间戳
+            target_timestamp = await session_manager.get(
+                user_id, "reminder_datetime")
+            target_datetime_str = await session_manager.get(
+                user_id, "reminder_datetime_str")
+
+            # 清除会话状态
+            await session_manager.delete(user_id, "reminder_type")
+            await session_manager.delete(user_id, "reminder_step")
+            await session_manager.delete(user_id, "reminder_datetime")
+            await session_manager.delete(user_id, "reminder_datetime_str")
+            await session_manager.delete(user_id, "reminder_active")
+
+            # 生成提醒 ID
+            reminder_id = str(int(time.time()))
+
+            # 创建一次性提醒
+            chat_id = update.effective_chat.id
+            chat_id_str = str(chat_id)
+            reminder = OneTimeReminder(
+                reminder_id, reminder_message, update.effective_user.id,
+                update.effective_user.full_name
+                or update.effective_user.username or "未知用户", chat_id_str,
+                update.effective_chat.type, target_timestamp,
+                target_datetime_str)
+
+            # 初始化聊天记录
+            if chat_id_str not in _tasks:
+                _tasks[chat_id_str] = {}
+
+            # 启动任务
+            task = asyncio.create_task(reminder.start_task(context, interface))
+            _tasks[chat_id_str][reminder_id] = {
+                "reminder": reminder,
+                "task": task
+            }
+
+            # 保存更新
+            save_reminders(interface)
+
+            # 计算等待时间
+            now_timestamp = time.time()
+            wait_seconds = target_timestamp - now_timestamp
+            wait_text = format_interval(int(wait_seconds))
+
+            # 发送确认消息
+            await message.reply_text(
+                f"✅ 一次性提醒已创建!\n\n"
+                f"⏰ *时间:* {target_datetime_str}\n"
+                f"⏳ *等待:* {wait_text}\n"
+                f"📝 *内容:* {reminder_message}\n"
+                f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
+                f"到时间我会发送一次提醒\n"
+                f"如需删除，请使用 `/delreminder` 命令",
+                parse_mode="MARKDOWN")
+
+            interface.logger.info(
+                f"用户 {update.effective_user.id} 创建了一次性提醒 {reminder_id}，"
+                f"时间 {target_datetime_str}")
 
 
-# 模块不使用框架的状态管理器，所有数据直接保存在数据文件中
+async def handle_callback_query(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE):
+    """处理按钮回调查询"""
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    # 获取回调数据
+    callback_data = query.data
+
+    # 检查前缀
+    if not callback_data.startswith(CALLBACK_PREFIX):
+        return
+
+    # 移除前缀
+    action = callback_data[len(CALLBACK_PREFIX):]
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await query.answer("系统错误，请联系管理员")
+        return
+
+    # 处理不同的操作
+    if action == "periodic":
+        # 设置会话状态，等待用户输入周期性提醒信息
+        await session_manager.set(user_id, "reminder_type", "periodic")
+        await session_manager.set(user_id, "reminder_step", "interval")
+        await session_manager.set(user_id, "reminder_active", True)
+
+        # 发送提示消息
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}cancel")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            "请输入提醒间隔：\n\n"
+            "例如：30分钟、2小时、1天、1周等\n"
+            "复合时间：2天3小时、1年2月3天\n"
+            "英文格式：30min、2h、1d、1w等\n"
+            "日期格式：6月25日16:00（每年）、25日（每月）、16:00（每天）",
+            reply_markup=reply_markup)
+
+    elif action == "onetime":
+        # 设置会话状态，等待用户输入一次性提醒信息
+        await session_manager.set(user_id, "reminder_type", "onetime")
+        await session_manager.set(user_id, "reminder_step", "datetime")
+        await session_manager.set(user_id, "reminder_active", True)
+
+        # 发送提示消息
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}cancel")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            "请输入提醒时间：\n\n"
+            "例如：8:30、明天9:00、2025年4月5日18:30\n"
+            "或：4月5日16:00、6-25 16:00等\n"
+            "时间间隔：30s、5min、1h（从现在开始计时）",
+            reply_markup=reply_markup)
+
+    elif action == "cancel":
+        # 清除会话状态
+        await session_manager.delete(user_id, "reminder_type")
+        await session_manager.delete(user_id, "reminder_step")
+        await session_manager.delete(user_id, "reminder_interval")
+        await session_manager.delete(user_id, "reminder_interval_str")
+        await session_manager.delete(user_id, "reminder_first_time")
+        await session_manager.delete(user_id, "reminder_datetime")
+        await session_manager.delete(user_id, "reminder_active")
+
+        # 返回主菜单
+        keyboard = [[
+            InlineKeyboardButton("Periodic",
+                                 callback_data=f"{CALLBACK_PREFIX}periodic"),
+            InlineKeyboardButton("One-time",
+                                 callback_data=f"{CALLBACK_PREFIX}onetime")
+        ],
+                    [
+                        InlineKeyboardButton(
+                            "List", callback_data=f"{CALLBACK_PREFIX}list")
+                    ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            "📅 *提醒功能*\n\n"
+            "请选择要创建的提醒类型：\n\n"
+            "• *周期性提醒*：按固定时间间隔重复提醒\n"
+            "• *一次性提醒*：在指定时间提醒一次\n"
+            "• *查看提醒*：列出当前所有提醒",
+            reply_markup=reply_markup,
+            parse_mode="MARKDOWN")
+
+    elif action == "list":
+        # 显示提醒列表
+        chat_id = update.effective_chat.id
+        chat_id_str = str(chat_id)
+
+        # 检查是否有提醒
+        if chat_id_str not in _tasks or not _tasks[chat_id_str]:
+            keyboard = [[
+                InlineKeyboardButton("⇠ Back",
+                                     callback_data=f"{CALLBACK_PREFIX}cancel")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text("当前聊天没有创建任何提醒",
+                                          reply_markup=reply_markup)
+            return
+
+        # 分类提醒
+        one_time_reminders = []
+        periodic_reminders = []
+
+        for reminder_id, task_info in _tasks[chat_id_str].items():
+            reminder = task_info.get("reminder")
+            if not reminder:
+                continue
+
+            if isinstance(reminder, OneTimeReminder):
+                one_time_reminders.append(reminder)
+            else:
+                periodic_reminders.append(reminder)
+
+        # 构建消息
+        reminder_list_message = "📋 *当前聊天的提醒列表:*\n\n"
+
+        # 一次性提醒
+        if one_time_reminders:
+            reminder_list_message += "*一次性提醒:*\n"
+            for reminder in one_time_reminders:
+                status = "✅ 已启用" if reminder.enabled else "❌ 已禁用"
+                creator_info = f" (由 {reminder.creator_name} 创建)" if update.effective_chat.type != "private" else ""
+
+                reminder_list_message += (
+                    f"🔹 *{reminder.title}*{creator_info}\n"
+                    f"  🆔 ID: `{reminder.id}`\n"
+                    f"  ⏰ 时间: {reminder.target_time_str}\n"
+                    f"  📝 内容: {reminder.message}\n"
+                    f"  🔄 状态: {status}\n\n")
+
+        # 周期性提醒
+        if periodic_reminders:
+            reminder_list_message += "*周期性提醒:*\n"
+            for reminder in periodic_reminders:
+                status = "✅ 已启用" if reminder.enabled else "❌ 已禁用"
+                interval_text = format_interval(reminder.interval, None,
+                                                reminder.first_reminder_time)
+                creator_info = f" (由 {reminder.creator_name} 创建)" if update.effective_chat.type != "private" else ""
+
+                reminder_list_message += (
+                    f"🔹 *{reminder.title}*{creator_info}\n"
+                    f"  🆔 ID: `{reminder.id}`\n"
+                    f"  ⏰ 间隔: {interval_text}\n"
+                    f"  📝 内容: {reminder.message}\n"
+                    f"  🔄 状态: {status}\n\n")
+
+        # 如果没有任何提醒
+        if not one_time_reminders and not periodic_reminders:
+            keyboard = [[
+                InlineKeyboardButton("⇠ Back",
+                                     callback_data=f"{CALLBACK_PREFIX}cancel")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text("当前聊天没有创建任何提醒",
+                                          reply_markup=reply_markup)
+            return
+
+        # 添加删除和返回按钮
+        keyboard = [[
+            InlineKeyboardButton("Delete Reminders",
+                                 callback_data=f"{CALLBACK_PREFIX}delete")
+        ],
+                    [
+                        InlineKeyboardButton(
+                            "⇠ Back", callback_data=f"{CALLBACK_PREFIX}cancel")
+                    ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # 发送消息
+        try:
+            await query.edit_message_text(reminder_list_message,
+                                          reply_markup=reply_markup,
+                                          parse_mode="MARKDOWN")
+        except Exception as e:
+            _module_interface.logger.error(f"发送提醒列表失败: {e}")
+            # 尝试发送纯文本
+            await query.edit_message_text(reminder_list_message.replace(
+                "*", "").replace("`", ""),
+                                          reply_markup=reply_markup)
+
+    # 处理删除提醒界面
+    elif action == "delete":
+        chat_id = update.effective_chat.id
+        chat_id_str = str(chat_id)
+
+        # 检查是否有提醒
+        if chat_id_str not in _tasks or not _tasks[chat_id_str]:
+            await query.answer("当前聊天没有创建任何提醒")
+            return
+
+        # 构建提醒列表按钮
+        keyboard = []
+
+        # 分类提醒
+        one_time_reminders = []
+        periodic_reminders = []
+
+        for reminder_id, task_info in _tasks[chat_id_str].items():
+            reminder = task_info.get("reminder")
+            if not reminder:
+                continue
+
+            if isinstance(reminder, OneTimeReminder):
+                one_time_reminders.append(reminder)
+            else:
+                periodic_reminders.append(reminder)
+
+        # 添加一次性提醒按钮
+        if one_time_reminders:
+            for reminder in one_time_reminders:
+                button_text = f"🕒 {reminder.title} ({reminder.target_time_str})"
+                keyboard.append([
+                    InlineKeyboardButton(
+                        button_text,
+                        callback_data=f"{CALLBACK_PREFIX}del_{reminder.id}")
+                ])
+
+        # 添加周期性提醒按钮
+        if periodic_reminders:
+            for reminder in periodic_reminders:
+                interval_text = format_interval(reminder.interval, None,
+                                                reminder.first_reminder_time)
+                button_text = f"🔄 {reminder.title} ({interval_text})"
+                keyboard.append([
+                    InlineKeyboardButton(
+                        button_text,
+                        callback_data=f"{CALLBACK_PREFIX}del_{reminder.id}")
+                ])
+
+        # 添加返回按钮
+        keyboard.append([
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}list")
+        ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text("请选择要删除的提醒：", reply_markup=reply_markup)
+
+    # 处理删除提醒操作
+    elif action.startswith("del_"):
+        # 获取提醒 ID
+        reminder_id = action[4:]
+        chat_id = update.effective_chat.id
+        chat_id_str = str(chat_id)
+
+        # 检查提醒是否存在
+        if (chat_id_str not in _tasks
+                or reminder_id not in _tasks[chat_id_str]):
+            await query.answer("❌ 找不到该提醒或已被删除")
+
+            # 返回主菜单
+            keyboard = [[
+                InlineKeyboardButton(
+                    "Periodic", callback_data=f"{CALLBACK_PREFIX}periodic"),
+                InlineKeyboardButton("One-time",
+                                     callback_data=f"{CALLBACK_PREFIX}onetime")
+            ],
+                        [
+                            InlineKeyboardButton(
+                                "List", callback_data=f"{CALLBACK_PREFIX}list")
+                        ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                "📅 *提醒功能*\n\n"
+                "请选择要创建的提醒类型：\n\n"
+                "• *周期性提醒*：按固定时间间隔重复提醒\n"
+                "• *一次性提醒*：在指定时间提醒一次\n"
+                "• *查看提醒*：列出当前所有提醒",
+                reply_markup=reply_markup,
+                parse_mode="MARKDOWN")
+            return
+
+        # 获取提醒对象
+        reminder = _tasks[chat_id_str][reminder_id].get("reminder")
+        if not reminder:
+            await query.answer("❌ 找不到该提醒或已被删除")
+            return
+
+        # 检查权限（群组中只有创建者或管理员可以删除）
+        if update.effective_chat.type != "private":
+            user_id = update.effective_user.id
+
+            if reminder.creator_id != user_id:
+                chat_member = await context.bot.get_chat_member(
+                    chat_id, user_id)
+                is_admin = chat_member.status in ["creator", "administrator"]
+
+                if not is_admin:
+                    await query.answer("⚠️ 您没有权限删除此提醒，只有提醒创建者或群组管理员可以删除")
+                    return
+
+        # 删除提醒
+        reminder_title = reminder.title
+        if delete_reminder(chat_id, reminder_id, _module_interface):
+            await query.answer(f"✅ 提醒 \"{reminder_title}\" 已删除")
+            _module_interface.logger.info(
+                f"用户 {update.effective_user.id} 删除了提醒 {reminder_id}")
+
+            # 返回主菜单
+            keyboard = [[
+                InlineKeyboardButton(
+                    "Periodic", callback_data=f"{CALLBACK_PREFIX}periodic"),
+                InlineKeyboardButton("One-time",
+                                     callback_data=f"{CALLBACK_PREFIX}onetime")
+            ],
+                        [
+                            InlineKeyboardButton(
+                                "List", callback_data=f"{CALLBACK_PREFIX}list")
+                        ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                "📅 *提醒功能*\n\n"
+                "请选择要创建的提醒类型：\n\n"
+                "• *周期性提醒*：按固定时间间隔重复提醒\n"
+                "• *一次性提醒*：在指定时间提醒一次\n"
+                "• *查看提醒*：列出当前所有提醒",
+                reply_markup=reply_markup,
+                parse_mode="MARKDOWN")
+        else:
+            await query.answer("❌ 删除提醒失败，请稍后再试")
+
+    # 确保回调查询得到响应
+    await query.answer()
 
 
 async def setup(interface):
     """模块初始化"""
-    global _update_generation, _tasks
+    global _update_generation, _tasks, _module_interface
     _update_generation = 0
     _tasks = {}
+    _module_interface = interface
 
     # 注册命令
     await interface.register_command("remind",
@@ -1107,8 +1827,21 @@ async def setup(interface):
                                      admin_level=False,
                                      description="删除提醒")
 
-    # 优先从配置文件加载提醒数据，如果不存在则从数据文件加载
-    interface.logger.info(f"准备加载提醒数据（优先从 {CONFIG_FILE} 加载）")
+    # 注册带权限验证的按钮回调处理器
+    await interface.register_callback_handler(
+        handle_callback_query,
+        pattern=f"^{CALLBACK_PREFIX}",
+        admin_level=False  # 所有用户都可以使用
+    )
+
+    # 注册文本输入处理器
+    text_input_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        handle_reminder_input)
+    await interface.register_handler(text_input_handler, group=4)
+
+    # 加载提醒数据（优先从框架状态加载，如果没有则从配置文件加载）
+    interface.logger.info("准备加载提醒数据")
 
     # 启动提醒任务
     await start_reminder_tasks(interface.application, interface)
@@ -1118,9 +1851,9 @@ async def setup(interface):
         while True:
             try:
                 await asyncio.sleep(AUTOSAVE_INTERVAL)
-                # 仅保存到数据文件（运行时不同步到配置文件）
-                save_reminders(interface, save_to_config=False)
-                interface.logger.debug("已自动保存提醒数据到数据文件")
+                # 保存提醒数据（同时保存到框架状态和配置文件）
+                save_reminders(interface, save_to_config=True)
+                interface.logger.debug("已自动保存提醒数据")
             except asyncio.CancelledError:
                 interface.logger.debug("自动保存任务已取消")
                 break
@@ -1148,14 +1881,13 @@ async def cleanup(interface):
     # 停止所有提醒任务
     stop_reminder_tasks(interface)
 
-    # 保存状态到数据文件和配置文件（持久化存储）
+    # 保存状态（持久化存储）
     reminders_data = get_all_reminders_dict()
     reminder_count = sum(
         len(chat_reminders) for chat_reminders in reminders_data.values())
 
-    # 同时保存到数据文件和配置文件
+    # 保存提醒数据（同时保存到框架状态和配置文件）
     save_reminders(interface, save_to_config=True)
-    interface.logger.info(
-        f"已保存 {reminder_count} 个提醒到数据文件 {DATA_FILE} 和配置文件 {CONFIG_FILE}")
+    interface.logger.info(f"已保存 {reminder_count} 个提醒到框架状态和配置文件")
 
     interface.logger.info(f"模块 {MODULE_NAME} 已清理完成")

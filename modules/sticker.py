@@ -7,7 +7,7 @@ import asyncio
 import tempfile
 import subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputSticker
-from telegram.ext import ContextTypes, MessageHandler, filters, CallbackQueryHandler
+from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 可选库导入处理
 try:
@@ -45,6 +45,9 @@ _id_map_modified = False
 _state_lock = asyncio.Lock()
 _interface = None
 
+# 定义回调前缀
+CALLBACK_PREFIX = "sticker_"
+
 
 # 实用函数
 def _generate_short_id():
@@ -72,7 +75,7 @@ def _get_sticker_id(short_id):
 
 async def setup(interface):
     """模块初始化函数"""
-    global user_configs, user_sticker_sets, _interface, _sticker_handler, _callback_handler
+    global user_configs, user_sticker_sets, _interface, _sticker_handler
 
     _interface = interface
 
@@ -101,10 +104,12 @@ async def setup(interface):
     _sticker_handler = MessageHandler(filters.Sticker.ALL, handle_sticker)
     await interface.register_handler(_sticker_handler)
 
-    _callback_handler = CallbackQueryHandler(handle_callback_query,
-                                             pattern=r"^stk:")
-    # 使用较低的优先级确保其他模块的回调处理器先处理
-    await interface.register_handler(_callback_handler, group=10)
+    # 注册回调处理器，使用框架的权限验证系统
+    await interface.register_callback_handler(
+        handle_callback_query,
+        pattern=f"^{CALLBACK_PREFIX}",
+        admin_level=False  # 所有用户都可以使用贴纸功能
+    )
 
     interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
 
@@ -194,114 +199,190 @@ async def _save_config():
 # 命令处理函数
 async def sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /sticker 命令"""
+    # 显示当前配置和选项
+    await show_main_menu(update, context)
+
+
+# 设置菜单函数
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示主设置菜单"""
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
+    query = update.callback_query
 
     user_id = str(update.effective_user.id)
     config = user_configs.get(user_id, DEFAULT_CONFIG.copy())
-    args = context.args
 
-    if not args:
-        # 显示当前配置和选项
-        help_message = "*贴纸助手设置*\n\n"
-        help_message += f"📊 *当前配置*\n"
-        help_message += f"• 图片格式: `{config['image_format']}`\n"
-        help_message += f"• GIF 质量: `{config['gif_quality']}`\n"
-        help_message += f"• 自动下载: `{'✅' if config['auto_download'] else '❌'}`\n\n"
-        help_message += "*使用方法*\n"
-        help_message += "发送贴纸给我，即可转换为图片或 GIF\n\n"
-        help_message += "*命令列表*\n"
-        help_message += "`/sticker format [PNG|WEBP|JPG]` - 设置图片格式\n"
-        help_message += "`/sticker quality [low|medium|high]` - 设置 GIF 质量\n"
-        help_message += "`/sticker download [on|off]` - 设置自动下载\n"
+    # 构建设置面板文本
+    help_message = "*贴纸助手设置*\n\n"
+    help_message += f"📊 *当前配置*\n"
+    help_message += f"• 图片格式: `{config['image_format']}`\n"
+    help_message += f"• GIF 质量: `{config['gif_quality']}`\n"
+    help_message += f"• 自动下载: `{'✅' if config['auto_download'] else '❌'}`\n\n"
+    help_message += "*使用方法*\n"
+    help_message += "发送贴纸给我，即可转换为图片或 GIF\n"
 
-        # 创建查看和创建贴纸包的按钮
-        keyboard = []
+    # 创建设置按钮
+    settings_buttons = [
+        [
+            InlineKeyboardButton(
+                "Format Settings",
+                callback_data=f"{CALLBACK_PREFIX}menu_format"),
+            InlineKeyboardButton(
+                "Quality Settings",
+                callback_data=f"{CALLBACK_PREFIX}menu_quality")
+        ],
+        [
+            InlineKeyboardButton(
+                "Auto Download: ON"
+                if config['auto_download'] else "Auto Download: OFF",
+                callback_data=f"{CALLBACK_PREFIX}toggle_download")
+        ]
+    ]
 
-        # 如果用户有贴纸包，显示查看按钮
-        user_id = str(update.effective_user.id)
-        if user_id in user_sticker_sets and "set_name" in user_sticker_sets[
-                user_id]:
-            set_name = user_sticker_sets[user_id]["set_name"]
-            share_link = f"https://t.me/addstickers/{set_name}"
-            keyboard.append([
-                InlineKeyboardButton("View", url=share_link),
-                InlineKeyboardButton("+ Create", callback_data="stk:create")
-            ])
-        else:
-            # 用户没有贴纸包，只显示创建按钮
-            keyboard.append(
-                [InlineKeyboardButton("+ Create", callback_data="stk:create")])
+    # 创建贴纸包按钮
+    sticker_buttons = []
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await message.reply_text(help_message,
-                                 parse_mode="MARKDOWN",
-                                 reply_markup=reply_markup)
-        return
-
-    # 处理参数
-    param = args[0].lower()
-
-    if param == "format" and len(args) > 1:
-        format_value = args[1].upper()
-        if format_value in ["PNG", "WEBP", "JPG"]:
-            config["image_format"] = format_value
-            await message.reply_text(f"✅ 图片格式已设置为: *{format_value}*",
-                                     parse_mode="MARKDOWN")
-        else:
-            await message.reply_text("❌ 不支持的格式。请使用 `PNG`、`WEBP` 或 `JPG`。",
-                                     parse_mode="MARKDOWN")
-
-    elif param == "quality" and len(args) > 1:
-        quality = args[1].lower()
-        if quality in ["low", "medium", "high"]:
-            config["gif_quality"] = quality
-            await message.reply_text(f"✅ GIF 质量已设置为: *{quality}*",
-                                     parse_mode="MARKDOWN")
-        else:
-            await message.reply_text("❌ 不支持的质量级别。请使用 `low`、`medium` 或 `high`。",
-                                     parse_mode="MARKDOWN")
-
-    elif param == "download" and len(args) > 1:
-        download_value = args[1].lower()
-        if download_value in ["on", "true", "yes"]:
-            config["auto_download"] = True
-            await message.reply_text("✅ 自动下载已开启。", parse_mode="MARKDOWN")
-        elif download_value in ["off", "false", "no"]:
-            config["auto_download"] = False
-            await message.reply_text("✅ 自动下载已关闭。", parse_mode="MARKDOWN")
-        else:
-            await message.reply_text("❌ 无效的值。请使用 `on` 或 `off`。",
-                                     parse_mode="MARKDOWN")
-
-    elif param == "manage":
-        # 显示贴纸包信息
-        user_id = str(update.effective_user.id)
-        if user_id in user_sticker_sets and "set_name" in user_sticker_sets[
-                user_id]:
-            set_name = user_sticker_sets[user_id]["set_name"]
-            share_link = f"https://t.me/addstickers/{set_name}"
-            await message.reply_text(f"点击下方按钮查看贴纸包",
-                                     reply_markup=InlineKeyboardMarkup([[
-                                         InlineKeyboardButton("View",
-                                                              url=share_link)
-                                     ]]))
-        else:
-            await message.reply_text("你还没有贴纸包，是否创建新的贴纸包？",
-                                     reply_markup=InlineKeyboardMarkup([[
-                                         InlineKeyboardButton(
-                                             "+ Create",
-                                             callback_data="stk:create")
-                                     ]]))
-
+    # 如果用户有贴纸包，显示查看按钮
+    if user_id in user_sticker_sets and "set_name" in user_sticker_sets[
+            user_id]:
+        set_name = user_sticker_sets[user_id]["set_name"]
+        share_link = f"https://t.me/addstickers/{set_name}"
+        sticker_buttons.append([
+            InlineKeyboardButton("View Pack", url=share_link),
+            InlineKeyboardButton("+ Create New",
+                                 callback_data=f"{CALLBACK_PREFIX}create")
+        ])
     else:
-        await message.reply_text("❌ 无效的参数。使用 `/sticker` 查看帮助。",
-                                 parse_mode="MARKDOWN")
+        # 用户没有贴纸包，只显示创建按钮
+        sticker_buttons.append([
+            InlineKeyboardButton("+ Create Pack",
+                                 callback_data=f"{CALLBACK_PREFIX}create")
+        ])
 
-    # 保存用户配置
-    user_configs[user_id] = config
-    await _save_config()
+    # 合并所有按钮
+    keyboard = settings_buttons + sticker_buttons
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 发送或编辑消息
+    try:
+        if query:
+            # 检查查询是否已经被回答
+            try:
+                await query.answer()
+            except Exception:
+                pass  # 查询可能已经被回答
+
+            # 编辑消息
+            await query.edit_message_text(help_message,
+                                          parse_mode="MARKDOWN",
+                                          reply_markup=reply_markup)
+        else:
+            await message.reply_text(help_message,
+                                     parse_mode="MARKDOWN",
+                                     reply_markup=reply_markup)
+    except Exception as e:
+        if _interface:
+            _interface.logger.error(f"显示主菜单时出错: {str(e)}")
+
+
+async def show_format_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示格式设置菜单"""
+    query = update.callback_query
+    user_id = str(update.effective_user.id)
+    config = user_configs.get(user_id, DEFAULT_CONFIG.copy())
+
+    # 构建格式设置文本
+    format_text = "*图片格式设置*\n\n"
+    format_text += f"当前格式: `{config['image_format']}`\n\n"
+    format_text += "选择一个格式:\n"
+
+    # 创建格式选择按钮
+    keyboard = []
+    for format_option in ["PNG", "WEBP", "JPG"]:
+        prefix = "▷ " if format_option == config['image_format'] else ""
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{prefix}{format_option}",
+                callback_data=f"{CALLBACK_PREFIX}set_format_{format_option}")
+        ])
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton("⇠ Back",
+                             callback_data=f"{CALLBACK_PREFIX}back_to_main")
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 编辑消息
+    try:
+        # 检查查询是否已经被回答
+        try:
+            await query.answer()
+        except Exception:
+            pass  # 查询可能已经被回答
+
+        # 编辑消息
+        await query.edit_message_text(format_text,
+                                      parse_mode="MARKDOWN",
+                                      reply_markup=reply_markup)
+    except Exception as e:
+        if _interface:
+            _interface.logger.error(f"显示格式菜单时出错: {str(e)}")
+
+
+async def show_quality_menu(update: Update,
+                            context: ContextTypes.DEFAULT_TYPE):
+    """显示质量设置菜单"""
+    query = update.callback_query
+    user_id = str(update.effective_user.id)
+    config = user_configs.get(user_id, DEFAULT_CONFIG.copy())
+
+    # 构建质量设置文本
+    quality_text = "*GIF 质量设置*\n\n"
+    quality_text += f"当前质量: `{config['gif_quality']}`\n\n"
+    quality_text += "选择一个质量级别:\n"
+
+    # 创建质量选择按钮
+    keyboard = []
+    quality_options = {
+        "low": "Low (15fps)",
+        "medium": "Medium (24fps)",
+        "high": "High (30fps)"
+    }
+
+    for quality_key, quality_label in quality_options.items():
+        prefix = "▷ " if quality_key == config['gif_quality'] else ""
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{prefix}{quality_label}",
+                callback_data=f"{CALLBACK_PREFIX}set_quality_{quality_key}")
+        ])
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton("⇠ Back",
+                             callback_data=f"{CALLBACK_PREFIX}back_to_main")
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 编辑消息
+    try:
+        # 检查查询是否已经被回答
+        try:
+            await query.answer()
+        except Exception:
+            pass  # 查询可能已经被回答
+
+        # 编辑消息
+        await query.edit_message_text(quality_text,
+                                      parse_mode="MARKDOWN",
+                                      reply_markup=reply_markup)
+    except Exception as e:
+        if _interface:
+            _interface.logger.error(f"显示质量菜单时出错: {str(e)}")
 
 
 # 贴纸处理和转换函数
@@ -340,8 +421,9 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 只有在下载成功时才显示添加到贴纸包的按钮
             if download_success:
                 keyboard = [[
-                    InlineKeyboardButton("+ Add to Pack",
-                                         callback_data=f"stk:add:{short_id}")
+                    InlineKeyboardButton(
+                        "+ Add to Pack",
+                        callback_data=f"{CALLBACK_PREFIX}add_{short_id}")
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -352,10 +434,12 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             # 手动模式：显示操作按钮
             keyboard = [[
-                InlineKeyboardButton("⇣ Download",
-                                     callback_data=f"stk:dl:{short_id}"),
-                InlineKeyboardButton("+ Add to Pack",
-                                     callback_data=f"stk:add:{short_id}")
+                InlineKeyboardButton(
+                    "⇣ Download",
+                    callback_data=f"{CALLBACK_PREFIX}dl_{short_id}"),
+                InlineKeyboardButton(
+                    "+ Add to Pack",
+                    callback_data=f"{CALLBACK_PREFIX}add_{short_id}")
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -412,7 +496,7 @@ async def download_and_send_sticker_to_chat(bot, chat_id, sticker, config):
                                             filename="sticker.gif")
             else:
                 await bot.send_message(chat_id=chat_id,
-                                       text="转换动态贴纸失败，请尝试其他贴纸。")
+                                       text="转换动态贴纸失败，请尝试其他贴纸")
                 return False
 
         elif sticker.is_video:
@@ -434,7 +518,7 @@ async def download_and_send_sticker_to_chat(bot, chat_id, sticker, config):
                         filename=f"sticker.{config['image_format'].lower()}")
             else:
                 await bot.send_message(chat_id=chat_id,
-                                       text="转换静态贴纸失败，请尝试其他贴纸。")
+                                       text="转换静态贴纸失败，请尝试其他贴纸")
                 return False
 
         return True
@@ -681,26 +765,53 @@ async def handle_callback_query(update, context):
     """处理所有贴纸相关的回调查询"""
     try:
         query = update.callback_query
-        data = query.data.split(":")
+        data = query.data
 
-        if len(data) < 2 or data[0] != "stk":
+        # 检查前缀
+        if not data.startswith(CALLBACK_PREFIX):
             return
 
-        action = data[1]
+        # 移除前缀获取完整动作
+        action_with_params = data[len(CALLBACK_PREFIX):]
+        if not action_with_params:
+            return
+
+        # 分割参数（如果有）
+        parts = action_with_params.split("_")
+
+        # 对于特殊情况进行处理
+        if action_with_params == "back_to_main":
+            action = "back_to_main"
+        elif parts[0] == "menu" and len(parts) > 1:
+            action = f"menu_{parts[1]}"
+        elif parts[0] == "toggle" and len(parts) > 1:
+            action = "toggle_download"
+        elif parts[0] == "set" and len(parts) > 1:
+            if parts[1] == "format" and len(parts) > 2:
+                action = "set_format"
+                format_value = parts[2]
+            elif parts[1] == "quality" and len(parts) > 2:
+                action = "set_quality"
+                quality_value = parts[2]
+            else:
+                action = parts[0]
+        else:
+            action = parts[0]
+
         await query.answer()
 
         # 处理不同的操作
-        if action == "dl" and len(data) >= 3:
+        if action == "dl" and len(parts) > 1:
             # 下载贴纸
-            file_id = _get_sticker_id(data[2])
+            file_id = _get_sticker_id(parts[1])
             if file_id:
                 await handle_download(update, context, file_id)
             else:
-                await query.message.edit_text("❌ 贴纸信息已过期，请重新发送。")
+                await query.message.edit_text("❌ 贴纸信息已过期，请重新发送")
 
-        elif action == "add" and len(data) >= 3:
+        elif action == "add" and len(parts) > 1:
             # 添加贴纸到贴纸包
-            file_id = _get_sticker_id(data[2])
+            file_id = _get_sticker_id(parts[1])
             if file_id:
                 user_id = str(update.effective_user.id)
 
@@ -726,9 +837,9 @@ async def handle_callback_query(update, context):
                         await query.message.edit_text(message,
                                                       parse_mode="MARKDOWN")
                     else:
-                        await query.message.edit_text("❌ 创建贴纸包失败，请稍后重试。")
+                        await query.message.edit_text("❌ 创建贴纸包失败，请稍后重试")
             else:
-                await query.message.edit_text("❌ 贴纸信息已过期，请重新发送。")
+                await query.message.edit_text("❌ 贴纸信息已过期，请重新发送")
 
         elif action == "manage":
             # 显示贴纸包信息
@@ -745,8 +856,9 @@ async def handle_callback_query(update, context):
                 await query.message.edit_text(
                     "你还没有贴纸包，是否创建新的贴纸包？",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("+ Create",
-                                             callback_data="stk:create")
+                        InlineKeyboardButton(
+                            "+ Create",
+                            callback_data=f"{CALLBACK_PREFIX}create")
                     ]]))
 
         elif action == "create":
@@ -759,14 +871,68 @@ async def handle_callback_query(update, context):
                 message = f"✅ 贴纸包创建成功！\n[点击查看贴纸包]({share_link})"
                 await query.message.edit_text(message, parse_mode="MARKDOWN")
             else:
-                await query.message.edit_text("❌ 创建贴纸包失败，请稍后重试。")
+                await query.message.edit_text("❌ 创建贴纸包失败，请稍后重试")
+
+        # 设置菜单相关回调
+        elif action == "menu_format":
+            # 显示格式设置菜单
+            await show_format_menu(update, context)
+
+        elif action == "menu_quality":
+            # 显示质量设置菜单
+            await show_quality_menu(update, context)
+
+        elif action == "back_to_main":
+            # 返回主菜单
+            await show_main_menu(update, context)
+
+        elif action == "toggle_download":
+            # 切换自动下载设置
+            user_id = str(update.effective_user.id)
+            config = user_configs.get(user_id, DEFAULT_CONFIG.copy())
+            config["auto_download"] = not config["auto_download"]
+            user_configs[user_id] = config
+            await _save_config()
+
+            # 显示更新后的主菜单
+            await show_main_menu(update, context)
+
+        elif action == "set_format":
+            # 设置图片格式
+            if format_value in ["PNG", "WEBP", "JPG"]:
+                user_id = str(update.effective_user.id)
+                config = user_configs.get(user_id, DEFAULT_CONFIG.copy())
+                config["image_format"] = format_value
+                user_configs[user_id] = config
+                await _save_config()
+
+                # 显示成功消息
+                await query.answer(f"✅ 图片格式已设置为: {format_value}")
+
+                # 返回主菜单
+                await show_main_menu(update, context)
+
+        elif action == "set_quality":
+            # 设置 GIF 质量
+            if quality_value in ["low", "medium", "high"]:
+                user_id = str(update.effective_user.id)
+                config = user_configs.get(user_id, DEFAULT_CONFIG.copy())
+                config["gif_quality"] = quality_value
+                user_configs[user_id] = config
+                await _save_config()
+
+                # 显示成功消息
+                await query.answer(f"✅ GIF 质量已设置为: {quality_value}")
+
+                # 返回主菜单
+                await show_main_menu(update, context)
 
     except Exception as e:
         if _interface:
             _interface.logger.error(f"处理回调查询时出错: {str(e)}")
         try:
-            await query.message.edit_text("❌ 处理操作时出错，请重试。")
-        except:
+            await query.message.edit_text("❌ 处理操作时出错，请重试")
+        except Exception:
             pass
 
 
@@ -806,7 +972,7 @@ async def handle_download(update, context, file_id):
             except:
                 await query.message.edit_text("✅ 贴纸已下载")
         else:
-            await query.message.edit_text("❌ 处理贴纸失败，请重试。")
+            await query.message.edit_text("❌ 处理贴纸失败，请重试")
 
     except Exception as e:
         await query.message.edit_text(f"❌ 处理贴纸时出错: {str(e)}")
@@ -830,7 +996,7 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
 
         # 处理不同类型的贴纸
         if 'tgs' in original_sticker.file_path:
-            return False, "❌ 暂不支持添加动态贴纸到贴纸包。"
+            return False, "❌ 暂不支持添加动态贴纸到贴纸包"
 
         elif 'webm' in original_sticker.file_path:
             try:
@@ -840,7 +1006,7 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
                     custom_path=sticker_path)
 
                 if not os.path.exists(sticker_path):
-                    return False, "❌ 下载贴纸失败。"
+                    return False, "❌ 下载贴纸失败"
 
                 # 添加到贴纸包
                 with open(sticker_path, "rb") as sticker_file:
@@ -857,16 +1023,16 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
                         # 检查是否是贴纸包已满错误
                         if "too many" in error_str or "maximum" in error_str or "limit" in error_str:
                             # 贴纸包已满，提示用户使用 Telegram 客户端创建新贴纸包
-                            return False, "❌ 贴纸包已满。\n\n请使用 Telegram 客户端创建新贴纸包，或删除一些现有贴纸。"
+                            return False, "❌ 贴纸包已满\n\n请使用 Telegram 客户端创建新贴纸包，或删除一些现有贴纸"
                         else:
                             # 其他错误
                             raise e
 
                 if success:
                     share_link = f"https://t.me/addstickers/{set_name}"
-                    return True, f"✅ 贴纸已添加到贴纸包。\n[查看贴纸包]({share_link})"
+                    return True, f"✅ 贴纸已添加到贴纸包\n[查看贴纸包]({share_link})"
                 else:
-                    return False, "❌ 添加贴纸失败，请稍后重试。"
+                    return False, "❌ 添加贴纸失败，请稍后重试"
             finally:
                 # 清理临时文件
                 if sticker_path and os.path.exists(sticker_path):
@@ -884,7 +1050,7 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
                     custom_path=sticker_path)
 
                 if not os.path.exists(sticker_path):
-                    return False, "❌ 下载贴纸失败。"
+                    return False, "❌ 下载贴纸失败"
 
                 # 添加到贴纸包
                 with open(sticker_path, "rb") as sticker_file:
@@ -901,16 +1067,16 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
                         # 检查是否是贴纸包已满错误
                         if "too many" in error_str or "maximum" in error_str or "limit" in error_str:
                             # 贴纸包已满，提示用户使用 Telegram 客户端创建新贴纸包
-                            return False, "❌ 贴纸包已满。\n\n请使用 Telegram 客户端创建新贴纸包，或删除一些现有贴纸。"
+                            return False, "❌ 贴纸包已满\n\n请使用 Telegram 客户端创建新贴纸包，或删除一些现有贴纸"
                         else:
                             # 其他错误
                             raise e
 
                 if success:
                     share_link = f"https://t.me/addstickers/{set_name}"
-                    return True, f"✅ 贴纸已添加到贴纸包。\n[查看贴纸包]({share_link})"
+                    return True, f"✅ 贴纸已添加到贴纸包\n[查看贴纸包]({share_link})"
                 else:
-                    return False, "❌ 添加贴纸失败，请稍后重试。"
+                    return False, "❌ 添加贴纸失败，请稍后重试"
             finally:
                 # 清理临时文件
                 if sticker_path and os.path.exists(sticker_path):

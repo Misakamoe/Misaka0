@@ -5,8 +5,8 @@ import json
 import os
 import asyncio
 from datetime import datetime
-from telegram import Update
-from telegram.ext import ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, CallbackQueryHandler
 
 # 模块元数据
 MODULE_NAME = "weather"
@@ -155,6 +155,12 @@ CONFIG_FILE = "config/weather_config.json"
 # 缓存过期时间（分钟）
 CACHE_EXPIRY = 30
 
+# 回调前缀
+CALLBACK_PREFIX = "weather_"
+
+# 会话状态
+SESSION_WAITING_API_KEY = "waiting_api_key"
+
 
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查询当前天气
@@ -176,7 +182,7 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in _state["user_locations"]:
             location = _state["user_locations"][user_id]
         else:
-            await message.reply_text("🌍 请提供位置名称，例如: /weather 北京")
+            await message.reply_text("🌍 请提供位置名称，如: /weather 北京")
             return
     else:
         # 记住用户的位置
@@ -190,7 +196,7 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not api_key:
         await message.reply_text(
-            f"⚠️ 未设置 {WEATHER_SOURCES[source]['name']} 的 API 密钥，请使用 /weatherset key {source} YOUR_API_KEY 设置"
+            f"⚠️ 未设置 {WEATHER_SOURCES[source]['name']} 的 API 密钥，请使用 /weatherset 命令设置"
         )
         return
 
@@ -260,7 +266,7 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not success:
         await waiting_msg.edit_text(
-            f"❌ 无法获取 {location} 的天气信息，请检查位置名称或 API 密钥是否正确\n\n请使用 /weatherset key 命令设置有效的 API 密钥"
+            f"❌ 无法获取 {location} 的天气信息，请检查位置名称或 API 密钥是否正确\n\n请使用 /weatherset 命令设置有效的 API 密钥"
         )
         if _module_interface:
             _module_interface.logger.error(f"无法获取 {location} 的天气信息")
@@ -293,7 +299,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in _state["user_locations"]:
             location = _state["user_locations"][user_id]
         else:
-            await message.reply_text("🌍 请提供位置名称，例如: /forecast 北京 3")
+            await message.reply_text("🌍 请提供位置名称，如: /forecast 北京 3")
             return
 
     # 获取活跃的天气源
@@ -302,7 +308,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not api_key:
         await message.reply_text(
-            f"⚠️ 未设置 {WEATHER_SOURCES[source]['name']} 的 API 密钥，请使用 /weatherset key {source} YOUR_API_KEY 设置"
+            f"⚠️ 未设置 {WEATHER_SOURCES[source]['name']} 的 API 密钥，请使用 /weatherset 命令设置"
         )
         return
 
@@ -373,7 +379,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not success:
         await waiting_msg.edit_text(
-            f"❌ 无法获取 {location} 的天气预报，请检查位置名称或 API 密钥是否正确\n\n请使用 /weatherset key 命令设置有效的 API 密钥"
+            f"❌ 无法获取 {location} 的天气预报，请检查位置名称或 API 密钥是否正确\n\n请使用 /weatherset 命令设置有效的 API 密钥"
         )
         if _module_interface:
             _module_interface.logger.error(f"无法获取 {location} 的天气预报信息")
@@ -390,79 +396,358 @@ async def weather_set_command(update: Update,
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
 
-    if not context.args or len(context.args) < 1:
-        # 显示帮助信息
-        help_text = """
-*🔧 天气模块设置*
-使用方法:
-- 设置 API 密钥: `/weatherset key <source> <api_key>`
-- 设置默认天气源: `/weatherset source <source>`
-- 查看当前设置: `/weatherset info`
+    # 显示设置面板
+    await show_settings_panel(update, context)
 
-支持的天气源:
-"""
-        for source, info in WEATHER_SOURCES.items():
-            help_text += f"- `{source}`: {info['name']}\n"
 
-        await message.reply_text(help_text, parse_mode="MARKDOWN")
+# 设置面板相关函数
+async def show_settings_panel(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE):
+    """显示天气设置主面板
+
+    Args:
+        update: Telegram 更新对象
+        context: 回调上下文
+    """
+    # 检查是从回调查询还是从命令调用
+    is_callback = update.callback_query is not None
+
+    # 构建设置面板文本
+    settings_text = "*🔧 天气模块设置*\n\n"
+    settings_text += f"当前天气源: {WEATHER_SOURCES[_state['active_source']]['name']}\n\n"
+    settings_text += "API 密钥状态:\n"
+
+    for source, info in WEATHER_SOURCES.items():
+        key = _state["api_keys"].get(source, "")
+        status = "已设置" if key else "未设置"
+        settings_text += f"- {info['name']}: {status}\n"
+
+    settings_text += "\n请选择操作:"
+
+    # 创建主菜单按钮
+    keyboard = [[
+        InlineKeyboardButton("Source Settings",
+                             callback_data=f"{CALLBACK_PREFIX}menu_source")
+    ],
+                [
+                    InlineKeyboardButton(
+                        "API Key Settings",
+                        callback_data=f"{CALLBACK_PREFIX}menu_api")
+                ],
+                [
+                    InlineKeyboardButton(
+                        "View Details",
+                        callback_data=f"{CALLBACK_PREFIX}show_details")
+                ]]
+
+    # 创建按钮标记
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 发送或编辑消息
+    if is_callback:
+        await update.callback_query.edit_message_text(
+            settings_text, reply_markup=reply_markup, parse_mode="MARKDOWN")
+    else:
+        message = update.message or update.edited_message
+        await message.reply_text(settings_text,
+                                 reply_markup=reply_markup,
+                                 parse_mode="MARKDOWN")
+
+
+async def show_source_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示天气源设置菜单
+
+    Args:
+        update: Telegram 更新对象
+        context: 回调上下文
+    """
+    query = update.callback_query
+
+    # 构建设置面板文本
+    settings_text = "*🔧 天气源设置*\n\n"
+    settings_text += f"当前天气源: {WEATHER_SOURCES[_state['active_source']]['name']}\n\n"
+    settings_text += "请选择天气源:"
+
+    # 创建按钮
+    keyboard = []
+
+    # 添加设置默认源按钮
+    source_buttons = []
+    for source, info in WEATHER_SOURCES.items():
+        source_buttons.append(
+            InlineKeyboardButton(
+                f"▷ {info['name']}"
+                if source == _state["active_source"] else f"{info['name']}",
+                callback_data=f"{CALLBACK_PREFIX}set_source_{source}"))
+
+    # 每行一个按钮
+    for button in source_buttons:
+        keyboard.append([button])
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton("⇠ Back",
+                             callback_data=f"{CALLBACK_PREFIX}back_to_main")
+    ])
+
+    # 创建按钮标记
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 编辑消息
+    await query.edit_message_text(settings_text,
+                                  reply_markup=reply_markup,
+                                  parse_mode="MARKDOWN")
+
+
+async def show_api_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示 API 密钥设置菜单
+
+    Args:
+        update: Telegram 更新对象
+        context: 回调上下文
+    """
+    query = update.callback_query
+
+    # 构建设置面板文本
+    settings_text = "*🔧 API 密钥设置*\n\n"
+    settings_text += "请选择要设置 API 密钥的服务:"
+
+    # 创建按钮
+    keyboard = []
+
+    # 添加设置 API 密钥按钮
+    api_buttons = []
+    for source, info in WEATHER_SOURCES.items():
+        api_buttons.append(
+            InlineKeyboardButton(
+                f"{info['name']} API",
+                callback_data=f"{CALLBACK_PREFIX}set_key_{source}"))
+
+    # 每行一个按钮
+    for button in api_buttons:
+        keyboard.append([button])
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton("⇠ Back",
+                             callback_data=f"{CALLBACK_PREFIX}back_to_main")
+    ])
+
+    # 创建按钮标记
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 编辑消息
+    await query.edit_message_text(settings_text,
+                                  reply_markup=reply_markup,
+                                  parse_mode="MARKDOWN")
+
+
+async def show_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示详细设置信息
+
+    Args:
+        update: Telegram 更新对象
+        context: 回调上下文
+    """
+    query = update.callback_query
+
+    # 构建详细信息文本
+    info_text = "*🔧 天气模块详细信息*\n\n"
+    info_text += f"默认天气源: {WEATHER_SOURCES[_state['active_source']]['name']}\n\n"
+    info_text += "API 密钥:\n"
+
+    for source, key in _state["api_keys"].items():
+        if source in WEATHER_SOURCES:
+            masked_key = key[:4] + "*****" + key[-4:] if len(
+                key) > 8 else "********"
+            info_text += f"- {WEATHER_SOURCES[source]['name']}: `{masked_key}`\n"
+
+    # 创建返回按钮
+    keyboard = [[
+        InlineKeyboardButton("⇠ Back",
+                             callback_data=f"{CALLBACK_PREFIX}back_to_main")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 编辑消息
+    await query.edit_message_text(info_text,
+                                  reply_markup=reply_markup,
+                                  parse_mode="MARKDOWN")
+
+
+async def start_set_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                            source: str):
+    """开始设置 API 密钥流程
+
+    Args:
+        update: Telegram 更新对象
+        context: 回调上下文
+        source: 天气源名称
+    """
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await query.edit_message_text(
+            "System error, please contact administrator")
         return
 
-    action = context.args[0].lower()
+    # 设置会话状态
+    await session_manager.set(user_id, "weather_active", True)
+    await session_manager.set(user_id, "weather_step", SESSION_WAITING_API_KEY)
+    await session_manager.set(user_id, "weather_source", source)
 
-    if action == "key" and len(context.args) >= 3:
-        # 设置API密钥
-        source = context.args[1].lower()
-        api_key = context.args[2]
+    # 创建返回按钮
+    keyboard = [[
+        InlineKeyboardButton("⇠ Back",
+                             callback_data=f"{CALLBACK_PREFIX}back_to_api")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-        if source not in WEATHER_SOURCES:
-            await message.reply_text(f"❌ 不支持的天气源: {source}")
-            return
+    # 编辑消息
+    await query.edit_message_text(
+        f"请输入 {WEATHER_SOURCES[source]['name']} 的 API 密钥:\n\n"
+        f"• 使用 /cancel 命令可以取消操作",
+        reply_markup=reply_markup,
+        parse_mode="MARKDOWN")
+
+
+async def set_weather_source(update: Update,
+                             context: ContextTypes.DEFAULT_TYPE, source: str):
+    """设置默认天气源
+
+    Args:
+        update: Telegram 更新对象
+        context: 回调上下文
+        source: 天气源名称
+    """
+    query = update.callback_query
+
+    if source not in WEATHER_SOURCES:
+        await query.answer(f"❌ 不支持的天气源: {source}")
+        return
+
+    # 设置默认天气源
+    _state["active_source"] = source
+
+    if _module_interface:
+        _module_interface.logger.info(
+            f"用户 {update.effective_user.id} 将默认天气源设置为 {WEATHER_SOURCES[source]['name']}"
+        )
+
+    # 显示成功消息
+    await query.answer(f"✅ 已将默认天气源设置为: {WEATHER_SOURCES[source]['name']}")
+
+    # 更新源设置面板
+    await show_source_menu(update, context)
+
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理按钮回调
+
+    Args:
+        update: Telegram 更新对象
+        context: 回调上下文
+    """
+    query = update.callback_query
+    user_id = update.effective_user.id
+    data = query.data
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+
+    # 确保回调查询得到响应
+    await query.answer()
+
+    # 处理不同的回调
+    if data == f"{CALLBACK_PREFIX}back_to_main":
+        # 返回主设置面板
+        if session_manager:
+            await session_manager.delete(user_id, "weather_active")
+            await session_manager.delete(user_id, "weather_step")
+            await session_manager.delete(user_id, "weather_source")
+
+        await show_settings_panel(update, context)
+
+    elif data == f"{CALLBACK_PREFIX}back_to_api":
+        # 返回 API 设置菜单
+        if session_manager:
+            await session_manager.delete(user_id, "weather_active")
+            await session_manager.delete(user_id, "weather_step")
+            await session_manager.delete(user_id, "weather_source")
+
+        await show_api_menu(update, context)
+
+    elif data == f"{CALLBACK_PREFIX}menu_source":
+        # 显示源设置菜单
+        await show_source_menu(update, context)
+
+    elif data == f"{CALLBACK_PREFIX}menu_api":
+        # 显示 API 设置菜单
+        await show_api_menu(update, context)
+
+    elif data == f"{CALLBACK_PREFIX}show_details":
+        # 显示详细设置
+        await show_details(update, context)
+
+    elif data.startswith(f"{CALLBACK_PREFIX}set_source_"):
+        # 设置默认天气源
+        source = data.replace(f"{CALLBACK_PREFIX}set_source_", "")
+        await set_weather_source(update, context, source)
+
+    elif data.startswith(f"{CALLBACK_PREFIX}set_key_"):
+        # 设置 API 密钥
+        source = data.replace(f"{CALLBACK_PREFIX}set_key_", "")
+        await start_set_api_key(update, context, source)
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理用户消息（用于会话流程）
+
+    Args:
+        update: Telegram 更新对象
+        context: 回调上下文
+    """
+    # 检查是否有活动会话
+    user_id = update.effective_user.id
+    session_manager = context.bot_data.get("session_manager")
+
+    if not session_manager:
+        return
+
+    # 检查是否是天气模块的活跃会话
+    is_active = await session_manager.get(user_id, "weather_active", False)
+    if not is_active:
+        return
+
+    # 获取当前步骤
+    step = await session_manager.get(user_id, "weather_step")
+
+    # 处理不同步骤的输入
+    if step == SESSION_WAITING_API_KEY:
+        # 处理 API 密钥输入
+        source = await session_manager.get(user_id, "weather_source")
+        api_key = update.message.text.strip()
+
+        # 清除会话状态
+        await session_manager.delete(user_id, "weather_active")
+        await session_manager.delete(user_id, "weather_step")
+        await session_manager.delete(user_id, "weather_source")
+
+        # 设置 API 密钥
+        _state["api_keys"][source] = api_key
 
         # 记录设置操作，但不记录 API 密钥
         if _module_interface:
             _module_interface.logger.info(
-                f"用户 {update.effective_user.id} 设置了 {WEATHER_SOURCES[source]['name']} 的 API 密钥"
-            )
+                f"用户 {user_id} 设置了 {WEATHER_SOURCES[source]['name']} 的 API 密钥")
 
-        _state["api_keys"][source] = api_key
-
-        await message.reply_text(
-            f"✅ 已设置 {WEATHER_SOURCES[source]['name']} 的 API 密钥")
-
-    elif action == "source" and len(context.args) >= 2:
-        # 设置默认天气源
-        source = context.args[1].lower()
-
-        if source not in WEATHER_SOURCES:
-            await message.reply_text(f"❌ 不支持的天气源: {source}")
-            return
-
-        _state["active_source"] = source
-
-        if _module_interface:
-            _module_interface.logger.info(
-                f"用户 {update.effective_user.id} 将默认天气源设置为 {WEATHER_SOURCES[source]['name']}"
-            )
-
-        await message.reply_text(
-            f"✅ 已将默认天气源设置为: {WEATHER_SOURCES[source]['name']}")
-
-    elif action == "info":
-        # 显示当前设置
-        info_text = "*🔧 当前天气模块设置*\n"
-        info_text += f"默认天气源: {WEATHER_SOURCES[_state['active_source']]['name']}\n\n"
-        info_text += "API 密钥:\n"
-
-        for source, key in _state["api_keys"].items():
-            if source in WEATHER_SOURCES:
-                masked_key = key[:4] + "*" * (len(key) - 8) + key[-4:] if len(
-                    key) > 8 else "********"
-                info_text += f"- {WEATHER_SOURCES[source]['name']}: `{masked_key}`\n"
-
-        await message.reply_text(info_text, parse_mode="MARKDOWN")
-
-    else:
-        await message.reply_text("❌ 无效的命令，使用 /weatherset 查看帮助")
+        # 发送成功消息
+        await update.message.reply_text(
+            f"✅ 已成功设置 {WEATHER_SOURCES[source]['name']} 的 API 密钥\n\n"
+            f"使用 /weatherset 命令可以查看和管理设置")
 
 
 # 获取天气图标
@@ -1250,6 +1535,17 @@ async def setup(interface):
                                      weather_set_command,
                                      admin_level="super_admin",
                                      description="天气模块设置")
+
+    # 注册回调处理器
+    await interface.register_callback_handler(button_callback,
+                                              pattern=f"^{CALLBACK_PREFIX}",
+                                              admin_level="super_admin")
+
+    # 注册消息处理器（用于会话流程）
+    from telegram.ext import MessageHandler, filters
+    message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                     handle_message)
+    await interface.register_handler(message_handler, group=7)
 
     # 加载用户位置状态
     state = interface.load_state(default={})

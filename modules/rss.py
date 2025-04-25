@@ -10,8 +10,8 @@ import random
 import time
 from datetime import datetime
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ContextTypes
-from utils.formatter import escape_html, strip_html, normalize_whitespace
+from telegram.ext import ContextTypes, filters, MessageHandler
+from utils.formatter import TextFormatter
 
 # 模块元数据
 MODULE_NAME = "rss"
@@ -27,6 +27,14 @@ DEFAULT_INTERVAL = 300  # 默认检查间隔（秒）
 HEALTH_CHECK_THRESHOLD = 5  # 连续失败次数阈值
 MAX_TIMESTAMPS = 10  # 保存的最大时间戳数量
 MAX_ENTRY_IDS = 100  # 每个源保存的最大条目 ID 数量
+
+# 按钮回调前缀
+CALLBACK_PREFIX = "rss_"
+
+# 会话状态
+SESSION_ADD_URL = "add_url"
+SESSION_ADD_TITLE = "add_title"
+SESSION_REMOVE = "remove"
 
 # 模块状态
 _state = {
@@ -88,46 +96,65 @@ def save_config():
 # RSS 命令处理函数
 async def rss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理 RSS 订阅"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
+    # 获取消息对象（可能是新消息、编辑的消息或回调查询的消息）
+    if hasattr(update, 'callback_query') and update.callback_query:
+        message = update.callback_query.message
+    else:
+        message = update.message or update.edited_message
 
-    if not context.args:
-        await show_help(update, context)
+    # 确保消息对象不为空
+    if not message:
+        _module_interface.logger.error("无法获取消息对象")
         return
 
-    action = context.args[0].lower()
+    # 显示主菜单
+    list_callback = f"{CALLBACK_PREFIX}list"
+    add_callback = f"{CALLBACK_PREFIX}add"
+    health_callback = f"{CALLBACK_PREFIX}health"
 
-    if action == "list":
-        await list_subscriptions(update, context)
-    elif action == "add" and len(context.args) >= 2:
-        await add_subscription(update, context)
-    elif action == "remove" and len(context.args) >= 2:
-        await remove_subscription(update, context)
-    elif action == "health":
-        await rss_health_command(update, context)
+    keyboard = [[
+        InlineKeyboardButton("List", callback_data=list_callback),
+        InlineKeyboardButton("Add", callback_data=add_callback),
+        InlineKeyboardButton("Health", callback_data=health_callback)
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 检查是否是回调查询
+    if hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.edit_message_text(
+            "<b>📢 RSS 订阅管理</b>\n\n"
+            "请选择要执行的操作：",
+            reply_markup=reply_markup,
+            parse_mode="HTML")
     else:
-        await show_help(update, context)
+        await message.reply_text("<b>📢 RSS 订阅管理</b>\n\n"
+                                 "请选择要执行的操作：",
+                                 reply_markup=reply_markup,
+                                 parse_mode="HTML")
 
 
+# 不再需要单独的帮助函数，因为主菜单已经包含了所有功能
+# 保留此函数仅用于兼容性，直接调用 rss_command
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示帮助信息"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
-
-    help_text = ("<b>📢 RSS 订阅管理</b>\n\n"
-                 "可用命令：\n"
-                 "• <code>/rss list</code> - 列出当前订阅\n"
-                 "• <code>/rss add &lt;url&gt; [title]</code> - 添加订阅\n"
-                 "• <code>/rss remove &lt;url 或序号&gt;</code> - 删除订阅\n"
-                 "• <code>/rss health</code> - 查看源健康状态\n")
-    await message.reply_text(help_text, parse_mode="HTML")
+    """显示帮助信息（现在直接显示主菜单）"""
+    await rss_command(update, context)
 
 
 async def list_subscriptions(update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
     """列出当前订阅"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
+    # 检查是否是回调查询
+    callback_query = None
+    if hasattr(update, 'callback_query') and update.callback_query:
+        callback_query = update.callback_query
+        message = callback_query.message
+    else:
+        message = update.message or update.edited_message
+
+    # 确保消息对象不为空
+    if not message:
+        _module_interface.logger.error("无法获取消息对象")
+        return
 
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
@@ -136,27 +163,66 @@ async def list_subscriptions(update: Update,
     subscriptions = _config["subscriptions"][chat_type].get(chat_id, [])
 
     if not subscriptions:
-        await message.reply_text("⚠️ 当前没有 RSS 订阅。")
+        # 创建返回主菜单的按钮
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}main")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        if callback_query:
+            await callback_query.edit_message_text("⚠️ 当前没有 RSS 订阅",
+                                                   reply_markup=reply_markup)
+        else:
+            await message.reply_text("⚠️ 当前没有 RSS 订阅",
+                                     reply_markup=reply_markup)
         return
 
     text = "<b>📋 RSS 订阅列表</b>\n\n"
+
+    # 显示订阅列表
     for i, url in enumerate(subscriptions, 1):
         source_info = _config["sources"].get(url, {})
         title = source_info.get("title", url)
         # 使用 HTML 格式，避免转义问题
-        safe_title = escape_html(title)
-        safe_url = escape_html(url)
+        safe_title = TextFormatter.escape_html(title)
+        safe_url = TextFormatter.escape_html(url)
         text += f"{i}. <b>{safe_title}</b>\n"
         text += f"   <code>{safe_url}</code>\n\n"
 
-    await message.reply_text(text, parse_mode="HTML")
+    # 创建操作按钮
+    keyboard = [[
+        InlineKeyboardButton("Remove",
+                             callback_data=f"{CALLBACK_PREFIX}remove"),
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if callback_query:
+        await callback_query.edit_message_text(text,
+                                               reply_markup=reply_markup,
+                                               parse_mode="HTML")
+    else:
+        await message.reply_text(text,
+                                 reply_markup=reply_markup,
+                                 parse_mode="HTML")
 
 
 async def rss_health_command(update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
     """查询 RSS 源健康状态"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
+    # 检查是否是回调查询
+    callback_query = None
+    if hasattr(update, 'callback_query') and update.callback_query:
+        callback_query = update.callback_query
+        message = callback_query.message
+    else:
+        message = update.message or update.edited_message
+
+    # 确保消息对象不为空
+    if not message:
+        _module_interface.logger.error("无法获取消息对象")
+        return
 
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
@@ -164,8 +230,19 @@ async def rss_health_command(update: Update,
     # 获取当前聊天的订阅
     subscriptions = _config["subscriptions"][chat_type].get(chat_id, [])
 
+    # 创建返回主菜单的按钮
+    keyboard = [[
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     if not subscriptions:
-        await message.reply_text("⚠️ 当前没有 RSS 订阅。")
+        if callback_query:
+            await callback_query.edit_message_text("⚠️ 当前没有 RSS 订阅",
+                                                   reply_markup=reply_markup)
+        else:
+            await message.reply_text("⚠️ 当前没有 RSS 订阅",
+                                     reply_markup=reply_markup)
         return
 
     text = "<b>📊 RSS 源健康状态</b>\n\n"
@@ -173,7 +250,7 @@ async def rss_health_command(update: Update,
     for url in subscriptions:
         source_info = _config["sources"].get(url, {})
         source_title = source_info.get('title', url)
-        safe_title = escape_html(source_title)
+        safe_title = TextFormatter.escape_html(source_title)
 
         health_info = _state["source_health"].get(
             url, {
@@ -209,20 +286,74 @@ async def rss_health_command(update: Update,
                  f"  • 最后成功: {last_success}\n"
                  f"  • 检查间隔: {interval:.0f} 秒\n\n")
 
-    await message.reply_text(text, parse_mode="HTML")
+    if callback_query:
+        await callback_query.edit_message_text(text,
+                                               reply_markup=reply_markup,
+                                               parse_mode="HTML")
+    else:
+        await message.reply_text(text,
+                                 reply_markup=reply_markup,
+                                 parse_mode="HTML")
 
 
 async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """添加订阅"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
+    """添加订阅 - 启动会话流程"""
+    # 检查是否是回调查询
+    callback_query = None
+    if hasattr(update, 'callback_query') and update.callback_query:
+        callback_query = update.callback_query
+        message = callback_query.message
+    else:
+        message = update.message or update.edited_message
 
+    # 确保消息对象不为空
+    if not message:
+        _module_interface.logger.error("无法获取消息对象")
+        return
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        if callback_query:
+            await callback_query.answer("系统错误，请联系管理员")
+        else:
+            await message.reply_text("系统错误，请联系管理员")
+        return
+
+    user_id = update.effective_user.id
+
+    # 设置会话状态，等待用户输入 URL
+    await session_manager.set(user_id, "rss_active", True)
+    await session_manager.set(user_id, "rss_step", SESSION_ADD_URL)
+
+    # 创建返回按钮
+    keyboard = [[
+        InlineKeyboardButton("⇠ Back",
+                             callback_data=f"{CALLBACK_PREFIX}cancel")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if callback_query:
+        await callback_query.edit_message_text("请输入要订阅的 RSS 源 URL：",
+                                               reply_markup=reply_markup)
+    else:
+        await message.reply_text("请输入要订阅的 RSS 源 URL：",
+                                 reply_markup=reply_markup)
+
+
+async def handle_add_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                         url: str):
+    """处理用户输入的 RSS URL"""
+    message = update.message
+    user_id = update.effective_user.id
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
 
-    url = context.args[1]
-    custom_title = " ".join(context.args[2:]) if len(
-        context.args) > 2 else None
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await message.reply_text("系统错误，请联系管理员")
+        return
 
     # 获取当前聊天的订阅
     if chat_id not in _config["subscriptions"][chat_type]:
@@ -232,7 +363,18 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 检查是否已订阅
     if url in subscriptions:
-        await message.reply_text("⚠️ 已经订阅了该 RSS 源。")
+        # 创建返回按钮
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}main")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await message.reply_text("⚠️ 已经订阅了该 RSS 源", reply_markup=reply_markup)
+
+        # 清除会话状态
+        await session_manager.delete(user_id, "rss_active")
+        await session_manager.delete(user_id, "rss_step")
         return
 
     # 验证并获取 RSS 源信息
@@ -243,150 +385,199 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
         feed = await fetch_feed(url)
 
         if not feed or not feed.get('entries'):
-            await processing_msg.edit_text("❌ 无效的 RSS 源，请检查 URL 是否正确。")
+            # 创建返回按钮
+            keyboard = [[
+                InlineKeyboardButton("⇠ Back",
+                                     callback_data=f"{CALLBACK_PREFIX}main")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await processing_msg.edit_text("❌ 无效的 RSS 源，请检查 URL 是否正确",
+                                           reply_markup=reply_markup)
+
+            # 清除会话状态
+            await session_manager.delete(user_id, "rss_active")
+            await session_manager.delete(user_id, "rss_step")
             return
 
-        # 添加到订阅
-        subscriptions.append(url)
-
-        # 添加源信息
+        # 获取源标题
         feed_title = feed.get('feed', {}).get('title', url)
-        _config["sources"][url] = {
-            "title": custom_title or feed_title,
-            "description": feed.get('feed', {}).get('description', ''),
-            "last_updated": datetime.now().isoformat()
-        }
 
-        # 记录最后检查时间和条目 ID
-        _state["last_check"][url] = datetime.now().timestamp()
-        if feed.get('entries'):
+        # 保存 URL 并进入下一步（输入自定义标题）
+        await session_manager.set(user_id, "rss_url", url)
+        await session_manager.set(user_id, "rss_feed_title", feed_title)
+        await session_manager.set(user_id, "rss_step", SESSION_ADD_TITLE)
+
+        # 创建按钮（使用默认标题或返回）
+        keyboard = [[
+            InlineKeyboardButton(
+                "Use Default",
+                callback_data=f"{CALLBACK_PREFIX}use_default_title")
+        ],
+                    [
+                        InlineKeyboardButton(
+                            "⇠ Back", callback_data=f"{CALLBACK_PREFIX}cancel")
+                    ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await processing_msg.edit_text(
+            f"✅ RSS 源有效\n\n"
+            f"默认标题: <b>{TextFormatter.escape_html(feed_title)}</b>\n\n"
+            f"请选择使用默认标题，或输入自定义标题：",
+            reply_markup=reply_markup,
+            parse_mode="HTML")
+
+    except Exception as e:
+        # 创建返回按钮
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}main")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await message.reply_text(f"❌ 添加 RSS 源失败: {str(e)}",
+                                 reply_markup=reply_markup)
+
+        # 清除会话状态
+        await session_manager.delete(user_id, "rss_active")
+        await session_manager.delete(user_id, "rss_step")
+
+
+async def handle_add_title(update: Update,
+                           context: ContextTypes.DEFAULT_TYPE,
+                           title: str = None):
+    """处理用户输入的自定义标题或使用默认标题"""
+    # 检查是否是回调查询
+    callback_query = None
+    if hasattr(update, 'callback_query') and update.callback_query:
+        callback_query = update.callback_query
+        message = callback_query.message
+    else:
+        message = update.message or update.edited_message
+
+    # 确保消息对象不为空
+    if not message and not callback_query:
+        _module_interface.logger.error("无法获取消息对象或回调查询")
+        return
+
+    user_id = update.effective_user.id
+    chat_id = str(update.effective_chat.id)
+    chat_type = "private" if update.effective_chat.type == "private" else "group"
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        if callback_query:
+            await callback_query.answer("系统错误，请联系管理员")
+        elif message:
+            await message.reply_text("系统错误，请联系管理员")
+        return
+
+    # 获取保存的 URL 和默认标题
+    url = await session_manager.get(user_id, "rss_url")
+    feed_title = await session_manager.get(user_id, "rss_feed_title")
+
+    if not url:
+        if callback_query:
+            await callback_query.answer("会话已过期，请重新开始")
+            await callback_query.edit_message_text("⚠️ 会话已过期，请重新开始")
+        elif message:
+            await message.reply_text("⚠️ 会话已过期，请重新开始")
+        return
+
+    # 如果没有提供标题，则使用默认标题
+    custom_title = title or feed_title
+
+    # 获取当前聊天的订阅
+    subscriptions = _config["subscriptions"][chat_type][chat_id]
+
+    # 添加到订阅
+    subscriptions.append(url)
+
+    # 添加源信息
+    _config["sources"][url] = {
+        "title": custom_title,
+        "description": "",  # 可以从 feed 中获取，但这里简化处理
+        "last_updated": datetime.now().isoformat()
+    }
+
+    # 记录最后检查时间
+    _state["last_check"][url] = datetime.now().timestamp()
+
+    # 初始化健康状态
+    _state["source_health"][url] = {
+        "consecutive_failures": 0,
+        "last_success": datetime.now().timestamp(),
+        "total_checks": 1,
+        "total_failures": 0,
+        "is_healthy": True
+    }
+
+    # 保存配置
+    save_config()
+
+    # 清除会话状态
+    await session_manager.delete(user_id, "rss_active")
+    await session_manager.delete(user_id, "rss_step")
+    await session_manager.delete(user_id, "rss_url")
+    await session_manager.delete(user_id, "rss_feed_title")
+
+    # 创建返回按钮
+    keyboard = [[
+        InlineKeyboardButton("List", callback_data=f"{CALLBACK_PREFIX}list"),
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 显示成功消息
+    safe_title = TextFormatter.escape_html(custom_title)
+    safe_url = TextFormatter.escape_html(url)
+    success_text = (f"✅ 成功添加 RSS 订阅\n\n"
+                    f"📚 <b>{safe_title}</b>\n"
+                    f"🔗 <code>{safe_url}</code>")
+
+    if callback_query:
+        await callback_query.edit_message_text(success_text,
+                                               reply_markup=reply_markup,
+                                               parse_mode="HTML")
+    elif message:
+        await message.reply_text(success_text,
+                                 reply_markup=reply_markup,
+                                 parse_mode="HTML")
+
+    # 异步获取 feed 内容并初始化条目 ID
+    asyncio.create_task(initialize_feed_entries(url, _module_interface))
+
+
+async def initialize_feed_entries(url, interface):
+    """初始化 feed 条目 ID（异步执行）"""
+    try:
+        feed = await fetch_feed(url)
+        if feed and feed.get('entries'):
             _state["last_entry_ids"][url] = [
                 entry.get('id', '') or entry.get('link', '')
                 for entry in feed.get('entries')
-            ]
-
-        # 初始化健康状态
-        _state["source_health"][url] = {
-            "consecutive_failures": 0,
-            "last_success": datetime.now().timestamp(),
-            "total_checks": 1,
-            "total_failures": 0,
-            "is_healthy": True
-        }
-
-        # 保存配置
-        save_config()
-
-        # 更新消息，显示成功添加
-        safe_title = escape_html(_config['sources'][url]['title'])
-        safe_url = escape_html(url)
-        success_text = (f"✅ 成功添加 RSS 订阅\n\n"
-                        f"📚 <b>{safe_title}</b>\n"
-                        f"🔗 <code>{safe_url}</code>")
-        await processing_msg.edit_text(success_text, parse_mode="HTML")
-
-        # 显示最新几条内容的预览
-        preview_entries = feed.get('entries', [])[:3]  # 最多显示 3 条
-        if preview_entries:
-            preview_text = "<b>📋 最新内容预览</b>\n\n"
-            for entry in preview_entries:
-                title = entry.get('title', '无标题')
-                published = entry.get('published', '')
-
-                # 使用 HTML 格式，避免转义问题
-                safe_title = escape_html(title)
-                preview_text += f"• <b>{safe_title}</b>\n"
-                if published:
-                    preview_text += f"  ⏰ {published}\n"
-
-            await message.reply_text(preview_text, parse_mode="HTML")
-
+            ][:MAX_ENTRY_IDS]
+            interface.logger.info(f"已初始化 RSS 源 {url} 的条目 ID")
     except Exception as e:
-        await message.reply_text(f"❌ 添加 RSS 源失败: {str(e)}")
+        interface.logger.error(f"初始化 RSS 源 {url} 的条目 ID 失败: {e}")
 
 
 async def remove_subscription(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
-    """删除订阅"""
-    # 获取消息对象（可能是新消息或编辑的消息）
+    """删除订阅（通过命令）- 现在主要通过会话处理"""
+    # 如果是直接命令，则处理命令参数
     message = update.message or update.edited_message
 
-    chat_id = str(update.effective_chat.id)
-    chat_type = "private" if update.effective_chat.type == "private" else "group"
+    # 创建返回主菜单的按钮
+    keyboard = [[
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # 获取当前聊天的订阅
-    if chat_id not in _config["subscriptions"][chat_type]:
-        await message.reply_text("⚠️ 当前没有 RSS 订阅。")
-        return
-
-    subscriptions = _config["subscriptions"][chat_type][chat_id]
-
-    if not subscriptions:
-        await message.reply_text("⚠️ 当前没有 RSS 订阅。")
-        return
-
-    # 处理参数（可以是 URL 或序号）
-    arg = context.args[1]
-    url_to_remove = None
-
-    # 判断是序号还是 URL
-    if arg.isdigit():
-        index = int(arg) - 1
-        if 0 <= index < len(subscriptions):
-            url_to_remove = subscriptions[index]
-        else:
-            await message.reply_text(
-                "❌ 无效的序号，请使用 <code>/rss list</code> 查看可用的订阅。",
-                parse_mode="HTML")
-            return
-    else:
-        # 假设是 URL
-        url_to_remove = arg
-
-    # 移除订阅
-    if url_to_remove in subscriptions:
-        # 获取源标题
-        source_title = _config["sources"].get(url_to_remove,
-                                              {}).get("title", url_to_remove)
-        safe_title = escape_html(source_title)
-
-        subscriptions.remove(url_to_remove)
-
-        # 检查这个源是否还被其他聊天订阅
-        still_subscribed = False
-        for chat_type_key in ["private", "group"]:
-            for chat_id_key, urls in _config["subscriptions"][
-                    chat_type_key].items():
-                if url_to_remove in urls:
-                    still_subscribed = True
-                    break
-            if still_subscribed:
-                break
-
-        # 如果没有其他订阅，清理源信息和状态
-        if not still_subscribed:
-            if url_to_remove in _config["sources"]:
-                del _config["sources"][url_to_remove]
-            if url_to_remove in _state["last_check"]:
-                del _state["last_check"][url_to_remove]
-            if url_to_remove in _state["last_entry_ids"]:
-                del _state["last_entry_ids"][url_to_remove]
-            if url_to_remove in _state["update_timestamps"]:
-                del _state["update_timestamps"][url_to_remove]
-            if url_to_remove in _state["check_intervals"]:
-                del _state["check_intervals"][url_to_remove]
-            if url_to_remove in _state["source_health"]:
-                del _state["source_health"][url_to_remove]
-
-        # 保存配置
-        save_config()
-
-        success_text = f"✅ 成功删除 RSS 订阅\n\n📚 <b>{safe_title}</b>"
-        await message.reply_text(success_text, parse_mode="HTML")
-    else:
-        await message.reply_text(
-            "❌ 未找到该 RSS 订阅，请使用 <code>/rss list</code> 查看可用的订阅。",
-            parse_mode="HTML")
+    # 提示用户使用新的界面
+    await message.reply_text("请使用 /rss 命令进入 RSS 管理界面，然后点击 Remove 按钮删除订阅",
+                             reply_markup=reply_markup)
 
 
 async def fetch_feed(url):
@@ -408,12 +599,11 @@ async def notify_source_unhealthy(url, source_info, subscribed_chats,
                                   module_interface):
     """通知订阅者源可能有问题"""
     source_title = source_info.get('title', url)
-    safe_title = escape_html(source_title)
-    message = (
-        f"⚠️ <b>RSS 源可能不可用</b>\n\n"
-        f"RSS 源 <b>{safe_title}</b> 连续 {HEALTH_CHECK_THRESHOLD} 次检查失败。\n"
-        f"这可能是临时问题，也可能是源已经不再更新或地址变更。\n\n"
-        f"如果问题持续存在，建议使用 <code>/rss remove</code> 命令取消订阅。")
+    safe_title = TextFormatter.escape_html(source_title)
+    message = (f"⚠️ <b>RSS 源可能不可用</b>\n\n"
+               f"RSS 源 <b>{safe_title}</b> 连续 {HEALTH_CHECK_THRESHOLD} 次检查失败\n"
+               f"这可能是临时问题，也可能是源已经不再更新或地址变更\n\n"
+               f"如果问题持续存在，建议使用 <code>/rss remove</code> 命令取消订阅")
 
     # 发送通知给所有订阅者
     for chat_id, _ in subscribed_chats:
@@ -428,9 +618,9 @@ async def notify_source_recovered(url, source_info, subscribed_chats,
                                   module_interface):
     """通知订阅者源已恢复"""
     source_title = source_info.get('title', url)
-    safe_title = escape_html(source_title)
+    safe_title = TextFormatter.escape_html(source_title)
     message = (f"✅ <b>RSS 源已恢复</b>\n\n"
-               f"之前报告有问题的 RSS 源 <b>{safe_title}</b> 现在已经恢复正常。")
+               f"RSS 源 <b>{safe_title}</b> 现在已经恢复正常")
 
     # 发送通知给所有订阅者
     for chat_id, _ in subscribed_chats:
@@ -671,9 +861,9 @@ async def send_entry(entry, source_info, url, subscribed_chats,
             content = entry.description
 
         # 清理 HTML 标签，保留纯文本内容
-        content = strip_html(content)
+        content = TextFormatter.strip_html(content)
         # 规范化空白字符，删除多余的空行和空格
-        content = normalize_whitespace(content)
+        content = TextFormatter.normalize_whitespace(content)
 
         # 限制长度，保留前 200 个字符
         if len(content) > 200:
@@ -705,10 +895,10 @@ async def send_entry(entry, source_info, url, subscribed_chats,
                 image_url = img_match.group(1)
 
         # 使用 HTML 格式发送消息
-        safe_title = escape_html(title)
-        safe_content = escape_html(content)
+        safe_title = TextFormatter.escape_html(title)
+        safe_content = TextFormatter.escape_html(content)
         source_title = source_info.get('title', url)
-        safe_source_title = escape_html(source_title)
+        safe_source_title = TextFormatter.escape_html(source_title)
 
         html_content = (f"<b>📰 {safe_title}</b>\n\n"
                         f"{safe_content}\n\n")
@@ -789,6 +979,290 @@ async def send_entry(entry, source_info, url, subscribed_chats,
 # 状态管理函数已移除，直接使用框架的状态管理功能
 
 
+async def handle_callback_query(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE):
+    """处理按钮回调查询"""
+    callback_query = update.callback_query
+    data = callback_query.data
+
+    # 检查是否是 RSS 模块的回调
+    if not data.startswith(CALLBACK_PREFIX):
+        return
+
+    # 提取操作
+    parts = data.split('_')
+    if len(parts) < 2:
+        await callback_query.answer("无效的回调数据")
+        return
+
+    # 处理特殊情况：use_default_title
+    if data.startswith(f"{CALLBACK_PREFIX}use_default_title"):
+        action = "use_default_title"
+    else:
+        action = parts[1]
+
+    # 处理不同的操作
+
+    try:
+        # 先回应回调查询，避免用户界面卡住
+        await callback_query.answer()
+
+        if action == "main":
+            # 返回主菜单
+            # 编辑当前消息而不是发送新消息
+            list_callback = f"{CALLBACK_PREFIX}list"
+            add_callback = f"{CALLBACK_PREFIX}add"
+            health_callback = f"{CALLBACK_PREFIX}health"
+
+            keyboard = [[
+                InlineKeyboardButton("List", callback_data=list_callback),
+                InlineKeyboardButton("Add", callback_data=add_callback),
+                InlineKeyboardButton("Health", callback_data=health_callback)
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await callback_query.edit_message_text(
+                "<b>📢 RSS 订阅管理</b>\n\n"
+                "请选择要执行的操作：",
+                reply_markup=reply_markup,
+                parse_mode="HTML")
+        elif action == "list":
+            # 列出订阅
+            await list_subscriptions(update, context)
+        elif action == "add":
+            # 添加订阅
+            await add_subscription(update, context)
+        elif action == "health":
+            # 查看健康状态
+            await rss_health_command(update, context)
+        elif action == "cancel":
+            # 取消当前操作
+            user_id = update.effective_user.id
+            session_manager = context.bot_data.get("session_manager")
+
+            if session_manager:
+                # 获取当前步骤
+                step = await session_manager.get(user_id, "rss_step")
+
+                # 清除会话状态
+                await session_manager.delete(user_id, "rss_active")
+                await session_manager.delete(user_id, "rss_step")
+                await session_manager.delete(user_id, "rss_url")
+                await session_manager.delete(user_id, "rss_feed_title")
+                await session_manager.delete(user_id, "rss_subscriptions")
+
+                # 根据当前步骤决定返回到哪个页面
+                if step == SESSION_REMOVE:
+                    # 如果是从删除页面取消，返回列表页面
+                    await list_subscriptions(update, context)
+                else:
+                    # 如果是从添加页面取消，返回主菜单
+                    await rss_command(update, context)
+            else:
+                # 如果没有会话管理器，返回主菜单
+                await rss_command(update, context)
+        elif action == "use_default_title":
+            # 使用默认标题
+            await handle_add_title(update, context)
+        elif action == "remove":
+            # 启动删除订阅会话
+            user_id = update.effective_user.id
+            session_manager = context.bot_data.get("session_manager")
+
+            if not session_manager:
+                await callback_query.answer("系统错误，请联系管理员")
+                return
+
+            # 设置会话状态，等待用户输入要删除的序号
+            await session_manager.set(user_id, "rss_active", True)
+            await session_manager.set(user_id, "rss_step", SESSION_REMOVE)
+
+            # 获取当前聊天的订阅列表
+            chat_id = str(update.effective_chat.id)
+            chat_type = "private" if update.effective_chat.type == "private" else "group"
+            subscriptions = _config["subscriptions"][chat_type].get(
+                chat_id, [])
+
+            # 保存订阅列表到会话
+            await session_manager.set(user_id, "rss_subscriptions",
+                                      subscriptions)
+
+            # 创建返回按钮
+            keyboard = [[
+                InlineKeyboardButton("⇠ Back",
+                                     callback_data=f"{CALLBACK_PREFIX}list")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            # 编辑消息，显示订阅列表并提示用户输入要删除的序号
+            text = "<b>🗑️ 删除 RSS 订阅</b>\n\n"
+            text += "当前订阅列表：\n"
+
+            # 显示订阅列表
+            for i, url in enumerate(subscriptions, 1):
+                source_info = _config["sources"].get(url, {})
+                title = source_info.get("title", url)
+                # 使用 HTML 格式，避免转义问题
+                safe_title = TextFormatter.escape_html(title)
+                text += f"{i}. <b>{safe_title}</b>\n"
+
+            text += "\n请输入要删除的订阅序号（1-" + str(len(subscriptions)) + "）\n"
+            text += "可以输入多个序号，用空格分隔，例如：<code>1 3 5</code>"
+
+            await callback_query.edit_message_text(text,
+                                                   reply_markup=reply_markup,
+                                                   parse_mode="HTML")
+        else:
+            await callback_query.answer("未知操作")
+    except Exception as e:
+        await callback_query.answer("处理请求时出错")
+
+
+async def handle_remove_input(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE,
+                              input_text: str):
+    """处理用户输入的删除序号"""
+    message = update.message
+    user_id = update.effective_user.id
+    chat_id = str(update.effective_chat.id)
+    chat_type = "private" if update.effective_chat.type == "private" else "group"
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        await message.reply_text("系统错误，请联系管理员")
+        return
+
+    # 获取保存的订阅列表
+    subscriptions = await session_manager.get(user_id, "rss_subscriptions")
+    if not subscriptions:
+        await message.reply_text("⚠️ 会话已过期或没有订阅，请重新开始")
+
+        # 清除会话状态
+        await session_manager.delete(user_id, "rss_active")
+        await session_manager.delete(user_id, "rss_step")
+        await session_manager.delete(user_id, "rss_subscriptions")
+        return
+
+    # 解析输入的序号
+    indices = []
+    try:
+        # 分割输入文本（支持空格分隔和换行分隔）
+        parts = input_text.replace('\n', ' ').split()
+        for part in parts:
+            idx = int(part.strip())
+            if 1 <= idx <= len(subscriptions):
+                indices.append(idx - 1)  # 转换为 0-based 索引
+            else:
+                await message.reply_text(
+                    f"⚠️ 无效的序号: {idx}，有效范围是 1-{len(subscriptions)}")
+                return
+    except ValueError:
+        await message.reply_text("⚠️ 请输入有效的数字序号")
+        return
+
+    if not indices:
+        await message.reply_text("⚠️ 未指定任何有效序号")
+        return
+
+    # 按照索引从大到小排序，以便从后往前删除，避免索引变化
+    indices.sort(reverse=True)
+
+    # 删除指定的订阅
+    deleted_titles = []
+    for idx in indices:
+        url = subscriptions[idx]
+        source_info = _config["sources"].get(url, {})
+        title = source_info.get("title", url)
+        deleted_titles.append(title)
+
+        # 从订阅列表中删除
+        if url in _config["subscriptions"][chat_type][chat_id]:
+            _config["subscriptions"][chat_type][chat_id].remove(url)
+
+        # 检查这个源是否还被其他聊天订阅
+        still_subscribed = False
+        for chat_type_key in ["private", "group"]:
+            for _, urls in _config["subscriptions"][chat_type_key].items():
+                if url in urls:
+                    still_subscribed = True
+                    break
+            if still_subscribed:
+                break
+
+        # 如果没有其他订阅，清理源信息和状态
+        if not still_subscribed:
+            if url in _config["sources"]:
+                del _config["sources"][url]
+            if url in _state["last_check"]:
+                del _state["last_check"][url]
+            if url in _state["last_entry_ids"]:
+                del _state["last_entry_ids"][url]
+            if url in _state["update_timestamps"]:
+                del _state["update_timestamps"][url]
+            if url in _state["check_intervals"]:
+                del _state["check_intervals"][url]
+            if url in _state["source_health"]:
+                del _state["source_health"][url]
+
+    # 保存配置
+    save_config()
+
+    # 清除会话状态
+    await session_manager.delete(user_id, "rss_active")
+    await session_manager.delete(user_id, "rss_step")
+    await session_manager.delete(user_id, "rss_subscriptions")
+
+    # 创建返回按钮
+    keyboard = [[
+        InlineKeyboardButton("List", callback_data=f"{CALLBACK_PREFIX}list"),
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 显示成功消息
+    text = f"✅ 成功删除 {len(indices)} 个 RSS 订阅:\n\n"
+    for title in deleted_titles:
+        safe_title = TextFormatter.escape_html(title)
+        text += f"• <b>{safe_title}</b>\n"
+
+    await message.reply_text(text,
+                             reply_markup=reply_markup,
+                             parse_mode="HTML")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理用户消息（用于会话流程）"""
+    # 检查是否有活动会话
+    user_id = update.effective_user.id
+    session_manager = context.bot_data.get("session_manager")
+
+    if not session_manager:
+        return
+
+    # 检查是否是 RSS 模块的活动会话
+    is_active = await session_manager.get(user_id, "rss_active")
+    if not is_active:
+        return
+
+    # 获取当前步骤
+    step = await session_manager.get(user_id, "rss_step")
+
+    # 处理不同步骤的输入
+    if step == SESSION_ADD_URL:
+        # 处理 URL 输入
+        url = update.message.text.strip()
+        await handle_add_url(update, context, url)
+    elif step == SESSION_ADD_TITLE:
+        # 处理标题输入
+        title = update.message.text.strip()
+        await handle_add_title(update, context, title)
+    elif step == SESSION_REMOVE:
+        # 处理删除序号输入
+        input_text = update.message.text.strip()
+        await handle_remove_input(update, context, input_text)
+
+
 async def setup(interface):
     """模块初始化"""
     global _module_interface, _check_task
@@ -819,6 +1293,18 @@ async def setup(interface):
                                      rss_command,
                                      admin_level="group_admin",
                                      description="管理 RSS 订阅")
+
+    # 注册带权限验证的回调查询处理器
+    await interface.register_callback_handler(handle_callback_query,
+                                              pattern=f"^{CALLBACK_PREFIX}",
+                                              admin_level="group_admin")
+    interface.logger.info("已注册带权限验证的回调查询处理器")
+
+    # 注册消息处理器（用于会话流程）
+    # 使用 group=5 确保不会干扰其他模块的会话处理
+    message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                     handle_message)
+    await interface.register_handler(message_handler, group=5)
 
     # 创建启动任务，先初始化再启动检查
     await initialize_entry_ids(interface)

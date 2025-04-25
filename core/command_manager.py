@@ -3,7 +3,7 @@
 import asyncio
 import difflib
 import time
-import datetime
+from datetime import datetime
 from telegram.ext import CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from utils.logger import setup_logger
 from utils.formatter import TextFormatter
@@ -79,6 +79,12 @@ class CommandManager:
                 "callback": self._stats_command,
                 "admin_level": "super_admin",
                 "description": "显示机器人统计信息"
+            },
+            {
+                "name": "cancel",
+                "callback": self._cancel_command,
+                "admin_level": False,
+                "description": "取消当前操作"
             },
             # 添加群组管理命令
             {
@@ -183,6 +189,51 @@ class CommandManager:
         """
         return await self.register_command(module_name, command_name, callback,
                                            admin_level, description)
+
+    async def register_callback_handler(self,
+                                        module_name,
+                                        callback,
+                                        pattern=None,
+                                        admin_level=False,
+                                        group=0):
+        """注册带权限验证的回调查询处理器
+
+        Args:
+            module_name: 模块名称
+            callback: 回调函数
+            pattern: 回调数据匹配模式
+            admin_level: 管理权限要求 (False, "group_admin", "super_admin")
+            group: 处理器组
+
+        Returns:
+            bool: 是否成功注册
+        """
+
+        # 创建权限包装器
+        async def permission_wrapper(update, context):
+            # 检查命令是否来自有效群组
+            if not await self._check_allowed_group(update, context):
+                return
+
+            # 检查用户权限
+            if not await self._check_permission(admin_level, update, context):
+                # 如果是回调查询，回应它以避免按钮一直显示加载状态
+                if update.callback_query:
+                    await update.callback_query.answer("⚠️ 您没有执行此操作的权限")
+                return
+
+            # 调用原始回调
+            return await callback(update, context)
+
+        # 创建回调处理器
+        handler = CallbackQueryHandler(permission_wrapper, pattern=pattern)
+
+        # 添加到应用
+        self.application.add_handler(handler, group)
+        self.logger.debug(
+            f"已注册带权限验证的回调查询处理器 (模块: {module_name}, 权限: {admin_level})")
+
+        return True
 
     async def unregister_command(self, command_name):
         """注销单个命令
@@ -296,7 +347,7 @@ class CommandManager:
 
                             if chat_type not in supported_types:
                                 await message.reply_text(
-                                    f"模块 {module_name} 不支持在 {chat_type} 中使用。")
+                                    f"模块 {module_name} 不支持在 {chat_type} 中使用")
                                 return
 
                 # 检查用户权限
@@ -312,7 +363,7 @@ class CommandManager:
                                   exc_info=True)
                 message = update.message or update.edited_message
                 if message:
-                    await message.reply_text("执行命令时出错，请查看日志了解详情。")
+                    await message.reply_text("执行命令时出错，请查看日志了解详情")
 
         return wrapper
 
@@ -357,7 +408,7 @@ class CommandManager:
 
             # 构建提示消息
             from utils.formatter import TextFormatter  # 导入转义工具
-            message = f"⚠️ 此群组未获授权使用 Bot。\n\n"
+            message = f"⚠️ 此群组未获授权使用 Bot\n\n"
             message += f"群组 ID: `{chat.id}`\n"
             message += f"群组名称: {TextFormatter.escape_markdown(chat.title)}\n\n"
 
@@ -397,12 +448,13 @@ class CommandManager:
         if self.config_manager.is_admin(user_id):
             return True
 
-        # 获取消息对象
-        message = update.message or update.edited_message
-
         # 如果需要超级管理员权限，到这里就返回 False
         if admin_level == "super_admin":
-            await message.reply_text("⚠️ 此命令仅超级管理员可用。")
+            # 如果是回调查询，不需要回复消息，因为已经在 permission_wrapper 中处理了
+            if not update.callback_query:
+                message = update.message or update.edited_message
+                if message:
+                    await message.reply_text("⚠️ 此命令仅超级管理员可用")
             return False
 
         # 检查是否是群组管理员
@@ -415,7 +467,11 @@ class CommandManager:
             except Exception as e:
                 self.logger.error(f"检查群组权限时出错: {e}")
 
-            await message.reply_text("⚠️ 您没有执行此命令的权限。")
+            # 如果是回调查询，不需要回复消息，因为已经在 permission_wrapper 中处理了
+            if not update.callback_query:
+                message = update.message or update.edited_message
+                if message:
+                    await message.reply_text("⚠️ 您没有执行此命令的权限")
             return False
 
         return False
@@ -503,8 +559,8 @@ class CommandManager:
             help_text += "*超级管理员命令：*\n"
             help_text += "/stats - 显示机器人统计信息\n"
             help_text += "/listgroups - 列出允许的群组\n"
-            help_text += "/addgroup <群组ID> - 添加群组到白名单\n"
-            help_text += "/removegroup <群组ID> - 从白名单移除群组\n"
+            help_text += "/addgroup \\[群组 ID] - 添加群组到白名单\n"
+            help_text += "/removegroup <群组 ID> - 从白名单移除群组\n"
 
         # 获取消息对象（可能是新消息或编辑的消息）
         message = update.message or update.edited_message
@@ -764,12 +820,16 @@ class CommandManager:
             item["description"]) if item["description"] else "_无描述_"
         module = TextFormatter.escape_markdown(item["module"])
 
+        # 单行紧凑格式，使用不同样式区分，命令不加粗
+        command_part = f"/{name}"
+
+        # 根据权限级别添加不同格式
         if item["admin_level"] == "super_admin":
-            return f"/{name} - {description} (超级管理员, {module})"
+            return f"{command_part} - {description} *[超管·{module}]*"
         elif item["admin_level"] == "group_admin":
-            return f"/{name} - {description} (管理员, {module})"
+            return f"{command_part} - {description} *[管理·{module}]*"
         else:
-            return f"/{name} - {description} ({module})"
+            return f"{command_part} - {description} *[{module}]*"
 
     async def _handle_command_page_callback(self, update, context):
         """处理命令分页回调
@@ -945,13 +1005,14 @@ class CommandManager:
 
         bot_engine = context.bot_data.get("bot_engine")
         module_manager = context.bot_data.get("module_manager")
+        session_manager = context.bot_data.get("session_manager")
 
         # 计算运行时间
         uptime_seconds = time.time() - bot_engine.stats["start_time"]
         days, remainder = divmod(uptime_seconds, 86400)
         hours, remainder = divmod(remainder, 3600)
         minutes, seconds = divmod(remainder, 60)
-        uptime_str = f"{int(days)} 天 {int(hours)} 小时 {int(minutes)} 分钟"
+        uptime_str = f"{int(days)} 天 {int(hours)} 小时 {int(minutes)} 分钟 {int(seconds)} 秒"
 
         # 获取已加载模块数量
         loaded_modules = len(module_manager.loaded_modules)
@@ -961,6 +1022,47 @@ class CommandManager:
         stats_message += f"⏱️ 运行时间: {uptime_str}\n"
         stats_message += f"📦 已加载模块: {loaded_modules}\n"
         stats_message += f"🔖 已注册命令: {len(self.commands)}\n"
+
+        # 获取系统信息
+        import platform
+        stats_message += f"🖥️ 系统: {platform.system()} {platform.release()}\n"
+        stats_message += f"🐍 Python: {platform.python_version()}\n"
+
+        # 获取活跃会话数量
+        active_sessions = await session_manager.get_active_sessions_count()
+        stats_message += f"👥 活跃会话: {active_sessions}\n"
+
+        # 获取处理器数量
+        handler_count = sum(
+            len(handlers) for handlers in self.application.handlers.values())
+        stats_message += f"🔄 注册处理器: {handler_count}\n"
+
+        # 获取内存使用情况
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_usage_mb = memory_info.rss / 1024 / 1024  # 转换为MB
+            stats_message += f"💾 内存占用: {memory_usage_mb:.2f} MB\n"
+        except ImportError:
+            # psutil 可能未安装，跳过内存统计
+            self.logger.warning("无法导入 psutil 模块，跳过内存使用统计")
+            pass
+
+        # 网络统计信息
+        stats_message += "\n*网络信息:*\n"
+
+        # 获取网络配置
+        network_config = self.config_manager.main_config.get("network", {})
+        poll_interval = network_config.get("poll_interval", 1.0)
+        stats_message += f"📡 轮询间隔: {poll_interval} 秒\n"
+
+        # 获取代理信息
+        proxy_url = self.config_manager.main_config.get("proxy_url", None)
+        if proxy_url:
+            stats_message += f"🔄 代理: {proxy_url}\n"
+        else:
+            stats_message += f"🔄 代理: 未使用\n"
 
         # 最后清理时间
         if bot_engine.stats.get("last_cleanup", 0) > 0:
@@ -974,3 +1076,35 @@ class CommandManager:
             # 如果 Markdown 解析失败，发送纯文本
             await message_obj.reply_text(
                 TextFormatter.markdown_to_plain(stats_message))
+
+    async def _cancel_command(self, update, context):
+        """处理 /cancel 命令，取消当前操作
+
+        Args:
+            update: 更新对象
+            context: 上下文对象
+        """
+        # 获取消息对象（可能是新消息或编辑的消息）
+        message = update.message or update.edited_message
+        user_id = update.effective_user.id
+
+        # 获取会话管理器
+        session_manager = context.bot_data.get("session_manager")
+        if not session_manager:
+            await message.reply_text("⚠️ 系统错误：无法获取会话管理器")
+            return
+
+        # 获取当前会话数据
+        session_data = await session_manager.get_all(user_id)
+
+        # 检查是否有活跃会话
+        if not session_data:
+            await message.reply_text("没有需要取消的操作")
+            return
+
+        # 清除用户的所有会话数据
+        await session_manager.clear(user_id)
+
+        # 回复用户
+        await message.reply_text("✅ 已取消当前操作")
+        self.logger.info(f"用户 {user_id} 取消了当前操作")

@@ -5,15 +5,18 @@ import os
 import time
 import aiohttp
 import asyncio
-from telegram import Update
-from telegram.ext import ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
 MODULE_NAME = "rate"
-MODULE_VERSION = "3.0.0"
+MODULE_VERSION = "3.1.0"
 MODULE_DESCRIPTION = "汇率转换，支持法币/虚拟货币"
 MODULE_COMMANDS = ["rate", "setrate"]
 MODULE_CHAT_TYPES = ["private", "group"]
+
+# 按钮回调前缀
+CALLBACK_PREFIX = "rate_"
 
 # 模块状态
 _state = {
@@ -205,7 +208,7 @@ async def convert_currency(amount, from_currency, to_currency):
 
         # 再次检查数据是否已加载
         if not _state["data_loaded"]:
-            return None, "汇率数据正在加载中，请稍后再试。首次使用可能需要等待几秒钟。"
+            return None, "汇率数据正在加载中，请稍后再试"
 
     # 确保汇率数据是最新的
     await update_exchange_rates()
@@ -343,19 +346,13 @@ async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "/rate <金额> <源货币> <目标货币>\n"
                      "/rate <源货币> <目标货币> [金额=1]\n\n"
                      "*示例:*\n"
-                     "`/rate 100 美元 人民币` - 将 100 美元转换为人民币\n"
-                     "`/rate 人民币 日元` - 显示 1 人民币等于多少日元\n"
-                     "`/rate 1000 日本 韩国` - 将 1000 日元转换为韩元\n"
-                     "`/rate 比特币 人民币` - 显示 1 比特币等于多少人民币\n"
-                     "`/rate 100 usdt eth` - 将 100 USDT 转换为以太坊\n\n"
+                     "`/rate 100 USD CNY` - 将 100 美元转换为人民币\n"
+                     "`/rate BTC USD` - 显示 1 比特币等于多少美元\n\n"
                      "*支持的货币:*\n"
-                     "- 法币: 人民币(CNY), 美元(USD), 欧元(EUR), 英镑(GBP), 日元(JPY)等\n"
-                     "- 虚拟货币: 比特币(BTC), 以太坊(ETH), 泰达币(USDT)等\n\n"
-                     "*支持的表示方式:*\n"
-                     "- 货币代码: CNY, USD, BTC, ETH等\n"
-                     "- 中文名称: 人民币, 美元, 比特币等\n"
-                     "- 国家/地区名称: 中国, 美国, 日本等\n"
-                     "- 符号: $, €, £, ¥等")
+                     "- 法币: CNY, USD, EUR, GBP, JPY 等\n"
+                     "- 虚拟货币: BTC, ETH, USDT 等\n\n"
+                     "*配置命令:*\n"
+                     "/setrate - 配置汇率模块")
         await message.reply_text(help_text, parse_mode="MARKDOWN")
         return
 
@@ -423,9 +420,134 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /setrate 命令，用于管理员设置汇率模块配置"""
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
+    user_id = update.effective_user.id
 
-    # 如果没有参数，显示当前配置
-    if not context.args:
+    # 检查权限 - 仅超级管理员可用
+    if not _module_interface.config_manager.is_admin(user_id):
+        await message.reply_text("⚠️ 您没有执行此操作的权限")
+        return
+
+    # 显示当前配置和按钮界面
+    config = load_config()
+    api_key = config.get("api_key", "")
+    # 隐藏部分 API 密钥以保护安全
+    masked_key = "未设置" if not api_key else f"{api_key[:4]}...{api_key[-4:]}" if len(
+        api_key) > 8 else "已设置"
+    update_interval = config.get("update_interval", 3600)
+
+    # 构建按钮
+    keyboard = [[
+        InlineKeyboardButton("API Key",
+                             callback_data=f"{CALLBACK_PREFIX}set_api_key"),
+        InlineKeyboardButton("Interval",
+                             callback_data=f"{CALLBACK_PREFIX}set_interval")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    config_text = (f"🔧 *汇率模块配置*\n\n"
+                   f"API 密钥: `{masked_key}`\n"
+                   f"更新间隔: `{update_interval}秒`\n\n"
+                   f"请选择要修改的设置：")
+
+    await message.reply_text(config_text,
+                             reply_markup=reply_markup,
+                             parse_mode="MARKDOWN")
+
+
+async def periodic_update():
+    """定期更新汇率数据"""
+    try:
+        while True:
+            await asyncio.sleep(_state["update_interval"])
+            try:
+                await update_exchange_rates()
+            except Exception as e:
+                if _module_interface:
+                    _module_interface.logger.error(f"定期更新汇率失败: {e}")
+    except asyncio.CancelledError:
+        if _module_interface:
+            _module_interface.logger.info("汇率更新任务已取消")
+        raise
+
+
+# 状态管理函数已移除，使用框架的状态管理功能
+
+
+async def handle_callback_query(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE):
+    """处理按钮回调查询"""
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    # 权限检查已在框架层面处理
+
+    # 获取回调数据
+    callback_data = query.data
+
+    # 检查前缀
+    if not callback_data.startswith(CALLBACK_PREFIX):
+        return
+
+    # 移除前缀
+    action = callback_data[len(CALLBACK_PREFIX):]
+
+    # 处理不同的操作
+    if action == "set_api_key":
+        # 获取会话管理器
+        session_manager = context.bot_data.get("session_manager")
+        if not session_manager:
+            await query.answer("系统错误，请联系管理员")
+            return
+
+        # 设置会话状态，等待用户输入 API 密钥
+        await session_manager.set(user_id, "rate_waiting_for", "api_key")
+        await session_manager.set(user_id, "rate_active", True)
+
+        # 发送提示消息
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}cancel")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            "请输入 ExchangeRate API 密钥：\n\n"
+            "您可以在 https://www.exchangerate-api.com/ 注册获取免费 API 密钥",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True)
+
+    elif action == "set_interval":
+        # 获取会话管理器
+        session_manager = context.bot_data.get("session_manager")
+        if not session_manager:
+            await query.answer("系统错误，请联系管理员")
+            return
+
+        # 设置会话状态，等待用户输入更新间隔
+        await session_manager.set(user_id, "rate_waiting_for", "interval")
+        await session_manager.set(user_id, "rate_active", True)
+
+        # 发送提示消息
+        keyboard = [[
+            InlineKeyboardButton("⇠ Back",
+                                 callback_data=f"{CALLBACK_PREFIX}cancel")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            "请输入汇率数据更新间隔（秒）：\n\n"
+            "最小值为 600 秒（10 分钟）",
+            reply_markup=reply_markup)
+
+    elif action == "cancel":
+        # 获取会话管理器
+        session_manager = context.bot_data.get("session_manager")
+        if session_manager:
+            # 清除会话状态
+            await session_manager.delete(user_id, "rate_waiting_for")
+            await session_manager.delete(user_id, "rate_active")
+
+        # 显示当前配置
         config = load_config()
         api_key = config.get("api_key", "")
         # 隐藏部分 API 密钥以保护安全
@@ -433,23 +555,66 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             api_key) > 8 else "已设置"
         update_interval = config.get("update_interval", 3600)
 
-        config_text = (
+        # 构建按钮
+        keyboard = [[
+            InlineKeyboardButton(
+                "API Key", callback_data=f"{CALLBACK_PREFIX}set_api_key"),
+            InlineKeyboardButton(
+                "Interval", callback_data=f"{CALLBACK_PREFIX}set_interval")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
             f"🔧 *汇率模块配置*\n\n"
             f"API 密钥: `{masked_key}`\n"
             f"更新间隔: `{update_interval}秒`\n\n"
-            f"*设置命令:*\n"
-            f"`/setrate api_key YOUR_API_KEY` - 设置 ExchangeRate API 密钥\n"
-            f"`/setrate interval 3600` - 设置更新间隔(秒)")
+            f"请选择要修改的设置：",
+            reply_markup=reply_markup,
+            parse_mode="MARKDOWN")
 
-        await message.reply_text(config_text, parse_mode="MARKDOWN")
+    # 确保回调查询得到响应
+    await query.answer()
+
+
+async def handle_rate_input(update: Update,
+                            context: ContextTypes.DEFAULT_TYPE):
+    """处理用户输入的汇率配置"""
+    # 只处理私聊消息
+    if update.effective_chat.type != "private":
         return
 
-    # 解析参数
-    setting_type = context.args[0].lower()
+    message = update.message
+    if not message:
+        return
 
-    # 设置 API 密钥
-    if setting_type == "api_key" and len(context.args) > 1:
-        api_key = context.args[1]
+    user_id = update.effective_user.id
+
+    # 检查权限 - 仅超级管理员可用
+    if not _module_interface.config_manager.is_admin(user_id):
+        return
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        return
+
+    # 检查是否是 rate 模块的活跃会话
+    is_active = await session_manager.get(user_id, "rate_active", False)
+    if not is_active:
+        return
+
+    # 获取会话状态
+    waiting_for = await session_manager.get(user_id, "rate_waiting_for")
+
+    if waiting_for == "api_key":
+        # 获取用户输入的 API 密钥
+        api_key = message.text.strip()
+
+        # 清除会话状态
+        await session_manager.delete(user_id, "rate_waiting_for")
+        await session_manager.delete(user_id, "rate_active")
+
+        # 更新配置
         config = load_config()
         config["api_key"] = api_key
 
@@ -458,28 +623,28 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             global EXCHANGERATE_API_KEY
             EXCHANGERATE_API_KEY = api_key
 
-            await message.reply_text("✅ API 密钥已更新", parse_mode="MARKDOWN")
+            await message.reply_text("✅ API 密钥已更新")
 
             # 立即尝试更新汇率数据以验证 API 密钥
             try:
                 await update_exchange_rates()
-                await message.reply_text("✅ 汇率数据已更新，API 密钥有效",
-                                         parse_mode="MARKDOWN")
+                await message.reply_text("✅ 汇率数据已更新，API 密钥有效")
             except Exception as e:
-                await message.reply_text(f"⚠️ 更新汇率数据失败，请检查 API 密钥: {str(e)}",
-                                         parse_mode="MARKDOWN")
+                await message.reply_text(f"⚠️ 更新汇率数据失败，请检查 API 密钥: {str(e)}")
         else:
-            await message.reply_text(f"❌ 保存配置失败", parse_mode="MARKDOWN")
+            await message.reply_text("❌ 保存配置失败")
 
-        return
-
-    # 设置更新间隔
-    if setting_type == "interval" and len(context.args) > 1:
+    elif waiting_for == "interval":
+        # 获取用户输入的更新间隔
         try:
-            interval = int(context.args[1])
+            interval = int(message.text.strip())
+
+            # 清除会话状态
+            await session_manager.delete(user_id, "rate_waiting_for")
+            await session_manager.delete(user_id, "rate_active")
+
             if interval < 600:  # 设置最小间隔，如10分钟
-                await message.reply_text("⚠️ 更新间隔不能小于 600 秒(10 分钟)",
-                                         parse_mode="MARKDOWN")
+                await message.reply_text("⚠️ 更新间隔不能小于 600 秒(10 分钟)")
                 return
 
             config = load_config()
@@ -507,38 +672,15 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 _update_task = asyncio.create_task(periodic_update())
 
-                await message.reply_text(f"✅ 更新间隔已设置为 {interval} 秒",
-                                         parse_mode="MARKDOWN")
+                await message.reply_text(f"✅ 更新间隔已设置为 {interval} 秒")
             else:
-                await message.reply_text(f"❌ 保存配置失败", parse_mode="MARKDOWN")
-
+                await message.reply_text("❌ 保存配置失败")
         except ValueError:
-            await message.reply_text("❌ 请输入有效的数字作为更新间隔", parse_mode="MARKDOWN")
+            await message.reply_text("❌ 请输入有效的数字作为更新间隔")
 
-        return
-
-    # 如果参数不匹配任何设置选项
-    await message.reply_text("❌ 无效的设置命令。使用 `/setrate` 查看可用设置选项。",
-                             parse_mode="MARKDOWN")
-
-
-async def periodic_update():
-    """定期更新汇率数据"""
-    try:
-        while True:
-            await asyncio.sleep(_state["update_interval"])
-            try:
-                await update_exchange_rates()
-            except Exception as e:
-                if _module_interface:
-                    _module_interface.logger.error(f"定期更新汇率失败: {e}")
-    except asyncio.CancelledError:
-        if _module_interface:
-            _module_interface.logger.info("汇率更新任务已取消")
-        raise
-
-
-# 状态管理函数已移除，使用框架的状态管理功能
+            # 清除会话状态
+            await session_manager.delete(user_id, "rate_waiting_for")
+            await session_manager.delete(user_id, "rate_active")
 
 
 async def setup(interface):
@@ -566,6 +708,19 @@ async def setup(interface):
         admin_level="super_admin",
         description="汇率模块配置",
     )  # 仅超级管理员可用
+
+    # 注册带权限验证的按钮回调处理器
+    await interface.register_callback_handler(
+        handle_callback_query,
+        pattern=f"^{CALLBACK_PREFIX}",
+        admin_level="super_admin"  # 仅超级管理员可用
+    )
+
+    # 注册文本输入处理器
+    text_input_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        handle_rate_input)
+    await interface.register_handler(text_input_handler, group=3)
 
     # 使用框架的状态管理加载状态
     saved_state = interface.load_state(
