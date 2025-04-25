@@ -3,6 +3,7 @@
 import asyncio
 import difflib
 import time
+import telegram
 from datetime import datetime
 from telegram.ext import CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from utils.logger import setup_logger
@@ -211,19 +212,28 @@ class CommandManager:
 
         # 创建权限包装器
         async def permission_wrapper(update, context):
-            # 检查命令是否来自有效群组
-            if not await self._check_allowed_group(update, context):
-                return
+            try:
+                # 检查命令是否来自有效群组
+                if not await self._check_allowed_group(update, context):
+                    return
 
-            # 检查用户权限
-            if not await self._check_permission(admin_level, update, context):
-                # 如果是回调查询，回应它以避免按钮一直显示加载状态
-                if update.callback_query:
-                    await update.callback_query.answer("⚠️ 您没有执行此操作的权限")
-                return
+                # 检查用户权限
+                if not await self._check_permission(admin_level, update,
+                                                    context):
+                    # 如果是回调查询，回应它以避免按钮一直显示加载状态
+                    if update.callback_query:
+                        await update.callback_query.answer("⚠️ 您没有执行此操作的权限")
+                    return
 
-            # 调用原始回调
-            return await callback(update, context)
+                # 调用原始回调
+                return await callback(update, context)
+            except telegram.error.Forbidden as e:
+                # 处理权限错误（例如机器人被踢出群组）
+                self.logger.warning(f"权限错误: {e}")
+                return
+            except Exception as e:
+                self.logger.error(f"权限包装器中发生错误: {e}", exc_info=True)
+                return
 
         # 创建回调处理器
         handler = CallbackQueryHandler(permission_wrapper, pattern=pattern)
@@ -358,12 +368,19 @@ class CommandManager:
                 # 执行命令
                 await callback(update, context)
 
+            except telegram.error.Forbidden as e:
+                # 处理权限错误（例如机器人被踢出群组）
+                self.logger.warning(f"执行命令 /{command_name} 时发生权限错误: {e}")
+                return
             except Exception as e:
                 self.logger.error(f"执行命令 /{command_name} 时出错: {e}",
                                   exc_info=True)
                 message = update.message or update.edited_message
                 if message:
-                    await message.reply_text("执行命令时出错，请查看日志了解详情")
+                    try:
+                        await message.reply_text("执行命令时出错，请查看日志了解详情")
+                    except Exception as reply_error:
+                        self.logger.warning(f"无法发送错误消息: {reply_error}")
 
         return wrapper
 
@@ -415,6 +432,11 @@ class CommandManager:
             # 获取消息对象
             msg = update.message or update.edited_message
 
+            # 确保消息对象存在，如果不存在（例如机器人被踢出群组），则直接返回 False
+            if not msg:
+                self.logger.warning(f"无法在群组 {chat.id} 中发送消息，可能是机器人已被踢出")
+                return False
+
             # 如果是超级管理员，提供快速添加到白名单的提示
             if is_super_admin:
                 message += f"您是超级管理员，可以使用以下命令授权此群组：\n"
@@ -464,6 +486,10 @@ class CommandManager:
                     chat_id, user_id)
                 if chat_member.status in ["creator", "administrator"]:
                     return True
+            except telegram.error.Forbidden as e:
+                # 处理权限错误（例如机器人被踢出群组）
+                self.logger.warning(f"检查群组权限时发生权限错误: {e}")
+                return False
             except Exception as e:
                 self.logger.error(f"检查群组权限时出错: {e}")
 

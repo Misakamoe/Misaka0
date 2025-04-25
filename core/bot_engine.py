@@ -211,10 +211,19 @@ class BotEngine:
         """全局错误处理器"""
         self.logger.error("处理更新时发生异常:", exc_info=context.error)
 
+        # 检查错误类型，如果是 Forbidden 错误（例如机器人被踢出群组），则只记录日志
+        if isinstance(context.error, telegram.error.Forbidden):
+            self.logger.warning(f"权限错误: {context.error}")
+            return
+
         # 尝试发送错误消息
         if update and hasattr(
                 update, 'effective_message') and update.effective_message:
-            await update.effective_message.reply_text("处理命令时发生错误，请查看日志获取详情")
+            try:
+                await update.effective_message.reply_text("处理命令时发生错误，请查看日志获取详情"
+                                                          )
+            except Exception as e:
+                self.logger.warning(f"无法发送错误消息: {e}")
 
     def polling_error_callback(self, error):
         """轮询错误回调"""
