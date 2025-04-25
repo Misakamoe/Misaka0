@@ -445,6 +445,7 @@ async def handle_callback_query(update: Update,
     """处理按钮回调查询"""
     query = update.callback_query
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 权限检查已在框架层面处理
 
@@ -468,13 +469,19 @@ async def handle_callback_query(update: Update,
     # 处理不同的操作
     if action == "add":
         # 重置分页状态
-        await session_manager.set(user_id, "alias_cmd_page", 0)
+        await session_manager.set(user_id,
+                                  "alias_cmd_page",
+                                  0,
+                                  chat_id=chat_id)
         # 显示添加别名界面
         await show_add_alias_menu(update, context)
 
     elif action == "remove":
         # 重置分页状态
-        await session_manager.set(user_id, "alias_remove_page", 0)
+        await session_manager.set(user_id,
+                                  "alias_remove_page",
+                                  0,
+                                  chat_id=chat_id)
         # 显示删除别名界面
         await show_remove_alias_menu(update, context)
 
@@ -503,48 +510,76 @@ async def handle_callback_query(update: Update,
 
     elif action == "back":
         # 清除会话状态
-        await session_manager.delete(user_id, "alias_waiting_for")
-        await session_manager.delete(user_id, "alias_selected_cmd")
-        await session_manager.delete(user_id, "alias_active")
-        await session_manager.delete(user_id, "alias_cmd_page")
-        await session_manager.delete(user_id, "alias_remove_page")
+        await session_manager.delete(user_id,
+                                     "alias_waiting_for",
+                                     chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "alias_selected_cmd",
+                                     chat_id=chat_id)
+        await session_manager.delete(user_id, "alias_active", chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "alias_cmd_page",
+                                     chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "alias_remove_page",
+                                     chat_id=chat_id)
 
         # 返回主菜单
         await show_alias_main_menu(update, context)
 
     elif action == "prev_page":
         # 获取当前页码
-        current_page = await session_manager.get(user_id, "alias_cmd_page", 0)
+        current_page = await session_manager.get(user_id,
+                                                 "alias_cmd_page",
+                                                 0,
+                                                 chat_id=chat_id)
         # 设置为上一页
-        await session_manager.set(user_id, "alias_cmd_page", current_page - 1)
+        await session_manager.set(user_id,
+                                  "alias_cmd_page",
+                                  current_page - 1,
+                                  chat_id=chat_id)
         # 刷新命令选择界面
         await show_add_alias_menu(update, context)
 
     elif action == "next_page":
         # 获取当前页码
-        current_page = await session_manager.get(user_id, "alias_cmd_page", 0)
+        current_page = await session_manager.get(user_id,
+                                                 "alias_cmd_page",
+                                                 0,
+                                                 chat_id=chat_id)
         # 设置为下一页
-        await session_manager.set(user_id, "alias_cmd_page", current_page + 1)
+        await session_manager.set(user_id,
+                                  "alias_cmd_page",
+                                  current_page + 1,
+                                  chat_id=chat_id)
         # 刷新命令选择界面
         await show_add_alias_menu(update, context)
 
     elif action == "prev_remove_page":
         # 获取当前页码
-        current_page = await session_manager.get(user_id, "alias_remove_page",
-                                                 0)
+        current_page = await session_manager.get(user_id,
+                                                 "alias_remove_page",
+                                                 0,
+                                                 chat_id=chat_id)
         # 设置为上一页
-        await session_manager.set(user_id, "alias_remove_page",
-                                  current_page - 1)
+        await session_manager.set(user_id,
+                                  "alias_remove_page",
+                                  current_page - 1,
+                                  chat_id=chat_id)
         # 刷新删除别名界面
         await show_remove_alias_menu(update, context)
 
     elif action == "next_remove_page":
         # 获取当前页码
-        current_page = await session_manager.get(user_id, "alias_remove_page",
-                                                 0)
+        current_page = await session_manager.get(user_id,
+                                                 "alias_remove_page",
+                                                 0,
+                                                 chat_id=chat_id)
         # 设置为下一页
-        await session_manager.set(user_id, "alias_remove_page",
-                                  current_page + 1)
+        await session_manager.set(user_id,
+                                  "alias_remove_page",
+                                  current_page + 1,
+                                  chat_id=chat_id)
         # 刷新删除别名界面
         await show_remove_alias_menu(update, context)
 
@@ -553,11 +588,20 @@ async def handle_callback_query(update: Update,
         cmd = action[len("select_cmd_"):]
 
         # 保存到会话
-        await session_manager.set(user_id, "alias_selected_cmd", cmd)
-        await session_manager.set(user_id, "alias_waiting_for", "alias_input")
+        await session_manager.set(user_id,
+                                  "alias_selected_cmd",
+                                  cmd,
+                                  chat_id=chat_id)
+        await session_manager.set(user_id,
+                                  "alias_waiting_for",
+                                  "alias_input",
+                                  chat_id=chat_id)
 
         # 设置模块会话标记，防止其他模块处理消息
-        await session_manager.set(user_id, "alias_active", True)
+        await session_manager.set(user_id,
+                                  "alias_active",
+                                  True,
+                                  chat_id=chat_id)
 
         # 提示用户输入别名
         text = f"<b>➕ 添加别名</b>\n\n"
@@ -605,6 +649,7 @@ async def show_add_alias_menu(update: Update,
 
     query = update.callback_query
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
@@ -620,7 +665,10 @@ async def show_add_alias_menu(update: Update,
         return
 
     # 获取分页信息
-    page = await session_manager.get(user_id, "alias_cmd_page", 0)
+    page = await session_manager.get(user_id,
+                                     "alias_cmd_page",
+                                     0,
+                                     chat_id=chat_id)
 
     # 获取所有命令并排序
     commands = sorted(command_manager.commands.keys())
@@ -706,7 +754,7 @@ async def show_add_alias_menu(update: Update,
         text += f"\n<i>第 {page + 1}/{pagination.total_pages} 页</i>"
 
     # 保存当前页码
-    await session_manager.set(user_id, "alias_cmd_page", page)
+    await session_manager.set(user_id, "alias_cmd_page", page, chat_id=chat_id)
 
     # 发送消息
     await query.edit_message_text(text,
@@ -724,6 +772,7 @@ async def show_remove_alias_menu(update: Update,
 
     query = update.callback_query
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
@@ -759,7 +808,10 @@ async def show_remove_alias_menu(update: Update,
         return
 
     # 获取分页信息
-    page = await session_manager.get(user_id, "alias_remove_page", 0)
+    page = await session_manager.get(user_id,
+                                     "alias_remove_page",
+                                     0,
+                                     chat_id=chat_id)
 
     # 创建别名按钮生成函数
     def create_alias_buttons(aliases_subset):
@@ -795,7 +847,10 @@ async def show_remove_alias_menu(update: Update,
     page = max(0, min(page, pagination.total_pages - 1))
 
     # 保存当前页码
-    await session_manager.set(user_id, "alias_remove_page", page)
+    await session_manager.set(user_id,
+                              "alias_remove_page",
+                              page,
+                              chat_id=chat_id)
 
     # 创建自定义按钮布局
     custom_buttons = create_alias_buttons(
@@ -855,6 +910,7 @@ async def handle_alias_input(update: Update,
         return
 
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
@@ -863,12 +919,18 @@ async def handle_alias_input(update: Update,
         return
 
     # 检查是否是 alias 模块的活跃会话
-    is_active = await session_manager.get(user_id, "alias_active", False)
+    is_active = await session_manager.get(user_id,
+                                          "alias_active",
+                                          False,
+                                          chat_id=chat_id)
     if not is_active:
         return
 
     # 获取会话状态
-    waiting_for = await session_manager.get(user_id, "alias_waiting_for")
+    waiting_for = await session_manager.get(user_id,
+                                            "alias_waiting_for",
+                                            None,
+                                            chat_id=chat_id)
 
     # 记录会话状态
     _interface.logger.debug(
@@ -876,12 +938,19 @@ async def handle_alias_input(update: Update,
 
     if waiting_for == "alias_input":
         # 获取选择的命令
-        cmd = await session_manager.get(user_id, "alias_selected_cmd")
+        cmd = await session_manager.get(user_id,
+                                        "alias_selected_cmd",
+                                        None,
+                                        chat_id=chat_id)
 
         if not cmd:
             await message.reply_text("⚠️ 会话已过期，请重新开始")
-            await session_manager.delete(user_id, "alias_waiting_for")
-            await session_manager.delete(user_id, "alias_selected_cmd")
+            await session_manager.delete(user_id,
+                                         "alias_waiting_for",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "alias_selected_cmd",
+                                         chat_id=chat_id)
             return
 
         # 获取用户输入的别名
@@ -896,9 +965,14 @@ async def handle_alias_input(update: Update,
         result = await add_alias(cmd, alias)
 
         # 清除会话状态
-        await session_manager.delete(user_id, "alias_waiting_for")
-        await session_manager.delete(user_id, "alias_selected_cmd")
-        await session_manager.delete(user_id, "alias_active")  # 清除模块会话标记
+        await session_manager.delete(user_id,
+                                     "alias_waiting_for",
+                                     chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "alias_selected_cmd",
+                                     chat_id=chat_id)
+        await session_manager.delete(user_id, "alias_active",
+                                     chat_id=chat_id)  # 清除模块会话标记
 
         # 显示结果 - 使用短英文文本
         keyboard = [[

@@ -9,20 +9,20 @@ from utils.logger import setup_logger
 
 
 class SessionManager:
-    """用户会话管理器，用于支持多步骤交互"""
+    """会话管理器，用于支持多步骤交互，会话绑定到聊天ID和用户ID的组合"""
 
     def __init__(self,
                  timeout=300,
                  cleanup_interval=600,
                  storage_dir="data/sessions"):
         """初始化会话管理器
-        
+
         Args:
             timeout: 会话超时时间（秒）
             cleanup_interval: 清理间隔（秒）
             storage_dir: 会话存储目录
         """
-        self.sessions = defaultdict(dict)  # 用户会话
+        self.sessions = defaultdict(dict)  # 会话数据，键为 "chat_id_user_id"
         self.timeout = timeout  # 会话超时时间
         self.cleanup_interval = cleanup_interval  # 清理间隔
         self.storage_dir = storage_dir  # 存储目录
@@ -35,6 +35,18 @@ class SessionManager:
 
         # 加载持久化的会话数据
         self._load_sessions()
+
+    def _get_session_key(self, user_id, chat_id):
+        """生成会话键
+
+        Args:
+            user_id: 用户 ID
+            chat_id: 聊天 ID
+
+        Returns:
+            str: 会话键
+        """
+        return f"{chat_id}_{user_id}"
 
     async def start_cleanup(self):
         """启动定期清理任务"""
@@ -71,112 +83,130 @@ class SessionManager:
 
     def cleanup(self):
         """清理过期会话
-        
+
         Returns:
             int: 清理的会话数量
         """
         now = time.time()
-        expired_users = []
+        expired_sessions = []
 
-        for user_id, session in self.sessions.items():
+        for session_key, session in self.sessions.items():
             if session.get("last_activity", 0) + self.timeout < now:
-                expired_users.append(user_id)
+                expired_sessions.append(session_key)
 
-        for user_id in expired_users:
-            del self.sessions[user_id]
+        for session_key in expired_sessions:
+            del self.sessions[session_key]
 
-        return len(expired_users)
+        return len(expired_sessions)
 
-    async def get(self, user_id, key, default=None):
+    async def get(self, user_id, key, default=None, chat_id=None):
         """获取会话数据
-        
+
         Args:
             user_id: 用户 ID
             key: 数据键
             default: 默认值
-            
+            chat_id: 聊天 ID
+
         Returns:
             任意: 会话数据或默认值
         """
-        async with self.locks[user_id]:
-            session = self.sessions[user_id]
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            session = self.sessions[session_key]
             session["last_activity"] = time.time()
             return session.get(key, default)
 
-    async def set(self, user_id, key, value):
+    async def set(self, user_id, key, value, chat_id=None):
         """设置会话数据
-        
+
         Args:
             user_id: 用户 ID
             key: 数据键
             value: 数据值
+            chat_id: 聊天 ID
         """
-        async with self.locks[user_id]:
-            session = self.sessions[user_id]
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            session = self.sessions[session_key]
             session[key] = value
             session["last_activity"] = time.time()
 
-    async def delete(self, user_id, key):
+    async def delete(self, user_id, key, chat_id=None):
         """删除会话数据
-        
+
         Args:
             user_id: 用户 ID
             key: 数据键
-            
+            chat_id: 聊天 ID
+
         Returns:
             bool: 是否成功删除
         """
-        async with self.locks[user_id]:
-            session = self.sessions[user_id]
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            session = self.sessions[session_key]
             session["last_activity"] = time.time()
             if key in session:
                 del session[key]
                 return True
             return False
 
-    async def clear(self, user_id):
+    async def clear(self, user_id, chat_id=None):
         """清除用户的所有会话数据
-        
+
         Args:
             user_id: 用户 ID
+            chat_id: 聊天 ID
         """
-        async with self.locks[user_id]:
-            if user_id in self.sessions:
-                self.sessions[user_id] = {"last_activity": time.time()}
+        session_key = self._get_session_key(user_id, chat_id)
 
-    async def has_key(self, user_id, key):
+        async with self.locks[session_key]:
+            if session_key in self.sessions:
+                self.sessions[session_key] = {"last_activity": time.time()}
+
+    async def has_key(self, user_id, key, chat_id=None):
         """检查会话是否包含指定键
-        
+
         Args:
             user_id: 用户 ID
             key: 数据键
-            
+            chat_id: 聊天 ID
+
         Returns:
             bool: 是否包含指定键
         """
-        async with self.locks[user_id]:
-            session = self.sessions[user_id]
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            session = self.sessions[session_key]
             session["last_activity"] = time.time()
             return key in session
 
-    async def get_all(self, user_id):
+    async def get_all(self, user_id, chat_id=None):
         """获取用户的所有会话数据
-        
+
         Args:
             user_id: 用户 ID
-            
+            chat_id: 聊天 ID
+
         Returns:
             dict: 会话数据副本
         """
-        async with self.locks[user_id]:
-            session = self.sessions[user_id]
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            session = self.sessions[session_key]
             session["last_activity"] = time.time()
             # 返回副本，不包括 last_activity
             return {k: v for k, v in session.items() if k != "last_activity"}
 
     async def get_active_sessions_count(self):
         """获取活跃会话数量
-        
+
         Returns:
             int: 活跃会话数量
         """
@@ -187,6 +217,26 @@ class SessionManager:
                 count += 1
         return count
 
+    async def get_user_sessions(self, user_id):
+        """获取用户在所有聊天中的会话
+
+        Args:
+            user_id: 用户 ID
+
+        Returns:
+            dict: 会话字典，键为聊天 ID
+        """
+        user_sessions = {}
+        user_id_str = str(user_id)
+
+        # 遍历所有会话，找出属于该用户的会话
+        for session_key, session in self.sessions.items():
+            if session_key.endswith(f"_{user_id_str}"):
+                chat_id = session_key.split('_')[0]
+                user_sessions[chat_id] = session
+
+        return user_sessions
+
     def _save_sessions(self):
         """保存会话数据到文件"""
         try:
@@ -194,10 +244,10 @@ class SessionManager:
             now = time.time()
             active_sessions = {}
 
-            for user_id, session in self.sessions.items():
+            for session_key, session in self.sessions.items():
                 if session.get("last_activity", 0) + self.timeout >= now:
-                    # 转换用户 ID 为字符串，因为 JSON 键必须是字符串
-                    active_sessions[str(user_id)] = session
+                    # 使用会话键作为 JSON 键
+                    active_sessions[session_key] = session
 
             # 保存到文件
             sessions_file = os.path.join(self.storage_dir, "sessions.json")
@@ -217,13 +267,9 @@ class SessionManager:
             with open(sessions_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            # 转换用户 ID 为整数
-            for user_id_str, session in data.items():
-                try:
-                    user_id = int(user_id_str)
-                    self.sessions[user_id] = session
-                except ValueError:
-                    self.logger.warning(f"无效的用户 ID: {user_id_str}")
+            # 直接加载会话数据
+            for session_key, session in data.items():
+                self.sessions[session_key] = session
 
             self.logger.info(f"已加载 {len(data)} 个会话")
 

@@ -61,6 +61,7 @@ async def handle_callback_query(update: Update,
     """处理按钮回调查询"""
     query = update.callback_query
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取回调数据
     callback_data = query.data
@@ -81,8 +82,10 @@ async def handle_callback_query(update: Update,
     # 处理不同的操作
     if action == "cancel":
         # 清除会话状态
-        await session_manager.delete(user_id, "echo_waiting_for")
-        await session_manager.delete(user_id, "echo_active")
+        await session_manager.delete(user_id,
+                                     "echo_waiting_for",
+                                     chat_id=chat_id)
+        await session_manager.delete(user_id, "echo_active", chat_id=chat_id)
 
         # 发送取消消息
         await query.edit_message_text("已取消操作")
@@ -103,6 +106,7 @@ async def handle_echo_input(update: Update,
         return
 
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
@@ -110,20 +114,28 @@ async def handle_echo_input(update: Update,
         return
 
     # 检查是否是 echo 模块的活跃会话
-    is_active = await session_manager.get(user_id, "echo_active", False)
+    is_active = await session_manager.get(user_id,
+                                          "echo_active",
+                                          False,
+                                          chat_id=chat_id)
     if not is_active:
         return
 
     # 获取会话状态
-    waiting_for = await session_manager.get(user_id, "echo_waiting_for")
+    waiting_for = await session_manager.get(user_id,
+                                            "echo_waiting_for",
+                                            None,
+                                            chat_id=chat_id)
 
     if waiting_for == "text":
         # 获取用户输入的文本
         text = message.text
 
         # 清除会话状态
-        await session_manager.delete(user_id, "echo_waiting_for")
-        await session_manager.delete(user_id, "echo_active")
+        await session_manager.delete(user_id,
+                                     "echo_waiting_for",
+                                     chat_id=chat_id)
+        await session_manager.delete(user_id, "echo_active", chat_id=chat_id)
 
         # 复读文本
         await message.reply_text(f"{text}")
@@ -139,6 +151,7 @@ async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
@@ -153,8 +166,11 @@ async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 否则，启动会话模式
-    await session_manager.set(user_id, "echo_waiting_for", "text")
-    await session_manager.set(user_id, "echo_active", True)
+    await session_manager.set(user_id,
+                              "echo_waiting_for",
+                              "text",
+                              chat_id=chat_id)
+    await session_manager.set(user_id, "echo_active", True, chat_id=chat_id)
 
     # 发送提示消息
     keyboard = [[

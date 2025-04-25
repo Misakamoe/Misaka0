@@ -364,10 +364,8 @@ class GeminiProvider:
         if stream:
             request["_stream"] = True
 
-        # 注意: Gemini API 不支持直接的 systemInstruction 字段
-        # 如果有系统提示，我们将其作为第一条用户消息
-        if system_prompt and not any(
-                msg.get("role") == "model" for msg in gemini_messages):
+        # Gemini API 不直接支持 system_instruction 字段
+        if system_prompt:
             # 确保系统提示不为空
             if not system_prompt.strip():
                 system_prompt = " "
@@ -1062,7 +1060,8 @@ class AIManager:
             return True
 
         # 白名单用户可以使用
-        if user_id in _state["whitelist"]:
+        user_id_str = str(user_id)
+        if user_id_str in _state["whitelist"]:
             return True
 
         # 其他用户不能使用
@@ -1218,9 +1217,7 @@ async def show_config_main_menu(update: Update,
         ],
         [
             InlineKeyboardButton("Set Timeout",
-                                 callback_data=f"{CALLBACK_PREFIX}_timeout"),
-            InlineKeyboardButton("Manage Whitelist",
-                                 callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                                 callback_data=f"{CALLBACK_PREFIX}_timeout")
         ]
     ]
 
@@ -1470,8 +1467,17 @@ async def show_whitelist_menu(update: Update,
         whitelist_text += "<i>白名单为空</i>\n\n"
     else:
         whitelist_text += "<b>当前白名单用户:</b>\n"
-        for i, user_id in enumerate(_state["whitelist"], 1):
-            whitelist_text += f"{i}. <code>{user_id}</code>\n"
+        for i, (user_id_str,
+                user_info) in enumerate(_state["whitelist"].items(), 1):
+            # 获取用户名
+            username = user_info.get("username", "未知用户名")
+
+            # 构建显示文本
+            user_display = f"{i}. <code>{user_id_str}</code>"
+            if username and username != "未知用户名":
+                user_display += f" (@{username})"
+
+            whitelist_text += f"{user_display}\n"
         whitelist_text += "\n"
 
     whitelist_text += "请选择操作："
@@ -1486,9 +1492,7 @@ async def show_whitelist_menu(update: Update,
                 [
                     InlineKeyboardButton(
                         "Clear All",
-                        callback_data=f"{CALLBACK_PREFIX}_whitelist_clear"),
-                    InlineKeyboardButton(
-                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
+                        callback_data=f"{CALLBACK_PREFIX}_whitelist_clear")
                 ]]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1524,6 +1528,7 @@ async def handle_specific_actions(update: Update,
     global _state
     query = update.callback_query
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
@@ -1534,9 +1539,7 @@ async def handle_specific_actions(update: Update,
     # 解析回调数据
     parts = callback_data.replace(f"{CALLBACK_PREFIX}_", "").split("_")
 
-    # 添加调试日志
-    _interface.logger.info(
-        f"处理特定操作: {callback_data}, 动作: {action}, 部分: {parts}")
+    # 处理特定操作
 
     # 处理模板选择
     if action == "template" and len(parts) >= 2:
@@ -1550,7 +1553,10 @@ async def handle_specific_actions(update: Update,
             return
 
         # 设置会话状态，记录选择的模板
-        await session_manager.set(user_id, "selected_template", template_id)
+        await session_manager.set(user_id,
+                                  "selected_template",
+                                  template_id,
+                                  chat_id=chat_id)
 
         # 提示输入新服务商 ID
         await query.edit_message_text(
@@ -1560,7 +1566,10 @@ async def handle_specific_actions(update: Update,
             parse_mode="HTML")
 
         # 设置会话状态，等待用户输入服务商 ID
-        await session_manager.set(user_id, "waiting_for", "provider_id")
+        await session_manager.set(user_id,
+                                  "waiting_for",
+                                  "provider_id",
+                                  chat_id=chat_id)
 
     # 处理设置超时时间
     elif action == "set" and "timeout" in parts:
@@ -1580,8 +1589,6 @@ async def handle_specific_actions(update: Update,
 
     # 处理服务商操作
     elif action in ["edit", "delete", "default"] and len(parts) >= 2:
-        # 添加调试日志
-        _interface.logger.debug(f"处理服务商操作: action={action}, parts={parts}")
 
         # 检查回调数据格式
         if parts[1] == "provider" and len(parts) >= 3:
@@ -1605,19 +1612,19 @@ async def handle_specific_actions(update: Update,
 
         if action == "edit":
             # 编辑服务商
-            _interface.logger.debug(f"编辑服务商: {provider_id}")
-            await session_manager.set(user_id, "editing_provider", provider_id)
+            await session_manager.set(user_id,
+                                      "editing_provider",
+                                      provider_id,
+                                      chat_id=chat_id)
             await show_provider_edit_menu(update, context, provider_id)
 
         elif action == "delete":
             # 删除服务商
             # 显示确认对话框
-            _interface.logger.debug(f"删除服务商: {provider_id}")
             await show_delete_confirmation(update, context, provider_id)
 
         elif action == "default":
             # 设置默认服务商
-            _interface.logger.debug(f"设置默认服务商: {provider_id}")
             _state["default_provider"] = provider_id
 
             # 保存配置
@@ -1633,15 +1640,27 @@ async def handle_specific_actions(update: Update,
         whitelist_action = parts[-1]
 
         if whitelist_action == "add":
-            # 提示输入用户 ID
-            await query.edit_message_text(
-                "<b>👥 添加用户到白名单</b>\n\n"
-                "请输入要添加的用户 ID (数字):",
-                parse_mode="HTML")
+            # 检查是否是群聊
+            is_group = update.effective_chat.type != "private"
 
-            # 设置会话状态，等待用户输入用户 ID
-            await session_manager.set(user_id, "waiting_for",
-                                      "whitelist_add_user_id")
+            if is_group:
+                # 在群聊中显示提示
+                await query.edit_message_text(
+                    "<b>👥 添加用户到白名单</b>\n\n"
+                    "请使用 /aiwhitelist 命令回复用户消息来添加用户",
+                    parse_mode="HTML")
+            else:
+                # 在私聊中提示输入用户 ID
+                await query.edit_message_text(
+                    "<b>👥 添加用户到白名单</b>\n\n"
+                    "请输入要添加的用户 ID (数字):",
+                    parse_mode="HTML")
+
+                # 设置会话状态，等待用户输入用户 ID
+                await session_manager.set(user_id,
+                                          "waiting_for",
+                                          "whitelist_add_user_id",
+                                          chat_id=chat_id)
 
         elif whitelist_action == "remove":
             # 显示可移除的用户列表
@@ -1674,7 +1693,7 @@ async def handle_specific_actions(update: Update,
 
         elif whitelist_action == "clear_confirm":
             # 清空白名单
-            _state["whitelist"] = []
+            _state["whitelist"] = {}
 
             # 保存配置
             save_config()
@@ -1691,9 +1710,7 @@ async def handle_specific_actions(update: Update,
         provider_id = parts[1]
         param = parts[2]
 
-        # 添加调试日志
-        _interface.logger.debug(
-            f"编辑参数: provider_id={provider_id}, param={param}, parts={parts}")
+        # 编辑参数
 
         # 验证服务商是否存在
         if provider_id not in _state["providers"]:
@@ -1722,13 +1739,13 @@ async def handle_specific_actions(update: Update,
         await query.edit_message_text(prompt_text, parse_mode="HTML")
 
         # 设置会话状态，等待用户输入
-        await session_manager.set(user_id, "waiting_for",
-                                  f"edit_param_{provider_id}_{param}")
+        await session_manager.set(user_id,
+                                  "waiting_for",
+                                  f"edit_param_{provider_id}_{param}",
+                                  chat_id=chat_id)
 
     # 处理删除确认操作
     elif action == "delete_confirm":
-        # 添加调试日志
-        _interface.logger.info(f"处理删除确认操作: parts={parts}")
 
         # 确保回调数据格式正确
         if len(parts) >= 3:
@@ -1770,60 +1787,60 @@ async def handle_specific_actions(update: Update,
     elif action == "whitelist_remove_user":
         # 检查回调数据格式
         if len(parts) >= 2:
-            # 尝试从最后一个部分获取用户 ID
-            try:
-                user_id_to_remove = int(parts[-1])
+            # 从最后一个部分获取用户 ID
+            user_id_str = parts[-1]
 
-                # 验证用户是否在白名单中
-                if user_id_to_remove not in _state["whitelist"]:
-                    _interface.logger.warning(
-                        f"用户 {user_id} 尝试移除不在白名单中的用户: {user_id_to_remove}")
-                    await show_whitelist_menu(update, context)
-                    return
-
-                # 从白名单中移除
-                _state["whitelist"].remove(user_id_to_remove)
-
-                # 保存配置
-                save_config()
-
-                _interface.logger.info(
-                    f"用户 {user_id} 将用户 {user_id_to_remove} 从白名单中移除")
-
-                # 返回白名单菜单
-                try:
-                    await query.edit_message_text(
-                        f"<b>✅ 已将用户 {user_id_to_remove} 从白名单中移除</b>",
-                        reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(
-                                "⇠ Back",
-                                callback_data=f"{CALLBACK_PREFIX}_whitelist")
-                        ]]),
-                        parse_mode="HTML")
-                except telegram.error.BadRequest as e:
-                    # 忽略"消息未修改"错误
-                    if "Message is not modified" not in str(e):
-                        _interface.logger.error(f"更新白名单用户移除消息失败: {str(e)}")
-                        # 尝试发送新消息
-                        try:
-                            message = update.message or update.edited_message
-                            if message:
-                                await message.reply_text(
-                                    f"<b>✅ 已将用户 {user_id_to_remove} 从白名单中移除</b>",
-                                    reply_markup=InlineKeyboardMarkup([[
-                                        InlineKeyboardButton(
-                                            "⇠ Back",
-                                            callback_data=
-                                            f"{CALLBACK_PREFIX}_whitelist")
-                                    ]]),
-                                    parse_mode="HTML")
-                        except Exception as e2:
-                            _interface.logger.error(
-                                f"发送白名单用户移除消息失败: {str(e2)}")
-            except ValueError:
+            # 验证用户是否在白名单中
+            if user_id_str not in _state["whitelist"]:
                 _interface.logger.warning(
-                    f"用户 {user_id} 发送了无效的用户 ID: {parts[-1]}")
+                    f"用户 {user_id} 尝试移除不在白名单中的用户: {user_id_str}")
                 await show_whitelist_menu(update, context)
+                return
+
+            # 获取用户信息用于日志和显示
+            user_info = _state["whitelist"][user_id_str]
+            username = user_info.get("username", "")
+            display_name = f"{user_id_str}"
+            if username and username != "未知用户名":
+                display_name = f"{display_name} (@{username})"
+
+            # 从白名单中移除
+            del _state["whitelist"][user_id_str]
+
+            # 保存配置
+            save_config()
+
+            _interface.logger.info(f"用户 {user_id} 将用户 {display_name} 从白名单中移除")
+
+            # 返回白名单菜单
+            try:
+                await query.edit_message_text(
+                    f"<b>✅ 已将用户 {user_id_str} 从白名单中移除</b>",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "⇠ Back",
+                            callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                    ]]),
+                    parse_mode="HTML")
+            except telegram.error.BadRequest as e:
+                # 忽略"消息未修改"错误
+                if "Message is not modified" not in str(e):
+                    _interface.logger.error(f"更新白名单用户移除消息失败: {str(e)}")
+                    # 尝试发送新消息
+                    try:
+                        message = update.message or update.edited_message
+                        if message:
+                            await message.reply_text(
+                                f"<b>✅ 已将用户 {user_id_str} 从白名单中移除</b>",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton(
+                                        "⇠ Back",
+                                        callback_data=
+                                        f"{CALLBACK_PREFIX}_whitelist")
+                                ]]),
+                                parse_mode="HTML")
+                    except Exception as e2:
+                        _interface.logger.error(f"发送白名单用户移除消息失败: {str(e2)}")
         else:
             _interface.logger.warning(
                 f"用户 {user_id} 发送了格式错误的移除用户回调数据: {callback_data}")
@@ -2052,12 +2069,20 @@ async def show_whitelist_remove_menu(
 
         # 构建用户按钮
         keyboard = []
-        for user_id in _state["whitelist"]:
+        for user_id_str, user_info in _state["whitelist"].items():
+            # 获取用户名
+            username = user_info.get("username", "未知用户名")
+
+            # 构建按钮文本
+            button_text = f"User {user_id_str}"
+            if username and username != "未知用户名":
+                button_text = f"@{username} ({user_id_str})"
+
             keyboard.append([
                 InlineKeyboardButton(
-                    f"User {user_id}",
+                    button_text,
                     callback_data=
-                    f"{CALLBACK_PREFIX}_whitelist_remove_user_{user_id}")
+                    f"{CALLBACK_PREFIX}_whitelist_remove_user_{user_id_str}")
             ])
 
         # 添加返回按钮
@@ -2097,6 +2122,7 @@ async def handle_config_callback(update: Update,
     """处理配置按钮回调"""
     query = update.callback_query
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
@@ -2105,11 +2131,17 @@ async def handle_config_callback(update: Update,
         return
 
     # 检查是否是活跃的 AI 配置会话
-    is_active = await session_manager.get(user_id, "ai_config_active", False)
+    is_active = await session_manager.get(user_id,
+                                          "ai_config_active",
+                                          False,
+                                          chat_id=chat_id)
     if not is_active:
         # 自动重新激活会话状态
-        await session_manager.set(user_id, "ai_config_active", True)
-        _interface.logger.info(f"用户 {user_id} 的 AI 配置会话已自动重新激活")
+        await session_manager.set(user_id,
+                                  "ai_config_active",
+                                  True,
+                                  chat_id=chat_id)
+        _interface.logger.info(f"用户 {user_id} 在聊天 {chat_id} 中的 AI 配置会话已自动重新激活")
 
     # 解析回调数据
     callback_data = query.data
@@ -2239,7 +2271,7 @@ async def handle_config_callback(update: Update,
 
     elif action == "whitelist_clear_confirm":
         # 清空白名单
-        _state["whitelist"] = []
+        _state["whitelist"] = {}  # 使用字典结构
 
         # 保存配置
         save_config()
@@ -2286,16 +2318,26 @@ async def handle_config_callback(update: Update,
             whitelist_action = parts[1]
 
             if whitelist_action == "add":
-                # 提示输入用户 ID
-                try:
-                    await query.edit_message_text(
-                        "<b>👥 添加用户到白名单</b>\n\n"
-                        "请输入要添加的用户 ID (数字):",
-                        parse_mode="HTML")
+                # 检查是否是群聊
+                is_group = update.effective_chat.type != "private"
 
-                    # 设置会话状态，等待用户输入用户 ID
-                    await session_manager.set(user_id, "waiting_for",
-                                              "whitelist_add_user_id")
+                try:
+                    if is_group:
+                        # 在群聊中显示提示
+                        await query.edit_message_text(
+                            "<b>👥 添加用户到白名单</b>\n\n"
+                            "请使用 /aiwhitelist 命令回复用户消息来添加用户",
+                            parse_mode="HTML")
+                    else:
+                        # 在私聊中提示输入用户 ID
+                        await query.edit_message_text(
+                            "<b>👥 添加用户到白名单</b>\n\n"
+                            "请输入要添加的用户 ID (数字):",
+                            parse_mode="HTML")
+
+                        # 设置会话状态，等待用户输入用户 ID
+                        await session_manager.set(user_id, "waiting_for",
+                                                  "whitelist_add_user_id")
                 except telegram.error.BadRequest as e:
                     # 忽略"消息未修改"错误
                     if "Message is not modified" not in str(e):
@@ -2304,15 +2346,28 @@ async def handle_config_callback(update: Update,
                         try:
                             message = update.message or update.edited_message
                             if message:
-                                await message.reply_text(
-                                    "<b>👥 添加用户到白名单</b>\n\n"
-                                    "请输入要添加的用户 ID (数字):",
-                                    parse_mode="HTML")
+                                # 检查是否是群聊
+                                is_group = update.effective_chat.type != "private"
 
-                                # 设置会话状态，等待用户输入用户 ID
-                                await session_manager.set(
-                                    user_id, "waiting_for",
-                                    "whitelist_add_user_id")
+                                if is_group:
+                                    # 在群聊中显示提示
+                                    await message.reply_text(
+                                        "<b>👥 添加用户到白名单</b>\n\n"
+                                        "请使用 /aiwhitelist 命令回复用户消息来添加用户",
+                                        parse_mode="HTML")
+                                else:
+                                    # 在私聊中提示输入用户 ID
+                                    await message.reply_text(
+                                        "<b>👥 添加用户到白名单</b>\n\n"
+                                        "请输入要添加的用户 ID (数字):",
+                                        parse_mode="HTML")
+
+                                    # 设置会话状态，等待用户输入用户 ID
+                                    await session_manager.set(
+                                        user_id,
+                                        "waiting_for",
+                                        "whitelist_add_user_id",
+                                        chat_id=chat_id)
                         except Exception as e2:
                             _interface.logger.error(
                                 f"发送添加用户到白名单提示失败: {str(e2)}")
@@ -2407,9 +2462,10 @@ async def handle_config_callback(update: Update,
             await query.edit_message_text(prompt_text, parse_mode="HTML")
 
             # 设置会话状态，等待用户输入
-            await session_manager.set(
-                user_id, "waiting_for",
-                f"edit_param_{provider_id}_{param_name}")
+            await session_manager.set(user_id,
+                                      "waiting_for",
+                                      f"edit_param_{provider_id}_{param_name}",
+                                      chat_id=chat_id)
         else:
             _interface.logger.warning(
                 f"用户 {user_id} 发送了格式错误的编辑参数回调数据: {callback_data}")
@@ -2671,6 +2727,7 @@ async def ai_config_command(update: Update,
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 检查是否是私聊
     if update.effective_chat.type != "private":
@@ -2685,10 +2742,13 @@ async def ai_config_command(update: Update,
         return
 
     # 清除之前的会话状态（如果有）
-    await session_manager.clear(user_id)
+    await session_manager.clear(user_id, chat_id=chat_id)
 
     # 设置会话状态，表示正在配置 AI
-    await session_manager.set(user_id, "ai_config_active", True)
+    await session_manager.set(user_id,
+                              "ai_config_active",
+                              True,
+                              chat_id=chat_id)
 
     # 显示主菜单
     await show_config_main_menu(update, context)
@@ -2705,11 +2765,12 @@ async def ai_whitelist_command(update: Update,
     # 检查是否是回复某人的消息
     if message.reply_to_message and message.reply_to_message.from_user:
         user_id = message.reply_to_message.from_user.id
+        user_id_str = str(user_id)
         username = message.reply_to_message.from_user.username or "未知用户名"
         full_name = message.reply_to_message.from_user.full_name or "未知姓名"
 
         # 检查用户是否已在白名单中
-        if user_id in _state["whitelist"]:
+        if user_id_str in _state["whitelist"]:
             safe_username = username.replace('.', '\\.').replace('-', '\\-')
             await message.reply_text(
                 f"用户 `{user_id}` (@{safe_username}) 已在白名单中",
@@ -2717,7 +2778,10 @@ async def ai_whitelist_command(update: Update,
             return
 
         # 添加到白名单
-        _state["whitelist"].append(user_id)
+        _state["whitelist"][user_id_str] = {
+            "username": username,
+            "added_at": time.time()
+        }
 
         # 保存配置
         save_config()
@@ -2728,7 +2792,8 @@ async def ai_whitelist_command(update: Update,
             f"✅ 已将用户 `{user_id}` (@{safe_username}, {safe_full_name}) 添加到白名单",
             parse_mode="MARKDOWN")
         _interface.logger.info(
-            f"用户 {update.effective_user.id} 将用户 {user_id} 添加到 AI 白名单")
+            f"用户 {update.effective_user.id} 将用户 {user_id} (@{username}) 添加到 AI 白名单"
+        )
     else:
         # 如果不是回复消息，则显示白名单管理界面
         await show_whitelist_menu(update, context)
@@ -2916,6 +2981,7 @@ async def handle_config_input(update: Update,
     """处理配置过程中的用户输入"""
     global _state
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     message = update.message
     message_text = message.text
 
@@ -2944,8 +3010,10 @@ async def handle_config_input(update: Update,
             return
 
         # 获取选择的模板
-        template_id = await session_manager.get(user_id, "selected_template",
-                                                "custom")
+        template_id = await session_manager.get(user_id,
+                                                "selected_template",
+                                                "custom",
+                                                chat_id=chat_id)
 
         # 创建新服务商
         _state["providers"][provider_id] = PROVIDER_TEMPLATES[
@@ -2960,8 +3028,10 @@ async def handle_config_input(update: Update,
         save_config()
 
         # 清除等待状态
-        await session_manager.delete(user_id, "waiting_for")
-        await session_manager.delete(user_id, "selected_template")
+        await session_manager.delete(user_id, "waiting_for", chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "selected_template",
+                                     chat_id=chat_id)
 
         # 发送成功消息并直接显示编辑菜单
         await message.reply_text(
@@ -3028,7 +3098,9 @@ async def handle_config_input(update: Update,
             save_config()
 
             # 清除等待状态
-            await session_manager.delete(user_id, "waiting_for")
+            await session_manager.delete(user_id,
+                                         "waiting_for",
+                                         chat_id=chat_id)
 
             # 发送成功消息
             await message.reply_text(
@@ -3041,21 +3113,37 @@ async def handle_config_input(update: Update,
             # 格式错误
             _interface.logger.warning(f"编辑参数输入格式错误: {waiting_for}")
             await message.reply_text("⚠️ 参数格式错误，已取消操作")
-            await session_manager.delete(user_id, "waiting_for")
+            await session_manager.delete(user_id,
+                                         "waiting_for",
+                                         chat_id=chat_id)
             await show_config_main_menu(update, context)
 
     elif waiting_for == "whitelist_add_user_id":
         # 处理添加白名单用户 ID 输入
         try:
             user_id_to_add = int(message_text)
+            user_id_str = str(user_id_to_add)
 
             # 检查用户是否已在白名单中
-            if user_id_to_add in _state["whitelist"]:
+            if user_id_str in _state["whitelist"]:
                 await message.reply_text(f"用户 `{user_id_to_add}` 已在白名单中",
                                          parse_mode="MARKDOWN")
             else:
+                # 尝试获取用户信息
+                try:
+                    # 使用全局接口获取机器人实例
+                    bot = context.bot
+                    chat = await bot.get_chat(user_id_to_add)
+                    username = chat.username or "未知用户名"
+                except Exception:
+                    # 如果无法获取用户信息，使用默认值
+                    username = "未知用户名"
+
                 # 添加到白名单
-                _state["whitelist"].append(user_id_to_add)
+                _state["whitelist"][user_id_str] = {
+                    "username": username,
+                    "added_at": time.time()
+                }
 
                 # 保存配置
                 save_config()
@@ -3064,7 +3152,9 @@ async def handle_config_input(update: Update,
                                          parse_mode="MARKDOWN")
 
             # 清除等待状态
-            await session_manager.delete(user_id, "waiting_for")
+            await session_manager.delete(user_id,
+                                         "waiting_for",
+                                         chat_id=chat_id)
 
             # 发送新消息而不是编辑现有消息
             await message.reply_text(
@@ -3081,7 +3171,7 @@ async def handle_config_input(update: Update,
     else:
         # 未知的等待状态
         await message.reply_text("⚠️ 未知的输入状态，已取消操作")
-        await session_manager.delete(user_id, "waiting_for")
+        await session_manager.delete(user_id, "waiting_for", chat_id=chat_id)
         await show_config_main_menu(update, context)
 
 
@@ -3089,6 +3179,7 @@ async def handle_private_message(update: Update,
                                  context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理私聊消息，直接回复 AI 回答"""
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
@@ -3104,11 +3195,16 @@ async def handle_private_message(update: Update,
         return
 
     # 检查是否在配置会话中
-    is_config_active = await session_manager.get(user_id, "ai_config_active",
-                                                 False)
+    is_config_active = await session_manager.get(user_id,
+                                                 "ai_config_active",
+                                                 False,
+                                                 chat_id=chat_id)
     if is_config_active:
         # 检查是否在等待用户输入
-        waiting_for = await session_manager.get(user_id, "waiting_for", None)
+        waiting_for = await session_manager.get(user_id,
+                                                "waiting_for",
+                                                None,
+                                                chat_id=chat_id)
         if waiting_for:
             # 处理用户输入
             await handle_config_input(update, context, waiting_for)
@@ -3122,8 +3218,8 @@ async def handle_private_message(update: Update,
     # 检查是否有其他模块的活跃会话
     has_other_session = False
     if session_manager:
-        # 获取用户所有会话数据
-        user_sessions = await session_manager.get_all(user_id)
+        # 获取用户在当前聊天中的所有会话数据
+        user_sessions = await session_manager.get_all(user_id, chat_id=chat_id)
         # 检查是否有其他模块的会话（不是 ai_ 前缀的键）
         for key in user_sessions:
             if not key.startswith("ai_") and key != "last_activity":
@@ -3132,7 +3228,6 @@ async def handle_private_message(update: Update,
 
     # 如果有其他模块的活跃会话，不处理消息
     if has_other_session:
-        _interface.logger.debug(f"用户 {user_id} 有其他模块的活跃会话，AI 模块不处理消息")
         return
 
     # 获取消息内容
@@ -3151,8 +3246,11 @@ async def handle_private_message(update: Update,
         return
 
     # 设置 AI 模块的会话状态，表示正在处理消息
-    await session_manager.set(user_id, "ai_active", True)
-    await session_manager.set(user_id, "ai_start_time", time.time())
+    await session_manager.set(user_id, "ai_active", True, chat_id=chat_id)
+    await session_manager.set(user_id,
+                              "ai_start_time",
+                              time.time(),
+                              chat_id=chat_id)
 
     # 检查是否有图像
     images = []
@@ -3171,7 +3269,7 @@ async def handle_private_message(update: Update,
         else:
             await message.reply_text("⚠️ 当前服务商不支持图像处理")
             # 清除会话状态
-            await session_manager.delete(user_id, "ai_active")
+            await session_manager.delete(user_id, "ai_active", chat_id=chat_id)
             return
 
     try:
@@ -3195,17 +3293,18 @@ async def handle_private_message(update: Update,
         # 在创建任务后立即清除会话状态
         # 这样其他命令可以立即处理，不需要等待 AI 响应
         # 注意：这意味着在 AI 响应过程中，其他模块可能会处理消息
-        await session_manager.delete(user_id, "ai_active")
+        await session_manager.delete(user_id, "ai_active", chat_id=chat_id)
 
     # 注意：HTML 格式转换现在在 process_ai_response 方法中处理
 
-    _interface.logger.info(f"用户 {user_id} 在私聊中获得了 AI 回复")
+    _interface.logger.info(f"用户 {user_id} 在聊天 {chat_id} 中获得了 AI 回复")
 
 
 async def handle_private_photo(update: Update,
                                context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理私聊中的图片消息"""
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 如果是编辑的消息，不处理
     if update.edited_message:
@@ -3225,8 +3324,8 @@ async def handle_private_photo(update: Update,
     # 检查是否有其他模块的活跃会话
     has_other_session = False
     if session_manager:
-        # 获取用户所有会话数据
-        user_sessions = await session_manager.get_all(user_id)
+        # 获取用户在当前聊天中的所有会话数据
+        user_sessions = await session_manager.get_all(user_id, chat_id=chat_id)
         # 检查是否有其他模块的会话（不是 ai_ 前缀的键）
         for key in user_sessions:
             if not key.startswith("ai_") and key != "last_activity":
@@ -3235,7 +3334,6 @@ async def handle_private_photo(update: Update,
 
     # 如果有其他模块的活跃会话，不处理消息
     if has_other_session:
-        _interface.logger.debug(f"用户 {user_id} 有其他模块的活跃会话，AI 模块不处理消息")
         return
 
     # 检查默认服务商
@@ -3246,15 +3344,18 @@ async def handle_private_photo(update: Update,
         return
 
     # 设置 AI 模块的会话状态，表示正在处理消息
-    await session_manager.set(user_id, "ai_active", True)
-    await session_manager.set(user_id, "ai_start_time", time.time())
+    await session_manager.set(user_id, "ai_active", True, chat_id=chat_id)
+    await session_manager.set(user_id,
+                              "ai_start_time",
+                              time.time(),
+                              chat_id=chat_id)
 
     # 检查服务商是否支持图像
     provider = _state["providers"].get(provider_id, {})
     if not provider.get("supports_image", False):
         await update.message.reply_text("⚠️ 当前服务商不支持图像处理")
         # 清除会话状态
-        await session_manager.delete(user_id, "ai_active")
+        await session_manager.delete(user_id, "ai_active", chat_id=chat_id)
         return
 
     # 获取图像
@@ -3266,7 +3367,7 @@ async def handle_private_photo(update: Update,
     if not image_data:
         await update.message.reply_text("❌ 处理图像失败")
         # 清除会话状态
-        await session_manager.delete(user_id, "ai_active")
+        await session_manager.delete(user_id, "ai_active", chat_id=chat_id)
         return
 
     # 获取消息文本(如果有)
@@ -3293,11 +3394,11 @@ async def handle_private_photo(update: Update,
         # 注意：这里不等待任务完成，立即返回
     finally:
         # 在创建任务后立即清除会话状态
-        await session_manager.delete(user_id, "ai_active")
+        await session_manager.delete(user_id, "ai_active", chat_id=chat_id)
 
     # 注意：HTML 格式转换现在在 process_ai_response 方法中处理
 
-    _interface.logger.info(f"用户 {user_id} 在私聊中获得了图像分析回复")
+    _interface.logger.info(f"用户 {user_id} 在聊天 {chat_id} 中获得了图像分析回复")
 
 
 # 配置和状态管理函数
@@ -3333,7 +3434,7 @@ def load_config() -> None:
     if not os.path.exists(CONFIG_FILE):
         # 初始化空结构
         _state["providers"] = {}
-        _state["whitelist"] = []
+        _state["whitelist"] = {}  # 使用字典结构存储白名单
         _state["default_provider"] = None
         _state["usage_stats"] = {
             "total_requests": 0,
@@ -3354,9 +3455,18 @@ def load_config() -> None:
             if "providers" in config:
                 _state["providers"] = config["providers"]
 
-            # 加载白名单
+            # 加载白名单（确保是字典格式）
             if "whitelist" in config:
-                _state["whitelist"] = config["whitelist"]
+                if isinstance(config["whitelist"], dict):
+                    _state["whitelist"] = config["whitelist"]
+                else:
+                    # 如果不是字典格式，初始化为空字典
+                    _state["whitelist"] = {}
+                    # 保存新格式
+                    save_config()
+            else:
+                # 如果配置中没有白名单，初始化为空字典
+                _state["whitelist"] = {}
 
             # 加载默认提供商
             if "default_provider" in config:
@@ -3469,7 +3579,6 @@ async def setup(module_interface):
 
                 # 保存用户对话上下文
                 save_contexts()
-                _interface.logger.debug("已定期保存 AI 用户对话上下文")
             except Exception as e:
                 _interface.logger.error(f"定期任务执行失败: {str(e)}")
 

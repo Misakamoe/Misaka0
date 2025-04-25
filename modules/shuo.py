@@ -109,9 +109,15 @@ async def shuo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("系统错误，请联系管理员")
         return
 
+    # 获取聊天ID
+    chat_id = update.effective_chat.id
+
     # 设置会话状态，等待用户输入说说内容
-    await session_manager.set(user_id, "shuo_active", True)
-    await session_manager.set(user_id, "shuo_step", SESSION_WAITING_CONTENT)
+    await session_manager.set(user_id, "shuo_active", True, chat_id=chat_id)
+    await session_manager.set(user_id,
+                              "shuo_step",
+                              SESSION_WAITING_CONTENT,
+                              chat_id=chat_id)
 
     # 创建按钮面板
     keyboard = [[
@@ -315,6 +321,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
+    chat_id = update.effective_chat.id
 
     # 确保回调查询得到响应
     await query.answer()
@@ -348,9 +355,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == f"{CALLBACK_PREFIX}back_to_config":
         # 返回配置面板，清除会话状态
         if session_manager:
-            await session_manager.delete(user_id, "shuo_active")
-            await session_manager.delete(user_id, "shuo_step")
-            await session_manager.delete(user_id, "shuo_config_type")
+            await session_manager.delete(user_id,
+                                         "shuo_active",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id, "shuo_step", chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "shuo_config_type",
+                                         chat_id=chat_id)
 
         # 重新显示配置面板
         await show_config(update, None)
@@ -358,8 +369,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == f"{CALLBACK_PREFIX}back_to_list":
         # 返回说说列表，清除会话状态
         if session_manager:
-            await session_manager.delete(user_id, "shuo_active")
-            await session_manager.delete(user_id, "shuo_step")
+            await session_manager.delete(user_id,
+                                         "shuo_active",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id, "shuo_step", chat_id=chat_id)
 
         # 显示说说列表
         await list_posts(update, context, page=0)
@@ -367,9 +380,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == f"{CALLBACK_PREFIX}back_to_main":
         # 返回主菜单，清除会话状态
         if session_manager:
-            await session_manager.delete(user_id, "shuo_active")
-            await session_manager.delete(user_id, "shuo_step")
-            await session_manager.delete(user_id, "shuo_config_type")
+            await session_manager.delete(user_id,
+                                         "shuo_active",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id, "shuo_step", chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "shuo_config_type",
+                                         chat_id=chat_id)
 
         # 重新显示主菜单
         # 获取消息对象
@@ -386,9 +403,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 设置会话状态，等待用户输入说说内容
         if session_manager:
-            await session_manager.set(user_id, "shuo_active", True)
-            await session_manager.set(user_id, "shuo_step",
-                                      SESSION_WAITING_CONTENT)
+            await session_manager.set(user_id,
+                                      "shuo_active",
+                                      True,
+                                      chat_id=chat_id)
+            await session_manager.set(user_id,
+                                      "shuo_step",
+                                      SESSION_WAITING_CONTENT,
+                                      chat_id=chat_id)
 
         # 发送主菜单消息
         await message.edit_text(
@@ -405,8 +427,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == f"{CALLBACK_PREFIX}open_config":
         # 打开配置面板，清除会话状态
         if session_manager:
-            await session_manager.delete(user_id, "shuo_active")
-            await session_manager.delete(user_id, "shuo_step")
+            await session_manager.delete(user_id,
+                                         "shuo_active",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id, "shuo_step", chat_id=chat_id)
 
         # 显示配置面板
         await show_config(update, None)
@@ -414,8 +438,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == f"{CALLBACK_PREFIX}open_manage":
         # 打开管理面板，清除会话状态
         if session_manager:
-            await session_manager.delete(user_id, "shuo_active")
-            await session_manager.delete(user_id, "shuo_step")
+            await session_manager.delete(user_id,
+                                         "shuo_active",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id, "shuo_step", chat_id=chat_id)
 
         # 显示说说列表
         await list_posts(update, context, page=0)
@@ -429,9 +455,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # 设置会话状态，等待用户输入配置值
-        await session_manager.set(user_id, "shuo_active", True)
-        await session_manager.set(user_id, "shuo_step", SESSION_WAITING_CONFIG)
-        await session_manager.set(user_id, "shuo_config_type", config_type)
+        await session_manager.set(user_id,
+                                  "shuo_active",
+                                  True,
+                                  chat_id=chat_id)
+        await session_manager.set(user_id,
+                                  "shuo_step",
+                                  SESSION_WAITING_CONFIG,
+                                  chat_id=chat_id)
+        await session_manager.set(user_id,
+                                  "shuo_config_type",
+                                  config_type,
+                                  chat_id=chat_id)
 
         # 创建返回按钮
         keyboard = [[
@@ -462,9 +497,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                           reply_markup=reply_markup)
         else:
             await query.edit_message_text(f"未知配置类型: {config_type}")
-            await session_manager.delete(user_id, "shuo_active")
-            await session_manager.delete(user_id, "shuo_step")
-            await session_manager.delete(user_id, "shuo_config_type")
+            await session_manager.delete(user_id,
+                                         "shuo_active",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id, "shuo_step", chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "shuo_config_type",
+                                         chat_id=chat_id)
 
 
 # 辅助函数
@@ -962,18 +1001,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户消息（用于会话流程）"""
     # 检查是否有活动会话
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     session_manager = context.bot_data.get("session_manager")
 
     if not session_manager:
         return
 
     # 检查是否是说说模块的活跃会话
-    is_active = await session_manager.get(user_id, "shuo_active", False)
+    is_active = await session_manager.get(user_id,
+                                          "shuo_active",
+                                          False,
+                                          chat_id=chat_id)
     if not is_active:
         return
 
     # 获取当前步骤
-    step = await session_manager.get(user_id, "shuo_step")
+    step = await session_manager.get(user_id,
+                                     "shuo_step",
+                                     None,
+                                     chat_id=chat_id)
 
     # 处理不同步骤的输入
     if step == SESSION_WAITING_CONTENT:
@@ -981,21 +1027,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content = update.message.text.strip()
 
         # 清除会话状态
-        await session_manager.delete(user_id, "shuo_active")
-        await session_manager.delete(user_id, "shuo_step")
+        await session_manager.delete(user_id, "shuo_active", chat_id=chat_id)
+        await session_manager.delete(user_id, "shuo_step", chat_id=chat_id)
 
         # 发布说说
         await publish_shuo(update, None, content)
 
     elif step == SESSION_WAITING_CONFIG:
         # 处理配置值输入
-        config_type = await session_manager.get(user_id, "shuo_config_type")
+        config_type = await session_manager.get(user_id,
+                                                "shuo_config_type",
+                                                None,
+                                                chat_id=chat_id)
         value = update.message.text.strip()
 
         # 清除会话状态
-        await session_manager.delete(user_id, "shuo_active")
-        await session_manager.delete(user_id, "shuo_step")
-        await session_manager.delete(user_id, "shuo_config_type")
+        await session_manager.delete(user_id, "shuo_active", chat_id=chat_id)
+        await session_manager.delete(user_id, "shuo_step", chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "shuo_config_type",
+                                     chat_id=chat_id)
 
         # 更新配置
         await update_config(update, None, config_type, value)
@@ -1005,8 +1056,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.strip()
 
         # 清除会话状态
-        await session_manager.delete(user_id, "shuo_active")
-        await session_manager.delete(user_id, "shuo_step")
+        await session_manager.delete(user_id, "shuo_active", chat_id=chat_id)
+        await session_manager.delete(user_id, "shuo_step", chat_id=chat_id)
 
         # 解析输入的 key
         # 支持空格分隔和换行分隔

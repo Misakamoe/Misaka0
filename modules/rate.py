@@ -478,6 +478,7 @@ async def handle_callback_query(update: Update,
     """处理按钮回调查询"""
     query = update.callback_query
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 权限检查已在框架层面处理
 
@@ -500,8 +501,14 @@ async def handle_callback_query(update: Update,
             return
 
         # 设置会话状态，等待用户输入 API 密钥
-        await session_manager.set(user_id, "rate_waiting_for", "api_key")
-        await session_manager.set(user_id, "rate_active", True)
+        await session_manager.set(user_id,
+                                  "rate_waiting_for",
+                                  "api_key",
+                                  chat_id=chat_id)
+        await session_manager.set(user_id,
+                                  "rate_active",
+                                  True,
+                                  chat_id=chat_id)
 
         # 发送提示消息
         keyboard = [[
@@ -524,8 +531,14 @@ async def handle_callback_query(update: Update,
             return
 
         # 设置会话状态，等待用户输入更新间隔
-        await session_manager.set(user_id, "rate_waiting_for", "interval")
-        await session_manager.set(user_id, "rate_active", True)
+        await session_manager.set(user_id,
+                                  "rate_waiting_for",
+                                  "interval",
+                                  chat_id=chat_id)
+        await session_manager.set(user_id,
+                                  "rate_active",
+                                  True,
+                                  chat_id=chat_id)
 
         # 发送提示消息
         keyboard = [[
@@ -544,8 +557,12 @@ async def handle_callback_query(update: Update,
         session_manager = context.bot_data.get("session_manager")
         if session_manager:
             # 清除会话状态
-            await session_manager.delete(user_id, "rate_waiting_for")
-            await session_manager.delete(user_id, "rate_active")
+            await session_manager.delete(user_id,
+                                         "rate_waiting_for",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "rate_active",
+                                         chat_id=chat_id)
 
         # 显示当前配置
         config = load_config()
@@ -588,6 +605,7 @@ async def handle_rate_input(update: Update,
         return
 
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 检查权限 - 仅超级管理员可用
     if not _module_interface.config_manager.is_admin(user_id):
@@ -599,20 +617,28 @@ async def handle_rate_input(update: Update,
         return
 
     # 检查是否是 rate 模块的活跃会话
-    is_active = await session_manager.get(user_id, "rate_active", False)
+    is_active = await session_manager.get(user_id,
+                                          "rate_active",
+                                          False,
+                                          chat_id=chat_id)
     if not is_active:
         return
 
     # 获取会话状态
-    waiting_for = await session_manager.get(user_id, "rate_waiting_for")
+    waiting_for = await session_manager.get(user_id,
+                                            "rate_waiting_for",
+                                            None,
+                                            chat_id=chat_id)
 
     if waiting_for == "api_key":
         # 获取用户输入的 API 密钥
         api_key = message.text.strip()
 
         # 清除会话状态
-        await session_manager.delete(user_id, "rate_waiting_for")
-        await session_manager.delete(user_id, "rate_active")
+        await session_manager.delete(user_id,
+                                     "rate_waiting_for",
+                                     chat_id=chat_id)
+        await session_manager.delete(user_id, "rate_active", chat_id=chat_id)
 
         # 更新配置
         config = load_config()
@@ -640,8 +666,12 @@ async def handle_rate_input(update: Update,
             interval = int(message.text.strip())
 
             # 清除会话状态
-            await session_manager.delete(user_id, "rate_waiting_for")
-            await session_manager.delete(user_id, "rate_active")
+            await session_manager.delete(user_id,
+                                         "rate_waiting_for",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "rate_active",
+                                         chat_id=chat_id)
 
             if interval < 600:  # 设置最小间隔，如10分钟
                 await message.reply_text("⚠️ 更新间隔不能小于 600 秒(10 分钟)")
@@ -679,8 +709,12 @@ async def handle_rate_input(update: Update,
             await message.reply_text("❌ 请输入有效的数字作为更新间隔")
 
             # 清除会话状态
-            await session_manager.delete(user_id, "rate_waiting_for")
-            await session_manager.delete(user_id, "rate_active")
+            await session_manager.delete(user_id,
+                                         "rate_waiting_for",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "rate_active",
+                                         chat_id=chat_id)
 
 
 async def setup(interface):

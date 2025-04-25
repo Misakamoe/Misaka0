@@ -359,7 +359,7 @@ class BotEngine:
             added_time = datetime.fromtimestamp(group_info.get(
                 "added_at", 0)).strftime("%Y-%m-%d %H:%M:%S")
             groups_message += f"🔹 *群组 ID:* `{group_id}`\n"
-            groups_message += f"  👤 添加者: {group_info.get('added_by', '未知')}\n"
+            groups_message += f"  👤 添加者: `{group_info.get('added_by', '未知')}`\n"
             groups_message += f"  ⏰ 添加时间: {added_time}\n\n"
 
         try:
@@ -394,7 +394,7 @@ class BotEngine:
                     await message_obj.reply_text(f"❌ 添加当前群组到白名单失败")
                     self.logger.error(f"添加群组 {chat.id} 到白名单失败")
             else:
-                await message_obj.reply_text("当前不在群组中。用法: /addgroup [群组 ID]")
+                await message_obj.reply_text("当前不在群组中\n用法: /addgroup [群组 ID]")
             return
 
         # 带参数时，添加指定群组

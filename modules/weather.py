@@ -594,10 +594,19 @@ async def start_set_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "System error, please contact administrator")
         return
 
+    # 获取聊天ID
+    chat_id = update.effective_chat.id
+
     # 设置会话状态
-    await session_manager.set(user_id, "weather_active", True)
-    await session_manager.set(user_id, "weather_step", SESSION_WAITING_API_KEY)
-    await session_manager.set(user_id, "weather_source", source)
+    await session_manager.set(user_id, "weather_active", True, chat_id=chat_id)
+    await session_manager.set(user_id,
+                              "weather_step",
+                              SESSION_WAITING_API_KEY,
+                              chat_id=chat_id)
+    await session_manager.set(user_id,
+                              "weather_source",
+                              source,
+                              chat_id=chat_id)
 
     # 创建返回按钮
     keyboard = [[
@@ -657,6 +666,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
+    chat_id = update.effective_chat.id
 
     # 确保回调查询得到响应
     await query.answer()
@@ -665,18 +675,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == f"{CALLBACK_PREFIX}back_to_main":
         # 返回主设置面板
         if session_manager:
-            await session_manager.delete(user_id, "weather_active")
-            await session_manager.delete(user_id, "weather_step")
-            await session_manager.delete(user_id, "weather_source")
+            await session_manager.delete(user_id,
+                                         "weather_active",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "weather_step",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "weather_source",
+                                         chat_id=chat_id)
 
         await show_settings_panel(update, context)
 
     elif data == f"{CALLBACK_PREFIX}back_to_api":
         # 返回 API 设置菜单
         if session_manager:
-            await session_manager.delete(user_id, "weather_active")
-            await session_manager.delete(user_id, "weather_step")
-            await session_manager.delete(user_id, "weather_source")
+            await session_manager.delete(user_id,
+                                         "weather_active",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "weather_step",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "weather_source",
+                                         chat_id=chat_id)
 
         await show_api_menu(update, context)
 
@@ -712,29 +734,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     # 检查是否有活动会话
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     session_manager = context.bot_data.get("session_manager")
 
     if not session_manager:
         return
 
     # 检查是否是天气模块的活跃会话
-    is_active = await session_manager.get(user_id, "weather_active", False)
+    is_active = await session_manager.get(user_id,
+                                          "weather_active",
+                                          False,
+                                          chat_id=chat_id)
     if not is_active:
         return
 
     # 获取当前步骤
-    step = await session_manager.get(user_id, "weather_step")
+    step = await session_manager.get(user_id,
+                                     "weather_step",
+                                     None,
+                                     chat_id=chat_id)
 
     # 处理不同步骤的输入
     if step == SESSION_WAITING_API_KEY:
         # 处理 API 密钥输入
-        source = await session_manager.get(user_id, "weather_source")
+        source = await session_manager.get(user_id,
+                                           "weather_source",
+                                           None,
+                                           chat_id=chat_id)
         api_key = update.message.text.strip()
 
         # 清除会话状态
-        await session_manager.delete(user_id, "weather_active")
-        await session_manager.delete(user_id, "weather_step")
-        await session_manager.delete(user_id, "weather_source")
+        await session_manager.delete(user_id,
+                                     "weather_active",
+                                     chat_id=chat_id)
+        await session_manager.delete(user_id, "weather_step", chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "weather_source",
+                                     chat_id=chat_id)
 
         # 设置 API 密钥
         _state["api_keys"][source] = api_key

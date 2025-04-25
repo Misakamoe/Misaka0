@@ -321,10 +321,14 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 设置会话状态，等待用户输入 URL
-    await session_manager.set(user_id, "rss_active", True)
-    await session_manager.set(user_id, "rss_step", SESSION_ADD_URL)
+    await session_manager.set(user_id, "rss_active", True, chat_id=chat_id)
+    await session_manager.set(user_id,
+                              "rss_step",
+                              SESSION_ADD_URL,
+                              chat_id=chat_id)
 
     # 创建返回按钮
     keyboard = [[
@@ -373,8 +377,8 @@ async def handle_add_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await message.reply_text("⚠️ 已经订阅了该 RSS 源", reply_markup=reply_markup)
 
         # 清除会话状态
-        await session_manager.delete(user_id, "rss_active")
-        await session_manager.delete(user_id, "rss_step")
+        await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
+        await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
         return
 
     # 验证并获取 RSS 源信息
@@ -396,17 +400,25 @@ async def handle_add_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                            reply_markup=reply_markup)
 
             # 清除会话状态
-            await session_manager.delete(user_id, "rss_active")
-            await session_manager.delete(user_id, "rss_step")
+            await session_manager.delete(user_id,
+                                         "rss_active",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
             return
 
         # 获取源标题
         feed_title = feed.get('feed', {}).get('title', url)
 
         # 保存 URL 并进入下一步（输入自定义标题）
-        await session_manager.set(user_id, "rss_url", url)
-        await session_manager.set(user_id, "rss_feed_title", feed_title)
-        await session_manager.set(user_id, "rss_step", SESSION_ADD_TITLE)
+        await session_manager.set(user_id, "rss_url", url, chat_id=chat_id)
+        await session_manager.set(user_id,
+                                  "rss_feed_title",
+                                  feed_title,
+                                  chat_id=chat_id)
+        await session_manager.set(user_id,
+                                  "rss_step",
+                                  SESSION_ADD_TITLE,
+                                  chat_id=chat_id)
 
         # 创建按钮（使用默认标题或返回）
         keyboard = [[
@@ -439,8 +451,8 @@ async def handle_add_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                  reply_markup=reply_markup)
 
         # 清除会话状态
-        await session_manager.delete(user_id, "rss_active")
-        await session_manager.delete(user_id, "rss_step")
+        await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
+        await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
 
 
 async def handle_add_title(update: Update,
@@ -474,8 +486,11 @@ async def handle_add_title(update: Update,
         return
 
     # 获取保存的 URL 和默认标题
-    url = await session_manager.get(user_id, "rss_url")
-    feed_title = await session_manager.get(user_id, "rss_feed_title")
+    url = await session_manager.get(user_id, "rss_url", None, chat_id=chat_id)
+    feed_title = await session_manager.get(user_id,
+                                           "rss_feed_title",
+                                           None,
+                                           chat_id=chat_id)
 
     if not url:
         if callback_query:
@@ -517,10 +532,10 @@ async def handle_add_title(update: Update,
     save_config()
 
     # 清除会话状态
-    await session_manager.delete(user_id, "rss_active")
-    await session_manager.delete(user_id, "rss_step")
-    await session_manager.delete(user_id, "rss_url")
-    await session_manager.delete(user_id, "rss_feed_title")
+    await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
+    await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
+    await session_manager.delete(user_id, "rss_url", chat_id=chat_id)
+    await session_manager.delete(user_id, "rss_feed_title", chat_id=chat_id)
 
     # 创建返回按钮
     keyboard = [[
@@ -984,6 +999,8 @@ async def handle_callback_query(update: Update,
     """处理按钮回调查询"""
     callback_query = update.callback_query
     data = callback_query.data
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 检查是否是 RSS 模块的回调
     if not data.startswith(CALLBACK_PREFIX):
@@ -1037,19 +1054,31 @@ async def handle_callback_query(update: Update,
             await rss_health_command(update, context)
         elif action == "cancel":
             # 取消当前操作
-            user_id = update.effective_user.id
             session_manager = context.bot_data.get("session_manager")
 
             if session_manager:
                 # 获取当前步骤
-                step = await session_manager.get(user_id, "rss_step")
+                step = await session_manager.get(user_id,
+                                                 "rss_step",
+                                                 None,
+                                                 chat_id=chat_id)
 
                 # 清除会话状态
-                await session_manager.delete(user_id, "rss_active")
-                await session_manager.delete(user_id, "rss_step")
-                await session_manager.delete(user_id, "rss_url")
-                await session_manager.delete(user_id, "rss_feed_title")
-                await session_manager.delete(user_id, "rss_subscriptions")
+                await session_manager.delete(user_id,
+                                             "rss_active",
+                                             chat_id=chat_id)
+                await session_manager.delete(user_id,
+                                             "rss_step",
+                                             chat_id=chat_id)
+                await session_manager.delete(user_id,
+                                             "rss_url",
+                                             chat_id=chat_id)
+                await session_manager.delete(user_id,
+                                             "rss_feed_title",
+                                             chat_id=chat_id)
+                await session_manager.delete(user_id,
+                                             "rss_subscriptions",
+                                             chat_id=chat_id)
 
                 # 根据当前步骤决定返回到哪个页面
                 if step == SESSION_REMOVE:
@@ -1066,7 +1095,6 @@ async def handle_callback_query(update: Update,
             await handle_add_title(update, context)
         elif action == "remove":
             # 启动删除订阅会话
-            user_id = update.effective_user.id
             session_manager = context.bot_data.get("session_manager")
 
             if not session_manager:
@@ -1074,18 +1102,26 @@ async def handle_callback_query(update: Update,
                 return
 
             # 设置会话状态，等待用户输入要删除的序号
-            await session_manager.set(user_id, "rss_active", True)
-            await session_manager.set(user_id, "rss_step", SESSION_REMOVE)
+            await session_manager.set(user_id,
+                                      "rss_active",
+                                      True,
+                                      chat_id=chat_id)
+            await session_manager.set(user_id,
+                                      "rss_step",
+                                      SESSION_REMOVE,
+                                      chat_id=chat_id)
 
             # 获取当前聊天的订阅列表
-            chat_id = str(update.effective_chat.id)
+            chat_id_str = str(update.effective_chat.id)
             chat_type = "private" if update.effective_chat.type == "private" else "group"
             subscriptions = _config["subscriptions"][chat_type].get(
-                chat_id, [])
+                chat_id_str, [])
 
             # 保存订阅列表到会话
-            await session_manager.set(user_id, "rss_subscriptions",
-                                      subscriptions)
+            await session_manager.set(user_id,
+                                      "rss_subscriptions",
+                                      subscriptions,
+                                      chat_id=chat_id)
 
             # 创建返回按钮
             keyboard = [[
@@ -1124,7 +1160,8 @@ async def handle_remove_input(update: Update,
     """处理用户输入的删除序号"""
     message = update.message
     user_id = update.effective_user.id
-    chat_id = str(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    chat_id_str = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
 
     # 获取会话管理器
@@ -1134,14 +1171,19 @@ async def handle_remove_input(update: Update,
         return
 
     # 获取保存的订阅列表
-    subscriptions = await session_manager.get(user_id, "rss_subscriptions")
+    subscriptions = await session_manager.get(user_id,
+                                              "rss_subscriptions",
+                                              None,
+                                              chat_id=chat_id)
     if not subscriptions:
         await message.reply_text("⚠️ 会话已过期或没有订阅，请重新开始")
 
         # 清除会话状态
-        await session_manager.delete(user_id, "rss_active")
-        await session_manager.delete(user_id, "rss_step")
-        await session_manager.delete(user_id, "rss_subscriptions")
+        await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
+        await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "rss_subscriptions",
+                                     chat_id=chat_id)
         return
 
     # 解析输入的序号
@@ -1209,9 +1251,9 @@ async def handle_remove_input(update: Update,
     save_config()
 
     # 清除会话状态
-    await session_manager.delete(user_id, "rss_active")
-    await session_manager.delete(user_id, "rss_step")
-    await session_manager.delete(user_id, "rss_subscriptions")
+    await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
+    await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
+    await session_manager.delete(user_id, "rss_subscriptions", chat_id=chat_id)
 
     # 创建返回按钮
     keyboard = [[
@@ -1235,18 +1277,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户消息（用于会话流程）"""
     # 检查是否有活动会话
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     session_manager = context.bot_data.get("session_manager")
 
     if not session_manager:
         return
 
     # 检查是否是 RSS 模块的活动会话
-    is_active = await session_manager.get(user_id, "rss_active")
+    is_active = await session_manager.get(user_id,
+                                          "rss_active",
+                                          False,
+                                          chat_id=chat_id)
     if not is_active:
         return
 
     # 获取当前步骤
-    step = await session_manager.get(user_id, "rss_step")
+    step = await session_manager.get(user_id,
+                                     "rss_step",
+                                     None,
+                                     chat_id=chat_id)
 
     # 处理不同步骤的输入
     if step == SESSION_ADD_URL:
