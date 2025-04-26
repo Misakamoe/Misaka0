@@ -118,13 +118,17 @@ class PeriodicReminder(ReminderBase):
                  chat_type,
                  interval,
                  first_reminder_time=None,
-                 title=None):
+                 title=None,
+                 pattern=None,
+                 pattern_type=None):
         super().__init__(reminder_id, message, creator_id, creator_name,
                          chat_id, chat_type, title)
         self.interval = interval
         self.last_reminded = None
         self.first_reminder_time = first_reminder_time  # 第一次提醒的时间戳
         self.type = "periodic"
+        self.pattern = pattern  # 存储原始模式，如 "25日"
+        self.pattern_type = pattern_type  # 模式类型：monthly, yearly, daily, standard
 
     def to_dict(self):
         data = super().to_dict()
@@ -132,7 +136,9 @@ class PeriodicReminder(ReminderBase):
             "type": "periodic",
             "interval": self.interval,
             "last_reminded": self.last_reminded,
-            "first_reminder_time": self.first_reminder_time
+            "first_reminder_time": self.first_reminder_time,
+            "pattern": self.pattern,
+            "pattern_type": self.pattern_type
         })
         return data
 
@@ -142,7 +148,8 @@ class PeriodicReminder(ReminderBase):
                        data.get("creator_name", "未知用户"),
                        data.get("chat_id", "unknown"),
                        data.get("chat_type", "unknown"), data["interval"],
-                       data.get("first_reminder_time"), data.get("title"))
+                       data.get("first_reminder_time"), data.get("title"),
+                       data.get("pattern"), data.get("pattern_type"))
         reminder.created_at = data.get("created_at", time.time())
         reminder.enabled = data.get("enabled", True)
         reminder.task_running = data.get("task_running", False)
@@ -216,8 +223,19 @@ class PeriodicReminder(ReminderBase):
 
                 # 计算等待时间
                 now = time.time()
-                elapsed_time = now - (self.last_reminded or self.created_at)
-                wait_time = max(0, self.interval - elapsed_time)
+
+                # 如果有特殊模式类型且已设置下一次提醒时间，直接使用
+                if self.pattern_type in [
+                        "monthly", "yearly", "daily"
+                ] and self.first_reminder_time and self.first_reminder_time > now:
+                    wait_time = self.first_reminder_time - now
+                    module_interface.logger.debug(
+                        f"提醒 {self.id} 使用模式计算的下一次提醒时间，将在 {wait_time:.1f} 秒后发送")
+                else:
+                    # 否则使用标准间隔计算
+                    elapsed_time = now - (self.last_reminded
+                                          or self.created_at)
+                    wait_time = max(0, self.interval - elapsed_time)
 
                 if wait_time > 0:
                     module_interface.logger.debug(
@@ -246,8 +264,126 @@ class PeriodicReminder(ReminderBase):
                     module_interface.logger.debug(
                         f"已发送周期性提醒 {self.id} 到聊天 {self.chat_id}")
 
-                # 更新最后提醒时间并保存
+                # 更新最后提醒时间
                 self.last_reminded = time.time()
+
+                # 如果是特殊模式类型（monthly, yearly, daily），重新计算下一次提醒时间
+                if self.pattern_type in ["monthly", "yearly", "daily"]:
+                    now = datetime.now(pytz.timezone(DEFAULT_TIMEZONE))
+                    next_time = None
+
+                    if self.pattern_type == "monthly":
+                        # 获取模式中的日期
+                        day = int(re.match(r"(\d+)日$", self.pattern).group(1))
+
+                        # 计算下个月的这个日期
+                        if now.month == 12:
+                            next_month = 1
+                            next_year = now.year + 1
+                        else:
+                            next_month = now.month + 1
+                            next_year = now.year
+
+                        try:
+                            # 尝试创建下个月的日期（处理月份天数不同的情况）
+                            next_time = datetime(next_year, next_month, day, 0,
+                                                 0, 0)
+                            next_time = pytz.timezone(
+                                DEFAULT_TIMEZONE).localize(next_time)
+                            self.first_reminder_time = next_time.timestamp()
+                            module_interface.logger.debug(
+                                f"已重新计算周期性提醒 {self.id} 的下一次提醒时间: {next_time}")
+                        except ValueError:
+                            # 如果日期无效（例如2月30日），使用月末
+                            if day > 28:  # 可能是月末日期
+                                # 获取下个月的最后一天
+                                if next_month == 12:
+                                    last_day = 31
+                                else:
+                                    # 计算下下个月的第一天，然后回退一天
+                                    next_next_month = next_month + 1 if next_month < 12 else 1
+                                    next_next_year = next_year if next_month < 12 else next_year + 1
+                                    first_day_next_next_month = datetime(
+                                        next_next_year, next_next_month, 1)
+                                    last_day_next_month = first_day_next_next_month - timedelta(
+                                        days=1)
+                                    last_day = last_day_next_month.day
+
+                                next_time = datetime(next_year, next_month,
+                                                     last_day, 0, 0, 0)
+                                next_time = pytz.timezone(
+                                    DEFAULT_TIMEZONE).localize(next_time)
+                                self.first_reminder_time = next_time.timestamp(
+                                )
+                                module_interface.logger.debug(
+                                    f"已调整周期性提醒 {self.id} 的下一次提醒时间到月末: {next_time}"
+                                )
+
+                    elif self.pattern_type == "yearly":
+                        # 获取模式中的月和日
+                        match = re.match(
+                            r"(\d+)月(\d+)日(?:(\d+)[:](\d+)(?:[:](\d+))?)?$",
+                            self.pattern)
+                        if match:
+                            month, day = int(match.group(1)), int(
+                                match.group(2))
+                            hour, minute, second = 0, 0, 0
+
+                            if match.group(3):
+                                hour = int(match.group(3))
+                            if match.group(4):
+                                minute = int(match.group(4))
+                            if match.group(5):
+                                second = int(match.group(5))
+
+                            try:
+                                # 计算明年的这个日期
+                                next_time = datetime(now.year + 1, month, day,
+                                                     hour, minute, second)
+                                next_time = pytz.timezone(
+                                    DEFAULT_TIMEZONE).localize(next_time)
+                                self.first_reminder_time = next_time.timestamp(
+                                )
+                                module_interface.logger.debug(
+                                    f"已重新计算周期性提醒 {self.id} 的下一次提醒时间: {next_time}"
+                                )
+                            except ValueError:
+                                # 处理2月29日的情况（闰年问题）
+                                if month == 2 and day == 29:
+                                    # 如果明年不是闰年，使用2月28日
+                                    next_time = datetime(
+                                        now.year + 1, 2, 28, hour, minute,
+                                        second)
+                                    next_time = pytz.timezone(
+                                        DEFAULT_TIMEZONE).localize(next_time)
+                                    self.first_reminder_time = next_time.timestamp(
+                                    )
+                                    module_interface.logger.debug(
+                                        f"已调整周期性提醒 {self.id} 的下一次提醒时间（非闰年）: {next_time}"
+                                    )
+
+                    elif self.pattern_type == "daily":
+                        # 获取模式中的时间
+                        match = re.match(
+                            r"(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$",
+                            self.pattern)
+                        if match:
+                            hour, minute = int(match.group(1)), int(
+                                match.group(2))
+                            second = int(
+                                match.group(3)) if match.group(3) else 0
+
+                            # 计算明天的这个时间
+                            tomorrow = now + timedelta(days=1)
+                            next_time = tomorrow.replace(hour=hour,
+                                                         minute=minute,
+                                                         second=second,
+                                                         microsecond=0)
+                            self.first_reminder_time = next_time.timestamp()
+                            module_interface.logger.debug(
+                                f"已重新计算周期性提醒 {self.id} 的下一次提醒时间: {next_time}")
+
+                # 保存更新
                 save_reminders(module_interface)
 
         except asyncio.CancelledError:
@@ -486,11 +622,20 @@ def parse_interval(interval_str):
                 # 如果今年的日期已过，使用明年的
                 next_reminder_time = next_year_tz.timestamp()
 
-            # 返回一年的秒数和第一次提醒时间
+            # 返回一年的秒数、第一次提醒时间、原始模式和模式类型
             return {
-                "interval": 31536000,
-                "first_time": next_reminder_time
-            }  # 365 * 24 * 60 * 60
+                "interval": 31536000,  # 365 * 24 * 60 * 60
+                "first_time": next_reminder_time,
+                "pattern": interval_str,
+                "pattern_type": "yearly",
+                "pattern_data": {
+                    "month": month,
+                    "day": day,
+                    "hour": hour,
+                    "minute": minute,
+                    "second": second
+                }
+            }
         except ValueError:
             # 无效日期
             return None
@@ -522,11 +667,16 @@ def parse_interval(interval_str):
                 # 如果本月的日期已过，使用下个月的
                 next_reminder_time = next_month_tz.timestamp()
 
-            # 返回一个月的秒数和第一次提醒时间
+            # 返回一个月的秒数、第一次提醒时间、原始模式和模式类型
             return {
-                "interval": 2592000,
-                "first_time": next_reminder_time
-            }  # 30 * 24 * 60 * 60
+                "interval": 2592000,  # 30 * 24 * 60 * 60
+                "first_time": next_reminder_time,
+                "pattern": interval_str,
+                "pattern_type": "monthly",
+                "pattern_data": {
+                    "day": day
+                }
+            }
         except ValueError:
             # 无效日期
             return None
@@ -548,11 +698,18 @@ def parse_interval(interval_str):
             if today < now:
                 today = today + timedelta(days=1)
 
-            # 返回一天的秒数和第一次提醒时间
+            # 返回一天的秒数、第一次提醒时间、原始模式和模式类型
             return {
-                "interval": 86400,
-                "first_time": today.timestamp()
-            }  # 24 * 60 * 60
+                "interval": 86400,  # 24 * 60 * 60
+                "first_time": today.timestamp(),
+                "pattern": interval_str,
+                "pattern_type": "daily",
+                "pattern_data": {
+                    "hour": hour,
+                    "minute": minute,
+                    "second": second
+                }
+            }
         except ValueError:
             # 无效时间
             return None
@@ -982,10 +1139,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_reminder_input(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """处理用户输入的提醒信息"""
-    # 只处理私聊消息
-    if update.effective_chat.type != "private":
-        return
-
+    # 处理所有聊天类型的消息
     message = update.message
     if not message:
         return
@@ -1039,20 +1193,26 @@ async def handle_reminder_input(update: Update,
 
             # 处理不同格式的返回值
             first_reminder_time = None
+            pattern = None
+            pattern_type = None
+
             if isinstance(interval_result, dict):
-                # 日期格式返回字典 {"interval": 秒数, "first_time": 时间戳}
+                # 日期格式返回字典 {"interval": 秒数, "first_time": 时间戳, "pattern": 原始模式, "pattern_type": 模式类型}
                 interval_seconds = interval_result["interval"]
                 first_reminder_time = interval_result["first_time"]
+                pattern = interval_result.get("pattern")
+                pattern_type = interval_result.get("pattern_type")
             else:
                 # 标准时间间隔格式返回秒数
                 interval_seconds = interval_result
+                pattern_type = "standard"
 
             # 检查最小间隔
             if interval_seconds < MIN_INTERVAL:
                 await message.reply_text(f"⚠️ 提醒间隔太短，最小间隔为 {MIN_INTERVAL} 秒")
                 return
 
-            # 保存间隔、原始字符串和第一次提醒时间并进入下一步
+            # 保存间隔、原始字符串、第一次提醒时间和模式信息并进入下一步
             await session_manager.set(user_id,
                                       "reminder_interval",
                                       interval_seconds,
@@ -1065,6 +1225,16 @@ async def handle_reminder_input(update: Update,
                 await session_manager.set(user_id,
                                           "reminder_first_time",
                                           first_reminder_time,
+                                          chat_id=chat_id)
+            if pattern:
+                await session_manager.set(user_id,
+                                          "reminder_pattern",
+                                          pattern,
+                                          chat_id=chat_id)
+            if pattern_type:
+                await session_manager.set(user_id,
+                                          "reminder_pattern_type",
+                                          pattern_type,
                                           chat_id=chat_id)
             await session_manager.set(user_id,
                                       "reminder_step",
@@ -1088,13 +1258,21 @@ async def handle_reminder_input(update: Update,
                 await message.reply_text("⚠️ 提醒内容不能为空")
                 return
 
-            # 获取之前保存的间隔和第一次提醒时间
+            # 获取之前保存的间隔、第一次提醒时间和模式信息
             interval_seconds = await session_manager.get(user_id,
                                                          "reminder_interval",
                                                          None,
                                                          chat_id=chat_id)
             first_reminder_time = await session_manager.get(
                 user_id, "reminder_first_time", None, chat_id=chat_id)
+            pattern = await session_manager.get(user_id,
+                                                "reminder_pattern",
+                                                None,
+                                                chat_id=chat_id)
+            pattern_type = await session_manager.get(user_id,
+                                                     "reminder_pattern_type",
+                                                     "standard",
+                                                     chat_id=chat_id)
 
             # 清除会话状态
             await session_manager.delete(user_id,
@@ -1113,6 +1291,12 @@ async def handle_reminder_input(update: Update,
                                          "reminder_first_time",
                                          chat_id=chat_id)
             await session_manager.delete(user_id,
+                                         "reminder_pattern",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
+                                         "reminder_pattern_type",
+                                         chat_id=chat_id)
+            await session_manager.delete(user_id,
                                          "reminder_active",
                                          chat_id=chat_id)
 
@@ -1127,7 +1311,7 @@ async def handle_reminder_input(update: Update,
                 update.effective_user.full_name
                 or update.effective_user.username or "未知用户", chat_id_str,
                 update.effective_chat.type, interval_seconds,
-                first_reminder_time)
+                first_reminder_time, None, pattern, pattern_type)
 
             # 初始化聊天记录
             if chat_id_str not in _tasks:
@@ -1160,7 +1344,7 @@ async def handle_reminder_input(update: Update,
                 f"📝 *内容:* {reminder_message}\n"
                 f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
                 f"我会按照 {interval_text} 发送提醒\n"
-                f"如需删除，请使用 `/remind` 命令中的删除功能",
+                f"如需删除请在 /remind 面板中操作",
                 parse_mode="MARKDOWN")
 
             interface.logger.info(
@@ -1290,7 +1474,7 @@ async def handle_reminder_input(update: Update,
                 f"📝 *内容:* {reminder_message}\n"
                 f"🆔 *提醒 ID:* `{reminder_id}`\n\n"
                 f"到时间我会发送一次提醒\n"
-                f"如需删除，请使用 `/remind` 命令中的删除功能",
+                f"如需删除请在 /remind 面板中操作",
                 parse_mode="MARKDOWN")
 
             interface.logger.info(
@@ -1690,10 +1874,9 @@ async def setup(interface):
         admin_level=False  # 所有用户都可以使用
     )
 
-    # 注册文本输入处理器
-    text_input_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-        handle_reminder_input)
+    # 注册文本输入处理器，处理所有聊天类型的消息
+    text_input_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                        handle_reminder_input)
     await interface.register_handler(text_input_handler, group=4)
 
     # 加载提醒数据（优先从框架状态加载，如果没有则从配置文件加载）

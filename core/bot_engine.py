@@ -123,10 +123,26 @@ class BotEngine:
         self.application.bot_data["module_manager"] = self.module_manager
 
         # 注册群组成员变更处理器
-        from telegram.ext import ChatMemberHandler
+        from telegram.ext import ChatMemberHandler, CallbackQueryHandler
         self.application.add_handler(
             ChatMemberHandler(self._handle_my_chat_member,
                               ChatMemberHandler.MY_CHAT_MEMBER))
+
+        # 移除调试回调处理器
+
+        # 注册群组管理回调处理器
+        self.application.add_handler(
+            CallbackQueryHandler(self._handle_select_remove_group_callback,
+                                 pattern=r"^select_remove_group$"))
+        self.application.add_handler(
+            CallbackQueryHandler(self._handle_remove_group_callback,
+                                 pattern=r"^remove_group_-?\d+$"))
+        self.application.add_handler(
+            CallbackQueryHandler(self._handle_confirm_remove_group_callback,
+                                 pattern=r"^confirm_remove_group_-?\d+$"))
+        self.application.add_handler(
+            CallbackQueryHandler(self._handle_cancel_remove_group_callback,
+                                 pattern=r"^cancel_remove_group$"))
 
         # 注册错误处理器
         self.application.add_error_handler(self.handle_error)
@@ -319,9 +335,14 @@ class BotEngine:
 
             # 检查添加者是否是超级管理员
             if self.config_manager.is_admin(user.id):
+                # 获取群组名称
+                group_name = chat.title
+
                 # 添加到允许的群组
-                self.config_manager.add_allowed_group(chat.id, user.id)
-                self.logger.info(f"Bot 被超级管理员 {user.id} 添加到群组 {chat.id}")
+                self.config_manager.add_allowed_group(chat.id, user.id,
+                                                      group_name)
+                self.logger.info(
+                    f"Bot 被超级管理员 {user.id} 添加到群组 {chat.id} ({group_name})")
                 await context.bot.send_message(chat_id=chat.id,
                                                text="✅ Bot 已被授权在此群组使用")
             else:
@@ -344,31 +365,267 @@ class BotEngine:
 
     async def _list_allowed_groups_command(self, update, context):
         """列出所有允许的群组"""
-        # 获取消息对象（可能是新消息或编辑的消息）
-        message_obj = update.message or update.edited_message
+        # 检查是否是回调查询
+        is_callback = update.callback_query is not None
+
+        # 获取消息对象或回调查询对象
+        if is_callback:
+            query = update.callback_query
+            # 如果是回调查询，我们将编辑现有消息而不是发送新消息
+            self.logger.info("通过回调查询显示群组列表")
+        else:
+            # 获取消息对象（可能是新消息或编辑的消息）
+            message_obj = update.message or update.edited_message
+            if not message_obj:
+                self.logger.error("无法获取消息对象")
+                return
+            self.logger.info("通过命令显示群组列表")
 
         allowed_groups = self.config_manager.list_allowed_groups()
 
         if not allowed_groups:
-            await message_obj.reply_text("当前没有允许的群组")
+            if is_callback:
+                await query.edit_message_text("当前没有允许的群组")
+            else:
+                await message_obj.reply_text("当前没有允许的群组")
             return
 
-        groups_message = "📋 *允许使用 Bot 的群组列表:*\n\n"
+        groups_message = "📋 允许使用 Bot 的群组列表:\n\n"
 
-        for group_id, group_info in allowed_groups.items():
+        # 创建按钮列表
+        keyboard = []
+
+        # 为所有群组添加编号
+        for i, (group_id, group_info) in enumerate(allowed_groups.items(), 1):
             added_time = datetime.fromtimestamp(group_info.get(
-                "added_at", 0)).strftime("%Y-%m-%d %H:%M:%S")
-            groups_message += f"🔹 *群组 ID:* `{group_id}`\n"
-            groups_message += f"  👤 添加者: `{group_info.get('added_by', '未知')}`\n"
-            groups_message += f"  ⏰ 添加时间: {added_time}\n\n"
+                "added_at", 0)).strftime("%Y-%m-%d")
+
+            # 尝试获取群组名称
+            group_name = group_info.get("group_name", "")
+
+            groups_message += f"{i}. 群组 ID: {group_id}\n"
+            if group_name:
+                groups_message += f"   📝 群组名称: {group_name}\n"
+            groups_message += f"   👤 添加者: `{group_info.get('added_by', '未知')}`\n"
+            groups_message += f"   ⏰ 添加时间: {added_time}\n\n"
+
+        # 只添加一个移除按钮
+        if allowed_groups:
+            keyboard.append([
+                telegram.InlineKeyboardButton(
+                    "Remove Group", callback_data="select_remove_group")
+            ])
+
+        # 群组列表不需要返回按钮
+
+        reply_markup = telegram.InlineKeyboardMarkup(keyboard)
 
         try:
-            await message_obj.reply_text(groups_message, parse_mode="MARKDOWN")
+            if is_callback:
+                # 编辑现有消息
+                await query.edit_message_text(groups_message,
+                                              reply_markup=reply_markup,
+                                              disable_web_page_preview=True,
+                                              parse_mode="MARKDOWN")
+            else:
+                # 发送新消息
+                await message_obj.reply_text(groups_message,
+                                             reply_markup=reply_markup,
+                                             disable_web_page_preview=True,
+                                             parse_mode="MARKDOWN")
+        except Exception as e:
+            self.logger.error(f"发送群组列表失败: {e}")
+            # 如果发送失败，尝试发送错误消息
+            if is_callback:
+                try:
+                    await query.answer("发送群组列表失败")
+                except Exception:
+                    pass
+            else:
+                try:
+                    await message_obj.reply_text("发送群组列表失败")
+                except Exception:
+                    pass
+
+    async def _handle_remove_group_callback(self, update, context):
+        """处理移除群组的回调查询"""
+        query = update.callback_query
+        user_id = update.effective_user.id
+
+        # 检查是否是超级管理员
+        if not self.config_manager.is_admin(user_id):
+            await query.answer("⚠️ 您没有执行此操作的权限")
+            return
+
+        # 解析回调数据
+        try:
+            # 从 "remove_group_123456" 格式中提取群组 ID
+            prefix = "remove_group_"
+            if query.data.startswith(prefix):
+                group_id = int(query.data[len(prefix):])
+            else:
+                await query.answer("❌ 无效的回调数据格式")
+                return
+        except (ValueError, IndexError):
+            await query.answer("❌ 无效的回调数据")
+            return
+
+        # 检查群组是否在白名单中
+        if not self.config_manager.is_allowed_group(group_id):
+            await query.answer("❌ 群组不在白名单中")
+            return
+
+        # 获取群组信息
+        allowed_groups = self.config_manager.list_allowed_groups()
+        group_info = allowed_groups.get(str(group_id), {})
+        group_name = group_info.get("group_name", str(group_id))
+
+        # 构建确认消息
+        confirm_text = f"确定要移除以下群组吗？\n\n"
+        confirm_text += f"🔹 群组 ID: {group_id}\n"
+        if group_name and group_name != str(group_id):
+            confirm_text += f"📝 群组名称: {group_name}\n"
+
+        # 创建确认按钮
+        keyboard = [[
+            telegram.InlineKeyboardButton(
+                "◯ Confirm", callback_data=f"confirm_remove_group_{group_id}"),
+            telegram.InlineKeyboardButton("⨉ Cancel",
+                                          callback_data="cancel_remove_group")
+        ]]
+        reply_markup = telegram.InlineKeyboardMarkup(keyboard)
+
+        # 回应回调查询
+        await query.answer()
+
+        # 编辑消息
+        await query.edit_message_text(confirm_text, reply_markup=reply_markup)
+
+    async def _handle_confirm_remove_group_callback(self, update, context):
+        """处理确认移除群组的回调查询"""
+        query = update.callback_query
+        user_id = update.effective_user.id
+
+        # 检查是否是超级管理员
+        if not self.config_manager.is_admin(user_id):
+            await query.answer("⚠️ 您没有执行此操作的权限")
+            return
+
+        # 解析回调数据
+        try:
+            # 从 "confirm_remove_group_123456" 格式中提取群组 ID
+            prefix = "confirm_remove_group_"
+            if query.data.startswith(prefix):
+                group_id = int(query.data[len(prefix):])
+            else:
+                await query.answer("❌ 无效的回调数据格式")
+                return
+        except (ValueError, IndexError):
+            await query.answer("❌ 无效的回调数据")
+            return
+
+        # 检查群组是否在白名单中
+        if not self.config_manager.is_allowed_group(group_id):
+            await query.answer("❌ 群组不在白名单中")
+            await self._list_allowed_groups_command(update, context)
+            return
+
+        # 从白名单移除
+        removed = self.config_manager.remove_allowed_group(group_id)
+        if not removed:
+            await query.answer("❌ 从白名单移除群组失败")
+            return
+
+        # 尝试向目标群组发送通知
+        try:
+            await context.bot.send_message(chat_id=group_id,
+                                           text="⚠️ 此群组已从授权列表中移除")
+        except Exception as e:
+            self.logger.warning(f"向群组 {group_id} 发送退出通知失败: {e}")
+
+        # 尝试退出群组
+        try:
+            await context.bot.leave_chat(group_id)
+            self.logger.info(f"Bot 已成功退出群组 {group_id}")
+        except Exception as e:
+            self.logger.error(f"退出群组 {group_id} 失败: {e}")
+
+        # 回应回调查询
+        await query.answer("✅ 已成功移除群组")
+
+        # 更新群组列表
+        try:
+            await self._list_allowed_groups_command(update, context)
         except Exception:
-            # 如果 Markdown 解析失败，发送纯文本
-            from utils.formatter import TextFormatter
-            await message_obj.reply_text(
-                TextFormatter.markdown_to_plain(groups_message))
+            await query.edit_message_text("群组已成功移除，请重新执行 /listgroups 命令查看群组列表")
+
+    async def _handle_cancel_remove_group_callback(self, update, context):
+        """处理取消移除群组的回调查询"""
+        query = update.callback_query
+
+        # 回应回调查询
+        await query.answer("已取消操作")
+
+        # 返回群组列表
+        try:
+            await self._list_allowed_groups_command(update, context)
+        except Exception:
+            await query.edit_message_text("返回群组列表失败，请重新执行 /listgroups 命令")
+
+    async def _handle_select_remove_group_callback(self, update, context):
+        """处理选择移除群组的回调查询"""
+        query = update.callback_query
+        user_id = update.effective_user.id
+
+        # 检查是否是超级管理员
+        if not self.config_manager.is_admin(user_id):
+            await query.answer("⚠️ 您没有执行此操作的权限")
+            return
+
+        # 获取所有允许的群组
+        allowed_groups = self.config_manager.list_allowed_groups()
+
+        if not allowed_groups:
+            await query.answer("当前没有允许的群组")
+            return
+
+        # 构建选择消息
+        select_text = "请选择要移除的群组:\n\n"
+
+        # 创建按钮列表
+        keyboard = []
+
+        # 为所有群组添加编号和按钮
+        for i, (group_id, group_info) in enumerate(allowed_groups.items(), 1):
+            # 尝试获取群组名称
+            group_name = group_info.get("group_name", "")
+
+            # 按钮文本
+            button_text = f"{i}. {group_name}" if group_name else f"{i}. {group_id}"
+            # 如果按钮文本太长，截断它
+            if len(button_text) > 30:
+                button_text = button_text[:27] + "..."
+
+            keyboard.append([
+                telegram.InlineKeyboardButton(
+                    button_text, callback_data=f"remove_group_{group_id}")
+            ])
+
+        # 添加取消按钮
+        keyboard.append([
+            telegram.InlineKeyboardButton("⨉ Cancel",
+                                          callback_data="cancel_remove_group")
+        ])
+
+        reply_markup = telegram.InlineKeyboardMarkup(keyboard)
+
+        # 回应回调查询
+        await query.answer()
+
+        # 编辑消息
+        await query.edit_message_text(select_text, reply_markup=reply_markup)
+
+    # 已移除 _handle_back_to_groups_list_callback 和 _handle_debug_callback 方法，因为不再需要
 
     async def _add_allowed_group_command(self, update, context):
         """手动添加群组到白名单"""
@@ -385,16 +642,21 @@ class BotEngine:
         # 不带参数时，添加当前群组
         if not context.args:
             if chat.type in ["group", "supergroup"]:
+                # 获取群组名称
+                group_name = chat.title
+
                 # 添加到白名单
                 self.logger.info(f"尝试添加当前群组 {chat.id} 到白名单")
-                if self.config_manager.add_allowed_group(chat.id, user_id):
+                if self.config_manager.add_allowed_group(
+                        chat.id, user_id, group_name):
                     await message_obj.reply_text(f"✅ 已将当前群组 {chat.id} 添加到白名单")
-                    self.logger.info(f"成功添加群组 {chat.id} 到白名单")
+                    self.logger.info(f"成功添加群组 {chat.id} ({group_name}) 到白名单")
                 else:
                     await message_obj.reply_text(f"❌ 添加当前群组到白名单失败")
                     self.logger.error(f"添加群组 {chat.id} 到白名单失败")
             else:
-                await message_obj.reply_text("当前不在群组中\n用法: /addgroup [群组 ID]")
+                await message_obj.reply_text(
+                    "⚠️ 当前不在群组中\n用法: /addgroup [群组 ID]")
             return
 
         # 带参数时，添加指定群组
@@ -415,69 +677,4 @@ class BotEngine:
             self.logger.error(f"添加群组失败: {e}", exc_info=True)
             await message_obj.reply_text(f"添加群组失败: {e}")
 
-    async def _remove_allowed_group_command(self, update, context):
-        """从白名单移除群组并退出"""
-        # 获取消息对象（可能是新消息或编辑的消息）
-        message_obj = update.message or update.edited_message
-
-        if not context.args or len(context.args) != 1:
-            await message_obj.reply_text("用法: /removegroup <群组 ID>")
-            return
-
-        try:
-            group_id = int(context.args[0])
-            current_chat_id = update.effective_chat.id
-
-            # 检查是否在群组中执行此命令
-            is_in_target_group = (current_chat_id == group_id)
-
-            # 检查群组是否在白名单中
-            if not self.config_manager.is_allowed_group(group_id):
-                await message_obj.reply_text(f"❌ 群组 {group_id} 不在白名单中")
-                return
-
-            # 如果是在目标群组中执行命令，先发送预警
-            if is_in_target_group:
-                await message_obj.reply_text(f"⚠️ 正在将此群组从授权列表中移除，Bot 将退出")
-
-            # 从白名单移除
-            removed = self.config_manager.remove_allowed_group(group_id)
-            if not removed:
-                if not is_in_target_group:  # 只有在非目标群组中才发送失败消息
-                    await message_obj.reply_text(f"❌ 从白名单移除群组 {group_id} 失败")
-                return
-
-            # 如果不是在目标群组中执行命令，尝试向目标群组发送通知
-            if not is_in_target_group:
-                try:
-                    await context.bot.send_message(
-                        chat_id=group_id, text="⚠️ 此群组已从授权列表中移除，Bot 将退出")
-                except Exception as e:
-                    self.logger.warning(f"向群组 {group_id} 发送退出通知失败: {e}")
-
-            # 尝试退出群组
-            try:
-                await context.bot.leave_chat(group_id)
-                # 记录成功退出的日志
-                self.logger.info(f"Bot 已成功退出群组 {group_id}")
-                # 只有在非目标群组中才发送成功退出的消息
-                if not is_in_target_group:
-                    await message_obj.reply_text(
-                        f"✅ 已将群组 {group_id} 从白名单移除并退出该群组")
-            except Exception as e:
-                self.logger.error(f"退出群组 {group_id} 失败: {e}")
-                # 只有在非目标群组中才发送退出失败的消息
-                if not is_in_target_group:
-                    await message_obj.reply_text(
-                        f"✅ 已将群组 {group_id} 从白名单移除，但退出群组失败: {e}")
-
-        except ValueError:
-            await message_obj.reply_text("群组 ID 必须是数字")
-        except Exception as e:
-            self.logger.error(f"移除群组命令处理失败: {e}", exc_info=True)
-            # 只有在非目标群组中才尝试发送错误消息
-            if update.effective_chat.id != group_id:
-                try:
-                    await message_obj.reply_text(f"处理命令时发生错误: {e}")
-                except Exception:
-                    pass
+    # 已移除 _remove_allowed_group_command 方法，使用按钮界面替代

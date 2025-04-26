@@ -133,7 +133,7 @@ async def shuo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 *请输入要发布的说说内容*\n\n"
         "• 可以使用 #标签 添加标签\n"
         "• 支持 HTML 标签进行格式化：\n"
-        "  `<b>粗体</b>` `<i>斜体</i>` `<u>下划线</u>`\n"
+        "  `<b>粗体</b>` `<i>斜体</i>`\n"
         "  `<s>删除线</s>` `<code>代码</code>`\n"
         "  `<a href=\"链接\">文本</a>`\n\n"
         "• 使用 /cancel 命令可以取消操作",
@@ -479,8 +479,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if config_type == "token":
             await query.edit_message_text(
                 "请输入 GitHub 个人访问令牌：\n\n"
-                "您可以在 GitHub 的 Settings > Developer settings > Personal access tokens 中创建",
-                reply_markup=reply_markup)
+                "您可以在 [GitHub](https://github.com/settings/personal-access-tokens) 创建访问令牌",
+                reply_markup=reply_markup,
+                parse_mode="MARKDOWN",
+                disable_web_page_preview=True)
         elif config_type == "repo":
             await query.edit_message_text(
                 "请输入 GitHub 仓库名称：\n\n"
@@ -554,14 +556,12 @@ async def list_posts(update: Update,
         # 构建格式化文本
         formatted_text = f"*Key: {safe_key}*\n"
         formatted_text += f"📅 {safe_date}\n"
-        formatted_text += f"📝 {safe_preview}\n"
-
+        formatted_text += f"📝 {safe_preview}"
         # 显示标签
         if tags:
             safe_tags = [TextFormatter.escape_markdown(tag) for tag in tags]
             tags_text = " ".join([f"#{tag}" for tag in safe_tags])
-            formatted_text += f"🏷 {tags_text}\n"
-
+            formatted_text += f"\n🏷 {tags_text}"
         return formatted_text
 
     # 创建自定义键盘生成函数
@@ -684,13 +684,13 @@ async def show_posts_page(query, context, page=0):
         # 构建格式化文本
         formatted_text = f"*Key: {safe_key}*\n"
         formatted_text += f"📅 {safe_date}\n"
-        formatted_text += f"📝 {safe_preview}\n"
+        formatted_text += f"📝 {safe_preview}"
 
         # 显示标签
         if tags:
             safe_tags = [TextFormatter.escape_markdown(tag) for tag in tags]
             tags_text = " ".join([f"#{tag}" for tag in safe_tags])
-            formatted_text += f"🏷 {tags_text}\n"
+            formatted_text += f"\n🏷 {tags_text}"
 
         return formatted_text
 
@@ -1153,9 +1153,10 @@ async def setup(interface):
                                               pattern=f"^{CALLBACK_PREFIX}",
                                               admin_level="super_admin")
 
-    # 注册消息处理器（用于会话流程）
-    message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                     handle_message)
+    # 注册消息处理器（用于会话流程）- 仅限私聊
+    message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        handle_message)
     await interface.register_handler(message_handler, group=6)
 
     interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")

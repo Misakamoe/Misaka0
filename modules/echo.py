@@ -40,10 +40,9 @@ async def setup(interface):
         admin_level=False  # 所有用户都可以使用
     )
 
-    # 注册文本输入处理器
-    text_input_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-        handle_echo_input)
+    # 注册文本输入处理器（支持私聊和群聊）
+    text_input_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                        handle_echo_input)
     await interface.register_handler(text_input_handler, group=2)
 
 
@@ -96,11 +95,7 @@ async def handle_callback_query(update: Update,
 
 async def handle_echo_input(update: Update,
                             context: ContextTypes.DEFAULT_TYPE):
-    """处理用户输入的文本"""
-    # 只处理私聊消息
-    if update.effective_chat.type != "private":
-        return
-
+    """处理用户输入的文本（支持私聊和群聊）"""
     message = update.message
     if not message:
         return

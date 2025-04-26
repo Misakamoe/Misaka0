@@ -157,7 +157,6 @@ sudo systemctl status telegram-bot
 - `/stats` - 显示机器人统计信息（超级管理员）
 - `/listgroups` - 列出授权的群组（超级管理员）
 - `/addgroup [群组 ID]` - 添加群组到白名单（超级管理员）
-- `/removegroup <群组 ID>` - 从白名单移除群组（超级管理员）
 
 ### 开发模块
 

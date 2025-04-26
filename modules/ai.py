@@ -84,7 +84,7 @@ PROVIDER_TEMPLATES = {
 # 模块状态
 _state = {
     "providers": {},  # 服务商配置
-    "whitelist": [],  # 白名单用户 ID
+    "whitelist": {},  # 白名单用户 ID -> 用户信息
     "conversations": {},  # 用户对话上下文
     "default_provider": None,  # 默认服务商
     "usage_stats": {  # 使用统计
@@ -623,6 +623,10 @@ class ConversationManager:
         timeout = _state.get("conversation_timeout", 24 * 60 * 60)  # 默认 24 小时
         expired_count = 0
 
+        # 如果设置为永不超时，直接返回
+        if timeout == float('inf'):
+            return 0
+
         for user_id, context in list(_state["conversations"].items()):
             if not context:
                 continue
@@ -1068,6 +1072,25 @@ class AIManager:
         return False
 
     @staticmethod
+    def is_super_admin(user_id: int,
+                       context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """检查用户是否是超级管理员
+
+        Args:
+            user_id: 用户 ID
+            context: 上下文对象
+
+        Returns:
+            bool: 是否是超级管理员
+        """
+        # 获取配置管理器
+        config_manager = context.bot_data.get("config_manager")
+        if config_manager and config_manager.is_admin(user_id):
+            return True
+
+        return False
+
+    @staticmethod
     async def process_ai_response(provider_id: str, messages: List[Dict[str,
                                                                         str]],
                                   images: List[Dict[str, Any]],
@@ -1210,7 +1233,7 @@ async def show_config_main_menu(update: Update,
                                  callback_data=f"{CALLBACK_PREFIX}_edit")
         ],
         [
-            InlineKeyboardButton("Delete Provider",
+            InlineKeyboardButton("Del Provider",
                                  callback_data=f"{CALLBACK_PREFIX}_delete"),
             InlineKeyboardButton("Set Default",
                                  callback_data=f"{CALLBACK_PREFIX}_default")
@@ -1359,22 +1382,32 @@ async def show_timeout_options(update: Update,
     query = update.callback_query
 
     # 当前超时时间
-    current_timeout = _state.get("conversation_timeout", 24 * 60 * 60) // 3600
+    current_timeout_seconds = _state.get("conversation_timeout", 24 * 60 * 60)
+
+    # 检查是否是无限超时
+    if current_timeout_seconds == float('inf'):
+        current_timeout = "never"
+        current_display = "永不超时"
+    else:
+        current_timeout = current_timeout_seconds // 3600
+        current_display = f"{current_timeout} 小时"
 
     # 构建超时选项文本
     timeout_text = "<b>⏱️ 设置对话超时时间</b>\n\n"
-    timeout_text += f"当前超时时间: <code>{current_timeout}</code> 小时\n\n"
+    timeout_text += f"当前超时时间: <code>{current_display}</code>\n\n"
     timeout_text += "请选择新的超时时间："
 
     # 构建超时选项按钮 (水平排列)
     keyboard = []
     row = []
-    for i, hours in enumerate([1, 3, 6, 12, 24, 48, 72]):
+    for i, hours in enumerate([1, 3, 6, 12, 24, 48, "never"]):
         # 标记当前选项
-        marker = "[*] " if hours == current_timeout else ""
+        marker = "▷ " if hours == current_timeout else ""
+        # 处理 "never" 选项的特殊显示
+        display_text = f"{marker}Never" if hours == "never" else f"{marker}{hours} hours"
         row.append(
             InlineKeyboardButton(
-                f"{marker}{hours} hours",
+                display_text,
                 callback_data=f"{CALLBACK_PREFIX}_set_timeout_{hours}"))
 
         # 每两个按钮一行
@@ -1460,6 +1493,9 @@ async def show_whitelist_menu(update: Update,
     """显示白名单管理菜单"""
     global _state
 
+    # 检查是否是群聊
+    is_group = update.effective_chat.type != "private"
+
     whitelist_text = "<b>👥 AI 白名单管理</b>\n\n"
 
     # 显示当前白名单
@@ -1479,6 +1515,12 @@ async def show_whitelist_menu(update: Update,
 
             whitelist_text += f"{user_display}\n"
         whitelist_text += "\n"
+
+    # 如果是群聊，添加提示信息
+    if is_group:
+        whitelist_text += "您可以通过以下方式管理白名单：\n"
+        whitelist_text += "1. 使用 /aiwhitelist 回复用户消息来添加\n"
+        whitelist_text += "2. 使用下方按钮添加\n\n"
 
     whitelist_text += "请选择操作："
 
@@ -1567,22 +1609,28 @@ async def handle_specific_actions(update: Update,
 
         # 设置会话状态，等待用户输入服务商 ID
         await session_manager.set(user_id,
-                                  "waiting_for",
+                                  "ai_waiting_for",
                                   "provider_id",
                                   chat_id=chat_id)
 
     # 处理设置超时时间
     elif action == "set" and "timeout" in parts:
-        hours = int(parts[-1])
+        timeout_value = parts[-1]
 
-        # 更新超时时间
-        _state["conversation_timeout"] = hours * 3600
+        if timeout_value == "never":
+            # 设置为非常大的值，实际上相当于永不超时
+            _state["conversation_timeout"] = float('inf')
+            await query.answer("已将对话超时时间设置为永不超时")
+            _interface.logger.info(f"用户 {user_id} 将对话超时时间设置为永不超时")
+        else:
+            # 正常的小时数设置
+            hours = int(timeout_value)
+            _state["conversation_timeout"] = hours * 3600
+            await query.answer(f"已将对话超时时间设置为 {hours} 小时")
+            _interface.logger.info(f"用户 {user_id} 将对话超时时间设置为 {hours} 小时")
 
         # 保存配置
         save_config()
-
-        await query.answer(f"已将对话超时时间设置为 {hours} 小时")
-        _interface.logger.info(f"用户 {user_id} 将对话超时时间设置为 {hours} 小时")
 
         # 返回超时设置菜单
         await show_timeout_options(update, context)
@@ -1645,20 +1693,34 @@ async def handle_specific_actions(update: Update,
 
             if is_group:
                 # 在群聊中显示提示
+                keyboard = [[
+                    InlineKeyboardButton(
+                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                ]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
                 await query.edit_message_text(
                     "<b>👥 添加用户到白名单</b>\n\n"
                     "请使用 /aiwhitelist 命令回复用户消息来添加用户",
+                    reply_markup=reply_markup,
                     parse_mode="HTML")
             else:
                 # 在私聊中提示输入用户 ID
+                keyboard = [[
+                    InlineKeyboardButton(
+                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                ]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
                 await query.edit_message_text(
                     "<b>👥 添加用户到白名单</b>\n\n"
                     "请输入要添加的用户 ID (数字):",
+                    reply_markup=reply_markup,
                     parse_mode="HTML")
 
                 # 设置会话状态，等待用户输入用户 ID
                 await session_manager.set(user_id,
-                                          "waiting_for",
+                                          "ai_waiting_for",
                                           "whitelist_add_user_id",
                                           chat_id=chat_id)
 
@@ -1740,7 +1802,7 @@ async def handle_specific_actions(update: Update,
 
         # 设置会话状态，等待用户输入
         await session_manager.set(user_id,
-                                  "waiting_for",
+                                  "ai_waiting_for",
                                   f"edit_param_{provider_id}_{param}",
                                   chat_id=chat_id)
 
@@ -1970,7 +2032,7 @@ async def show_provider_edit_menu(update: Update,
                 callback_data=
                 f"{CALLBACK_PREFIX}_edit_param_{provider_id}_temperature"),
             InlineKeyboardButton(
-                "Request Format",
+                "Request",
                 callback_data=
                 f"{CALLBACK_PREFIX}_edit_param_{provider_id}_request_format")
         ],
@@ -2130,18 +2192,16 @@ async def handle_config_callback(update: Update,
         await query.answer("系统错误：无法获取会话管理器")
         return
 
-    # 检查是否是活跃的 AI 配置会话
-    is_active = await session_manager.get(user_id,
-                                          "ai_config_active",
-                                          False,
-                                          chat_id=chat_id)
-    if not is_active:
-        # 自动重新激活会话状态
-        await session_manager.set(user_id,
-                                  "ai_config_active",
-                                  True,
-                                  chat_id=chat_id)
-        _interface.logger.info(f"用户 {user_id} 在聊天 {chat_id} 中的 AI 配置会话已自动重新激活")
+    # 检查是否有等待用户输入的会话状态
+    waiting_for = await session_manager.get(user_id,
+                                            "ai_waiting_for",
+                                            None,
+                                            chat_id=chat_id)
+
+    # 如果有等待状态，记录日志
+    if waiting_for:
+        _interface.logger.debug(
+            f"用户 {user_id} 在聊天 {chat_id} 中有等待状态: {waiting_for}")
 
     # 解析回调数据
     callback_data = query.data
@@ -2165,6 +2225,12 @@ async def handle_config_callback(update: Update,
 
     # 记录操作日志
     _interface.logger.debug(f"处理配置回调: {callback_data}, 动作: {action}")
+
+    # 处理配置页面分页
+    if callback_data.startswith(f"{CALLBACK_PREFIX}_config_page:"):
+        # 分页回调直接调用配置查看函数
+        await show_current_config(update, context)
+        return
 
     # 根据不同操作处理
     if action == "view":
@@ -2312,6 +2378,11 @@ async def handle_config_callback(update: Update,
     elif action == "whitelist":
         # 管理白名单
         if len(parts) == 1:
+            # 清除任何等待状态
+            await session_manager.delete(user_id,
+                                         "ai_waiting_for",
+                                         chat_id=chat_id)
+
             # 显示白名单主菜单
             await show_whitelist_menu(update, context)
         elif len(parts) >= 2:
@@ -2322,22 +2393,40 @@ async def handle_config_callback(update: Update,
                 is_group = update.effective_chat.type != "private"
 
                 try:
+                    # 添加返回按钮
+                    keyboard = [[
+                        InlineKeyboardButton(
+                            "⇠ Back",
+                            callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                    ]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+
                     if is_group:
-                        # 在群聊中显示提示
+                        # 在群聊中提示两种方式
                         await query.edit_message_text(
                             "<b>👥 添加用户到白名单</b>\n\n"
-                            "请使用 /aiwhitelist 命令回复用户消息来添加用户",
+                            "请输入用户 ID (数字):",
+                            reply_markup=reply_markup,
                             parse_mode="HTML")
+
+                        # 设置会话状态，等待用户输入用户 ID
+                        await session_manager.set(user_id,
+                                                  "ai_waiting_for",
+                                                  "whitelist_add_user_id",
+                                                  chat_id=chat_id)
                     else:
                         # 在私聊中提示输入用户 ID
                         await query.edit_message_text(
                             "<b>👥 添加用户到白名单</b>\n\n"
                             "请输入要添加的用户 ID (数字):",
+                            reply_markup=reply_markup,
                             parse_mode="HTML")
 
                         # 设置会话状态，等待用户输入用户 ID
-                        await session_manager.set(user_id, "waiting_for",
-                                                  "whitelist_add_user_id")
+                        await session_manager.set(user_id,
+                                                  "ai_waiting_for",
+                                                  "whitelist_add_user_id",
+                                                  chat_id=chat_id)
                 except telegram.error.BadRequest as e:
                     # 忽略"消息未修改"错误
                     if "Message is not modified" not in str(e):
@@ -2351,21 +2440,41 @@ async def handle_config_callback(update: Update,
 
                                 if is_group:
                                     # 在群聊中显示提示
+                                    keyboard = [[
+                                        InlineKeyboardButton(
+                                            "⇠ Back",
+                                            callback_data=
+                                            f"{CALLBACK_PREFIX}_whitelist")
+                                    ]]
+                                    reply_markup = InlineKeyboardMarkup(
+                                        keyboard)
+
                                     await message.reply_text(
                                         "<b>👥 添加用户到白名单</b>\n\n"
                                         "请使用 /aiwhitelist 命令回复用户消息来添加用户",
+                                        reply_markup=reply_markup,
                                         parse_mode="HTML")
                                 else:
                                     # 在私聊中提示输入用户 ID
+                                    keyboard = [[
+                                        InlineKeyboardButton(
+                                            "⇠ Back",
+                                            callback_data=
+                                            f"{CALLBACK_PREFIX}_whitelist")
+                                    ]]
+                                    reply_markup = InlineKeyboardMarkup(
+                                        keyboard)
+
                                     await message.reply_text(
                                         "<b>👥 添加用户到白名单</b>\n\n"
                                         "请输入要添加的用户 ID (数字):",
+                                        reply_markup=reply_markup,
                                         parse_mode="HTML")
 
                                     # 设置会话状态，等待用户输入用户 ID
                                     await session_manager.set(
                                         user_id,
-                                        "waiting_for",
+                                        "ai_waiting_for",
                                         "whitelist_add_user_id",
                                         chat_id=chat_id)
                         except Exception as e2:
@@ -2463,7 +2572,7 @@ async def handle_config_callback(update: Update,
 
             # 设置会话状态，等待用户输入
             await session_manager.set(user_id,
-                                      "waiting_for",
+                                      "ai_waiting_for",
                                       f"edit_param_{provider_id}_{param_name}",
                                       chat_id=chat_id)
         else:
@@ -2549,6 +2658,11 @@ async def handle_config_callback(update: Update,
             await show_config_main_menu(update, context)
 
     elif action == "back":
+        # 清除任何等待状态
+        await session_manager.delete(user_id,
+                                     "ai_waiting_for",
+                                     chat_id=chat_id)
+
         # 返回主菜单
         await show_config_main_menu(update, context)
 
@@ -2562,6 +2676,20 @@ async def show_current_config(update: Update,
     """显示当前 AI 配置"""
     global _state
     query = update.callback_query
+
+    # 获取页码参数（优先从上下文获取，其次从回调数据获取）
+    page = context.user_data.get("ai_config_page_index", 0)  # 默认从上下文获取
+
+    # 如果是分页回调，则从回调数据获取
+    if query and ":" in query.data:
+        parts = query.data.split(":")
+        if len(parts) >= 2 and parts[0] == f"{CALLBACK_PREFIX}_config_page":
+            try:
+                page = int(parts[1])
+                # 更新上下文中的页码
+                context.user_data["ai_config_page_index"] = page
+            except ValueError:
+                pass  # 保持原有页码
 
     # 构建配置信息（使用 HTML 格式）
     config_text = "<b>🤖 当前 AI 配置</b>\n\n"
@@ -2593,8 +2721,26 @@ async def show_current_config(update: Update,
         if not configured_providers:
             config_text += "<i>已创建服务商，但尚未配置 API 密钥</i>\n\n"
 
-        # 显示所有服务商
-        for provider_id, provider in _state["providers"].items():
+        # 获取服务商列表
+        provider_items = list(_state["providers"].items())
+
+        # 设置每页显示的服务商数量
+        page_size = 2  # 每页显示2个服务商
+        total_pages = max(1,
+                          (len(provider_items) + page_size - 1) // page_size)
+
+        # 确保页码在有效范围内
+        page = max(0, min(page, total_pages - 1))
+
+        # 保存当前页码到上下文
+        context.user_data["ai_config_page_index"] = page
+
+        # 计算当前页的服务商范围
+        start_idx = page * page_size
+        end_idx = min(start_idx + page_size, len(provider_items))
+
+        # 显示当前页的服务商
+        for provider_id, provider in provider_items[start_idx:end_idx]:
             # 标记默认服务商和配置状态
             is_default = "✅ " if provider_id == default_provider else ""
             is_configured = "🔑 " if provider.get("api_key") else "⚠️ "
@@ -2633,10 +2779,45 @@ async def show_current_config(update: Update,
                                                  False) else "❌"
             config_text += f"  🖼️ 图像支持: {supports_image}\n"
 
+        # 不在文本中添加页码信息，因为已经在按钮中显示了
+
+    # 创建按钮
+    keyboard = []
+
+    # 添加分页按钮（如果有多页）
+    if len(_state["providers"]) > 2:  # 如果有多于2个服务商
+        nav_row = []
+
+        # 上一页按钮
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "◁ Prev",
+                    callback_data=f"{CALLBACK_PREFIX}_config_page:{page - 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        # 页码指示 - 不可点击
+        nav_row.append(
+            InlineKeyboardButton(f"{page + 1}/{total_pages}",
+                                 callback_data="noop"))
+
+        # 下一页按钮
+        if page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "Next ▷",
+                    callback_data=f"{CALLBACK_PREFIX}_config_page:{page + 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        keyboard.append(nav_row)
+
     # 添加返回按钮
-    keyboard = [[
+    keyboard.append([
         InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}_back")
-    ]]
+    ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     try:
@@ -2744,12 +2925,6 @@ async def ai_config_command(update: Update,
     # 清除之前的会话状态（如果有）
     await session_manager.clear(user_id, chat_id=chat_id)
 
-    # 设置会话状态，表示正在配置 AI
-    await session_manager.set(user_id,
-                              "ai_config_active",
-                              True,
-                              chat_id=chat_id)
-
     # 显示主菜单
     await show_config_main_menu(update, context)
 
@@ -2825,6 +3000,7 @@ async def ai_command(update: Update,
                      context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理 /ai 命令 - 向 AI 发送消息"""
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
@@ -2835,18 +3011,67 @@ async def ai_command(update: Update,
         _interface.logger.warning(f"用户 {user_id} 尝试使用 AI 功能但没有权限")
         return
 
-    # 检查是否有消息内容
-    if not context.args:
+    # 获取回复的消息（如果有）
+    replied_message = message.reply_to_message
+
+    # 初始化消息文本和图像列表
+    message_text = ""
+    images = []
+
+    # 检查是否有命令参数
+    if context.args:
+        # 获取命令参数作为消息内容
+        message_text = " ".join(context.args)
+
+    # 检查是否回复了消息
+    if replied_message:
+        # 如果回复的消息有文本，添加到消息内容
+        if replied_message.text or replied_message.caption:
+            replied_text = replied_message.text or replied_message.caption
+            # 如果已经有命令参数，则将回复的文本作为上下文
+            if message_text:
+                message_text = f"{message_text}\n\n引用内容：\n{replied_text}"
+            else:
+                message_text = replied_text
+
+        # 如果回复的消息有图片，处理图片
+        if replied_message.photo:
+            # 检查默认服务商
+            provider_id = _state["default_provider"]
+            if not provider_id or provider_id not in _state["providers"]:
+                await message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
+                _interface.logger.warning(f"用户 {user_id} 尝试使用 AI 但未配置默认服务商")
+                return
+
+            # 检查服务商是否支持图像
+            provider = _state["providers"].get(provider_id, {})
+            if provider.get("supports_image", False):
+                # 获取最大尺寸的图像
+                photo = replied_message.photo[-1]
+                photo_file = await context.bot.get_file(photo.file_id)
+
+                # 处理图像
+                image_data = await AIManager.process_image(photo_file)
+                if image_data:
+                    images.append(image_data)
+                    # 不再显示"已添加图片"的提示
+            else:
+                await message.reply_text("⚠️ 当前服务商不支持图像处理")
+                return
+
+    # 如果没有消息内容（既没有命令参数也没有回复消息），显示帮助信息
+    if not message_text and not images:
         await message.reply_text(
-            "请输入要发送给 AI 的消息\n"
+            "请输入要发送给 AI 的消息或回复一条消息\n"
             "例如: `/ai 你好，请介绍一下自己`\n\n"
-            "🔄 使用 `/aiclear` 可清除对话历史\n"
-            "📷 在私聊中可以发送图片使用多模态功能",
+            "🔄 使用 /aiclear 可清除对话历史\n"
+            "📷 可以回复图片消息让 AI 分析图像内容",
             parse_mode="MARKDOWN")
         return
 
-    # 获取消息内容
-    message_text = " ".join(context.args)
+    # 如果只有图片没有文字，添加默认提示
+    if not message_text and images:
+        message_text = "请分析这张图片"
 
     # 检查消息长度
     if len(message_text) > MAX_MESSAGE_LENGTH:
@@ -2859,26 +3084,6 @@ async def ai_command(update: Update,
         await message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
         _interface.logger.warning(f"用户 {user_id} 尝试使用 AI 但未配置默认服务商")
         return
-
-    # 获取图像（如果有）
-    replied_message = message.reply_to_message
-    images = []
-
-    if replied_message and replied_message.photo:
-        # 如果回复的消息包含图像
-        provider = _state["providers"].get(provider_id, {})
-        if provider.get("supports_image", False):
-            # 获取最大尺寸的图像
-            photo = replied_message.photo[-1]
-            photo_file = await context.bot.get_file(photo.file_id)
-
-            # 处理图像
-            image_data = await AIManager.process_image(photo_file)
-            if image_data:
-                images.append(image_data)
-                await message.reply_text("📷 已添加图片到请求中")
-        else:
-            await message.reply_text("⚠️ 当前服务商不支持图像处理")
 
     # 发送"正在思考"消息
     thinking_message = await message.reply_text("🤔 正在思考中...")
@@ -3028,14 +3233,16 @@ async def handle_config_input(update: Update,
         save_config()
 
         # 清除等待状态
-        await session_manager.delete(user_id, "waiting_for", chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "ai_waiting_for",
+                                     chat_id=chat_id)
         await session_manager.delete(user_id,
                                      "selected_template",
                                      chat_id=chat_id)
 
         # 发送成功消息并直接显示编辑菜单
         await message.reply_text(
-            f"✅ 已创建新服务商: `{provider_id}` (使用 {template_id} 模板)\n\n"
+            f"✅ 已创建新服务商: `{provider_id}` ({template_id} 模板)\n\n"
             f"请编辑服务商的详细配置：",
             parse_mode="MARKDOWN")
 
@@ -3064,7 +3271,9 @@ async def handle_config_input(update: Update,
             if provider_id not in _state["providers"]:
                 await message.reply_text(f"⚠️ 服务商 `{provider_id}` 不存在",
                                          parse_mode="MARKDOWN")
-                await session_manager.delete(user_id, "waiting_for")
+                await session_manager.delete(user_id,
+                                             "ai_waiting_for",
+                                             chat_id=chat_id)
                 await show_config_main_menu(update, context)
                 return
 
@@ -3099,7 +3308,7 @@ async def handle_config_input(update: Update,
 
             # 清除等待状态
             await session_manager.delete(user_id,
-                                         "waiting_for",
+                                         "ai_waiting_for",
                                          chat_id=chat_id)
 
             # 发送成功消息
@@ -3114,7 +3323,7 @@ async def handle_config_input(update: Update,
             _interface.logger.warning(f"编辑参数输入格式错误: {waiting_for}")
             await message.reply_text("⚠️ 参数格式错误，已取消操作")
             await session_manager.delete(user_id,
-                                         "waiting_for",
+                                         "ai_waiting_for",
                                          chat_id=chat_id)
             await show_config_main_menu(update, context)
 
@@ -3126,8 +3335,20 @@ async def handle_config_input(update: Update,
 
             # 检查用户是否已在白名单中
             if user_id_str in _state["whitelist"]:
-                await message.reply_text(f"用户 `{user_id_to_add}` 已在白名单中",
-                                         parse_mode="MARKDOWN")
+                # 清除等待状态
+                await session_manager.delete(user_id,
+                                             "ai_waiting_for",
+                                             chat_id=chat_id)
+
+                # 发送带有返回按钮的消息
+                await message.reply_text(
+                    f"用户 `{user_id_to_add}` 已在白名单中",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "⇠ Back",
+                            callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                    ]]),
+                    parse_mode="MARKDOWN")
             else:
                 # 尝试获取用户信息
                 try:
@@ -3148,30 +3369,38 @@ async def handle_config_input(update: Update,
                 # 保存配置
                 save_config()
 
-                await message.reply_text(f"✅ 已将用户 `{user_id_to_add}` 添加到白名单",
-                                         parse_mode="MARKDOWN")
+                # 清除等待状态
+                await session_manager.delete(user_id,
+                                             "ai_waiting_for",
+                                             chat_id=chat_id)
 
-            # 清除等待状态
-            await session_manager.delete(user_id,
-                                         "waiting_for",
-                                         chat_id=chat_id)
+                # 发送带有返回按钮的确认消息
+                await message.reply_text(
+                    f"✅ 已将用户 `{user_id_to_add}` 添加到白名单",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "⇠ Back",
+                            callback_data=f"{CALLBACK_PREFIX}_whitelist")
+                    ]]),
+                    parse_mode="MARKDOWN")
 
-            # 发送新消息而不是编辑现有消息
-            await message.reply_text(
-                "✅ 已将用户添加到白名单",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}_whitelist")
-                ]]))
+                # 记录日志
+                _interface.logger.info(
+                    f"用户 {user_id} 在聊天 {chat_id} 中将用户 {user_id_to_add} 添加到 AI 白名单"
+                )
 
         except ValueError:
-            await message.reply_text("⚠️ 用户 ID 必须是数字，请重新输入：")
+            # 不清除会话状态，让用户可以重新输入
+            await message.reply_text("⚠️ 用户 ID 必须是数字，请重新输入：\n\n",
+                                     parse_mode="HTML")
             return
 
     else:
         # 未知的等待状态
         await message.reply_text("⚠️ 未知的输入状态，已取消操作")
-        await session_manager.delete(user_id, "waiting_for", chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "ai_waiting_for",
+                                     chat_id=chat_id)
         await show_config_main_menu(update, context)
 
 
@@ -3194,21 +3423,17 @@ async def handle_private_message(update: Update,
         _interface.logger.error("无法获取会话管理器")
         return
 
-    # 检查是否在配置会话中
-    is_config_active = await session_manager.get(user_id,
-                                                 "ai_config_active",
-                                                 False,
-                                                 chat_id=chat_id)
-    if is_config_active:
-        # 检查是否在等待用户输入
-        waiting_for = await session_manager.get(user_id,
-                                                "waiting_for",
-                                                None,
-                                                chat_id=chat_id)
-        if waiting_for:
-            # 处理用户输入
-            await handle_config_input(update, context, waiting_for)
-            return
+    # 检查是否在等待用户输入
+    waiting_for = await session_manager.get(user_id,
+                                            "ai_waiting_for",
+                                            None,
+                                            chat_id=chat_id)
+
+    # 如果正在等待用户输入，处理用户输入
+    if waiting_for:
+        # 处理用户输入
+        await handle_config_input(update, context, waiting_for)
+        return
 
     # 检查权限 - 仅超级管理员和白名单用户可用
     if not AIManager.is_user_authorized(user_id, context):
@@ -3233,6 +3458,43 @@ async def handle_private_message(update: Update,
     # 获取消息内容
     message_text = message.text
 
+    # 初始化图像列表
+    images = []
+
+    # 检查是否回复了消息
+    replied_message = message.reply_to_message
+    if replied_message:
+        # 如果回复的消息有文本，添加到消息内容
+        if replied_message.text or replied_message.caption:
+            replied_text = replied_message.text or replied_message.caption
+            # 将回复的文本作为上下文
+            message_text = f"{message_text}\n\n引用内容：\n{replied_text}"
+
+        # 如果回复的消息有图片，处理图片
+        if replied_message.photo:
+            # 检查默认服务商
+            provider_id = _state["default_provider"]
+            if not provider_id or provider_id not in _state["providers"]:
+                await message.reply_text("⚠️ 未配置默认 AI 服务商，请联系管理员")
+                _interface.logger.warning(f"用户 {user_id} 尝试使用 AI 但未配置默认服务商")
+                return
+
+            # 检查服务商是否支持图像
+            provider = _state["providers"].get(provider_id, {})
+            if provider.get("supports_image", False):
+                # 获取最大尺寸的图像
+                photo = replied_message.photo[-1]
+                photo_file = await context.bot.get_file(photo.file_id)
+
+                # 处理图像
+                image_data = await AIManager.process_image(photo_file)
+                if image_data:
+                    images.append(image_data)
+                    # 不显示"已添加图片"的提示
+            else:
+                await message.reply_text("⚠️ 当前服务商不支持图像处理")
+                return
+
     # 检查消息长度
     if len(message_text) > MAX_MESSAGE_LENGTH:
         await message.reply_text(f"⚠️ 消息太长，请将长度控制在 {MAX_MESSAGE_LENGTH} 字符以内")
@@ -3252,8 +3514,7 @@ async def handle_private_message(update: Update,
                               time.time(),
                               chat_id=chat_id)
 
-    # 检查是否有图像
-    images = []
+    # 检查消息本身是否包含图像
     if message.photo:
         provider = _state["providers"].get(provider_id, {})
         if provider.get("supports_image", False):
@@ -3321,6 +3582,16 @@ async def handle_private_photo(update: Update,
         _interface.logger.error("无法获取会话管理器")
         return
 
+    # 检查是否在等待用户输入
+    waiting_for = await session_manager.get(user_id,
+                                            "ai_waiting_for",
+                                            None,
+                                            chat_id=chat_id)
+
+    # 如果正在等待输入，不处理图片消息
+    if waiting_for:
+        return
+
     # 检查是否有其他模块的活跃会话
     has_other_session = False
     if session_manager:
@@ -3373,6 +3644,18 @@ async def handle_private_photo(update: Update,
     # 获取消息文本(如果有)
     message_text = update.message.caption or "分析这张图片"
 
+    # 检查是否回复了消息
+    replied_message = update.message.reply_to_message
+    if replied_message:
+        # 如果回复的消息有文本，添加到消息内容
+        if replied_message.text or replied_message.caption:
+            replied_text = replied_message.text or replied_message.caption
+            # 将回复的文本作为上下文
+            if message_text == "分析这张图片":  # 如果是默认文本，直接替换
+                message_text = replied_text
+            else:  # 否则添加为引用
+                message_text = f"{message_text}\n\n引用内容：\n{replied_text}"
+
     # 发送"正在思考"消息
     thinking_message = await update.message.reply_text("🖼️ 正在分析图像...")
 
@@ -3399,6 +3682,44 @@ async def handle_private_photo(update: Update,
     # 注意：HTML 格式转换现在在 process_ai_response 方法中处理
 
     _interface.logger.info(f"用户 {user_id} 在聊天 {chat_id} 中获得了图像分析回复")
+
+
+async def handle_config_message(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理配置相关的消息（主要用于群聊中的白名单配置）"""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    # 获取消息对象（可能是新消息或编辑的消息）
+    # 在后续代码中使用 update.message 而不是单独的变量
+
+    # 如果是编辑的消息，不处理
+    if update.edited_message:
+        return
+
+    # 获取会话管理器
+    session_manager = context.bot_data.get("session_manager")
+    if not session_manager:
+        _interface.logger.error("无法获取会话管理器")
+        return
+
+    # 检查是否在等待用户输入
+    waiting_for = await session_manager.get(user_id,
+                                            "ai_waiting_for",
+                                            None,
+                                            chat_id=chat_id)
+
+    # 如果正在等待用户输入，处理用户输入
+    if waiting_for:
+        # 检查是否是超级管理员
+        if not AIManager.is_super_admin(user_id, context):
+            # 非超级管理员不能配置白名单
+            return
+
+        # 处理用户输入
+        await handle_config_input(update, context, waiting_for)
+
+    # 如果没有等待用户输入或处理完毕，不做其他处理
 
 
 # 配置和状态管理函数
@@ -3548,7 +3869,7 @@ async def setup(module_interface):
     await module_interface.register_command("ai",
                                             ai_command,
                                             admin_level=False,
-                                            description="向 AI 发送消息")
+                                            description="与 ai 进行对话")
 
     # 注册私聊消息处理器
     text_handler = MessageHandler(
@@ -3560,6 +3881,12 @@ async def setup(module_interface):
     photo_handler = MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE,
                                    handle_private_photo)
     await module_interface.register_handler(photo_handler)
+
+    # 注册配置输入处理器（用于处理群聊中的白名单配置）
+    config_input_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'),
+        handle_config_message)
+    await module_interface.register_handler(config_input_handler, group=0)
 
     # 注册配置按钮回调处理器（带权限验证）
     await module_interface.register_callback_handler(

@@ -266,7 +266,7 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not success:
         await waiting_msg.edit_text(
-            f"❌ 无法获取 {location} 的天气信息，请检查位置名称或 API 密钥是否正确\n\n请使用 /weatherset 命令设置有效的 API 密钥"
+            f"❌ 无法获取 {location} 的天气信息\n请检查位置名称或 API 密钥是否正确\n\n请使用 /weatherset 设置有效的 API 密钥"
         )
         if _module_interface:
             _module_interface.logger.error(f"无法获取 {location} 的天气信息")
@@ -379,7 +379,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not success:
         await waiting_msg.edit_text(
-            f"❌ 无法获取 {location} 的天气预报，请检查位置名称或 API 密钥是否正确\n\n请使用 /weatherset 命令设置有效的 API 密钥"
+            f"❌ 无法获取 {location} 的天气预报\n请检查位置名称或 API 密钥是否正确\n\n请使用 /weatherset 设置有效的 API 密钥"
         )
         if _module_interface:
             _module_interface.logger.error(f"无法获取 {location} 的天气预报信息")
@@ -395,6 +395,11 @@ async def weather_set_command(update: Update,
     """
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
+
+    # 检查是否是私聊
+    if update.effective_chat.type != "private":
+        await message.reply_text("⚠️ 出于安全考虑，天气模块配置只能在私聊中进行")
+        return
 
     # 显示设置面板
     await show_settings_panel(update, context)
@@ -1577,10 +1582,11 @@ async def setup(interface):
                                               pattern=f"^{CALLBACK_PREFIX}",
                                               admin_level="super_admin")
 
-    # 注册消息处理器（用于会话流程）
+    # 注册消息处理器（用于会话流程，仅处理私聊消息）
     from telegram.ext import MessageHandler, filters
-    message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                     handle_message)
+    message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        handle_message)
     await interface.register_handler(message_handler, group=7)
 
     # 加载用户位置状态

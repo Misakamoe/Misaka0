@@ -113,10 +113,9 @@ async def rss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     health_callback = f"{CALLBACK_PREFIX}health"
 
     keyboard = [[
-        InlineKeyboardButton("List", callback_data=list_callback),
         InlineKeyboardButton("Add", callback_data=add_callback),
-        InlineKeyboardButton("Health", callback_data=health_callback)
-    ]]
+        InlineKeyboardButton("List", callback_data=list_callback)
+    ], [InlineKeyboardButton("Health", callback_data=health_callback)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # 检查是否是回调查询
@@ -178,10 +177,41 @@ async def list_subscriptions(update: Update,
                                      reply_markup=reply_markup)
         return
 
+    # 获取页码参数（优先从上下文获取，其次从回调数据获取）
+    page = context.user_data.get("rss_page_index", 0)  # 默认从上下文获取，使用模块特定的键
+
+    # 如果是分页回调，则从回调数据获取
+    if callback_query and ":" in callback_query.data:
+        parts = callback_query.data.split(":")
+        if len(parts) >= 2 and parts[0] == f"{CALLBACK_PREFIX}page":
+            try:
+                page = int(parts[1])
+                # 更新上下文中的页码，使用模块特定的键
+                context.user_data["rss_page_index"] = page
+            except ValueError:
+                pass  # 保持原有页码
+
+    # 设置每页显示的订阅数量
+    page_size = 5
+    total_pages = max(1, (len(subscriptions) + page_size - 1) // page_size)
+
+    # 保存总页数到上下文，用于页码选择功能，使用模块特定的键
+    context.user_data["rss_total_pages"] = total_pages
+
+    # 确保页码在有效范围内
+    page = max(0, min(page, total_pages - 1))
+
+    # 保存当前页码到上下文，使用模块特定的键
+    context.user_data["rss_page_index"] = page
+
+    # 计算当前页的订阅范围
+    start_idx = page * page_size
+    end_idx = min(start_idx + page_size, len(subscriptions))
+
     text = "<b>📋 RSS 订阅列表</b>\n\n"
 
-    # 显示订阅列表
-    for i, url in enumerate(subscriptions, 1):
+    # 显示当前页的订阅列表
+    for i, url in enumerate(subscriptions[start_idx:end_idx], start_idx + 1):
         source_info = _config["sources"].get(url, {})
         title = source_info.get("title", url)
         # 使用 HTML 格式，避免转义问题
@@ -190,12 +220,50 @@ async def list_subscriptions(update: Update,
         text += f"{i}. <b>{safe_title}</b>\n"
         text += f"   <code>{safe_url}</code>\n\n"
 
-    # 创建操作按钮
-    keyboard = [[
+    # 添加页码信息
+    if total_pages > 1:
+        text += f"第 {page + 1}/{total_pages} 页\n"
+
+    # 创建分页和操作按钮
+    keyboard = []
+
+    # 添加分页按钮（如果有多页）
+    if total_pages > 1:
+        nav_row = []
+
+        # 上一页按钮
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "◁ Prev",
+                    callback_data=f"{CALLBACK_PREFIX}page:{page - 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        # 页码指示 - 点击可以选择页码
+        nav_row.append(
+            InlineKeyboardButton(
+                f"{page + 1}/{total_pages}",
+                callback_data=f"{CALLBACK_PREFIX}page_select:{page}"))
+
+        # 下一页按钮
+        if page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "Next ▷",
+                    callback_data=f"{CALLBACK_PREFIX}page:{page + 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        keyboard.append(nav_row)
+
+    # 添加操作按钮
+    keyboard.append([
         InlineKeyboardButton("Remove",
                              callback_data=f"{CALLBACK_PREFIX}remove"),
         InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
-    ]]
+    ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if callback_query:
@@ -245,9 +313,42 @@ async def rss_health_command(update: Update,
                                      reply_markup=reply_markup)
         return
 
+    # 获取页码参数（优先从上下文获取，其次从回调数据获取）
+    page = context.user_data.get("rss_health_page_index",
+                                 0)  # 默认从上下文获取，使用模块特定的键
+
+    # 如果是分页回调，则从回调数据获取
+    if callback_query and ":" in callback_query.data:
+        parts = callback_query.data.split(":")
+        if len(parts) >= 2 and parts[0] == f"{CALLBACK_PREFIX}health_page":
+            try:
+                page = int(parts[1])
+                # 更新上下文中的页码，使用模块特定的键
+                context.user_data["rss_health_page_index"] = page
+            except ValueError:
+                pass  # 保持原有页码
+
+    # 设置每页显示的订阅数量
+    page_size = 4  # 每页显示4个健康状态
+    total_pages = max(1, (len(subscriptions) + page_size - 1) // page_size)
+
+    # 保存总页数到上下文，用于页码选择功能，使用模块特定的键
+    context.user_data["rss_health_total_pages"] = total_pages
+
+    # 确保页码在有效范围内
+    page = max(0, min(page, total_pages - 1))
+
+    # 保存当前页码到上下文，使用模块特定的键
+    context.user_data["rss_health_page_index"] = page
+
+    # 计算当前页的订阅范围
+    start_idx = page * page_size
+    end_idx = min(start_idx + page_size, len(subscriptions))
+
     text = "<b>📊 RSS 源健康状态</b>\n\n"
 
-    for url in subscriptions:
+    # 显示当前页的健康状态
+    for i, url in enumerate(subscriptions[start_idx:end_idx], start_idx + 1):
         source_info = _config["sources"].get(url, {})
         source_title = source_info.get('title', url)
         safe_title = TextFormatter.escape_html(source_title)
@@ -285,6 +386,50 @@ async def rss_health_command(update: Update,
                  f"  • 成功率: {success_rate}\n"
                  f"  • 最后成功: {last_success}\n"
                  f"  • 检查间隔: {interval:.0f} 秒\n\n")
+
+    # 添加页码信息
+    if total_pages > 1:
+        text += f"第 {page + 1}/{total_pages} 页\n"
+
+    # 创建分页和操作按钮
+    keyboard = []
+
+    # 添加分页按钮（如果有多页）
+    if total_pages > 1:
+        nav_row = []
+
+        # 上一页按钮
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "◁ Prev",
+                    callback_data=f"{CALLBACK_PREFIX}health_page:{page - 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        # 页码指示 - 点击可以选择页码
+        nav_row.append(
+            InlineKeyboardButton(
+                f"{page + 1}/{total_pages}",
+                callback_data=f"{CALLBACK_PREFIX}health_page_select:{page}"))
+
+        # 下一页按钮
+        if page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "Next ▷",
+                    callback_data=f"{CALLBACK_PREFIX}health_page:{page + 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+        keyboard.append(nav_row)
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
     if callback_query:
         await callback_query.edit_message_text(text,
@@ -994,6 +1139,130 @@ async def send_entry(entry, source_info, url, subscribed_chats,
 # 状态管理函数已移除，直接使用框架的状态管理功能
 
 
+async def show_page_selector(update: Update,
+                             context: ContextTypes.DEFAULT_TYPE):
+    """显示订阅列表页码选择界面"""
+    query = update.callback_query
+
+    # 从上下文中获取总页数和当前页码，使用模块特定的键
+    total_pages = context.user_data.get("rss_total_pages", 10)  # 默认10页
+    current_page = context.user_data.get("rss_page_index", 0)  # 0-based
+
+    _module_interface.logger.info(
+        f"显示页码选择界面: 当前页={current_page}, 总页数={total_pages}")
+
+    # 创建页码选择键盘
+    keyboard = []
+
+    # 每行最多3个按钮
+    buttons_per_row = 3
+
+    # 计算需要多少行
+    rows_needed = (total_pages + buttons_per_row - 1) // buttons_per_row
+
+    # 生成页码按钮
+    for row in range(rows_needed):
+        button_row = []
+        for i in range(1, buttons_per_row + 1):
+            page_num = row * buttons_per_row + i
+            if page_num <= total_pages:
+                # 当前页使用不同样式
+                if page_num == current_page + 1:  # 转为1-based显示
+                    button_text = f"▷ {page_num}"
+                else:
+                    button_text = str(page_num)
+
+                # 页码是0-based，但显示是1-based
+                page_index = page_num - 1
+
+                button_row.append(
+                    InlineKeyboardButton(
+                        button_text,
+                        callback_data=
+                        f"{CALLBACK_PREFIX}goto_page:{page_index}"  # 保存为0-based
+                    ))
+        if button_row:  # 只添加非空行
+            keyboard.append(button_row)
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton(
+            "⇠ Back",
+            callback_data=f"{CALLBACK_PREFIX}page:{current_page}"  # 返回当前页
+        )
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 更新消息
+    await query.edit_message_text("<b>📋 RSS 订阅列表</b>\n\n请选择要跳转的页码：",
+                                  reply_markup=reply_markup,
+                                  parse_mode="HTML")
+    await query.answer()
+
+
+async def show_health_page_selector(update: Update,
+                                    context: ContextTypes.DEFAULT_TYPE):
+    """显示健康状态页码选择界面"""
+    query = update.callback_query
+
+    # 从上下文中获取总页数和当前页码，使用模块特定的键
+    total_pages = context.user_data.get("rss_health_total_pages", 10)  # 默认10页
+    current_page = context.user_data.get("rss_health_page_index", 0)  # 0-based
+
+    _module_interface.logger.info(
+        f"显示健康状态页码选择界面: 当前页={current_page}, 总页数={total_pages}")
+
+    # 创建页码选择键盘
+    keyboard = []
+
+    # 每行最多3个按钮
+    buttons_per_row = 3
+
+    # 计算需要多少行
+    rows_needed = (total_pages + buttons_per_row - 1) // buttons_per_row
+
+    # 生成页码按钮
+    for row in range(rows_needed):
+        button_row = []
+        for i in range(1, buttons_per_row + 1):
+            page_num = row * buttons_per_row + i
+            if page_num <= total_pages:
+                # 当前页使用不同样式
+                if page_num == current_page + 1:  # 转为1-based显示
+                    button_text = f"▷ {page_num}"
+                else:
+                    button_text = str(page_num)
+
+                # 页码是0-based，但显示是1-based
+                page_index = page_num - 1
+
+                button_row.append(
+                    InlineKeyboardButton(
+                        button_text,
+                        callback_data=
+                        f"{CALLBACK_PREFIX}health_goto_page:{page_index}"  # 保存为0-based
+                    ))
+        if button_row:  # 只添加非空行
+            keyboard.append(button_row)
+
+    # 添加返回按钮
+    keyboard.append([
+        InlineKeyboardButton(
+            "⇠ Back",
+            callback_data=f"{CALLBACK_PREFIX}health_page:{current_page}"  # 返回当前页
+        )
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 更新消息
+    await query.edit_message_text("<b>📊 RSS 源健康状态</b>\n\n请选择要跳转的页码：",
+                                  reply_markup=reply_markup,
+                                  parse_mode="HTML")
+    await query.answer()
+
+
 async def handle_callback_query(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """处理按钮回调查询"""
@@ -1004,6 +1273,157 @@ async def handle_callback_query(update: Update,
 
     # 检查是否是 RSS 模块的回调
     if not data.startswith(CALLBACK_PREFIX):
+        return
+
+    # 处理特殊情况：订阅列表分页回调
+    if data.startswith(f"{CALLBACK_PREFIX}page:"):
+        # 分页回调直接调用列表函数
+        await list_subscriptions(update, context)
+        return
+
+    # 处理特殊情况：健康状态分页回调
+    if data.startswith(f"{CALLBACK_PREFIX}health_page:"):
+        # 健康状态分页回调直接调用健康状态函数
+        await rss_health_command(update, context)
+        return
+
+    # 处理特殊情况：订阅列表页码选择回调
+    if data.startswith(f"{CALLBACK_PREFIX}page_select:"):
+        # 从回调数据中提取当前页码
+        try:
+            current_page = int(data.split(":")[-1])
+
+            # 获取当前聊天的订阅列表，计算实际总页数
+            chat_id_str = str(update.effective_chat.id)
+            chat_type = "private" if update.effective_chat.type == "private" else "group"
+            subscriptions = _config["subscriptions"][chat_type].get(
+                chat_id_str, [])
+
+            # 设置每页显示的订阅数量
+            page_size = 5
+            actual_total_pages = max(1, (len(subscriptions) + page_size - 1) //
+                                     page_size)
+
+            # 保存到上下文，使用模块特定的键
+            context.user_data["rss_page_index"] = current_page
+            context.user_data["rss_total_pages"] = actual_total_pages
+
+            _module_interface.logger.info(
+                f"页码选择: 当前页={current_page}, 实际总页数={actual_total_pages}")
+
+            # 显示页码选择界面
+            await show_page_selector(update, context)
+            return
+        except (ValueError, IndexError) as e:
+            _module_interface.logger.error(f"页码选择错误: {e}")
+            await callback_query.answer("无效的页码数据")
+            return
+
+    # 处理特殊情况：健康状态页码选择回调
+    if data.startswith(f"{CALLBACK_PREFIX}health_page_select:"):
+        # 从回调数据中提取当前页码
+        try:
+            current_page = int(data.split(":")[-1])
+
+            # 获取当前聊天的订阅列表，计算实际总页数
+            chat_id_str = str(update.effective_chat.id)
+            chat_type = "private" if update.effective_chat.type == "private" else "group"
+            subscriptions = _config["subscriptions"][chat_type].get(
+                chat_id_str, [])
+
+            # 设置每页显示的订阅数量
+            page_size = 4  # 健康状态每页显示4个
+            actual_total_pages = max(1, (len(subscriptions) + page_size - 1) //
+                                     page_size)
+
+            # 保存到上下文，使用模块特定的键
+            context.user_data["rss_health_page_index"] = current_page
+            context.user_data["rss_health_total_pages"] = actual_total_pages
+
+            _module_interface.logger.info(
+                f"健康状态页码选择: 当前页={current_page}, 实际总页数={actual_total_pages}")
+
+            # 显示健康状态页码选择界面
+            await show_health_page_selector(update, context)
+            return
+        except (ValueError, IndexError) as e:
+            _module_interface.logger.error(f"健康状态页码选择错误: {e}")
+            await callback_query.answer("无效的页码数据")
+            return
+
+    # 处理特殊情况：订阅列表页码跳转回调
+    if data.startswith(f"{CALLBACK_PREFIX}goto_page:"):
+        # 从回调数据中提取目标页码
+        try:
+            target_page = int(data.split(":")[-1])
+
+            # 获取当前聊天的订阅列表，计算实际总页数
+            chat_id_str = str(update.effective_chat.id)
+            chat_type = "private" if update.effective_chat.type == "private" else "group"
+            subscriptions = _config["subscriptions"][chat_type].get(
+                chat_id_str, [])
+
+            # 设置每页显示的订阅数量
+            page_size = 5
+            actual_total_pages = max(1, (len(subscriptions) + page_size - 1) //
+                                     page_size)
+
+            # 确保目标页码在有效范围内
+            target_page = max(0, min(target_page, actual_total_pages - 1))
+
+            # 保存到上下文，使用模块特定的键
+            context.user_data["rss_page_index"] = target_page
+            context.user_data["rss_total_pages"] = actual_total_pages
+
+            _module_interface.logger.info(
+                f"跳转到页面: {target_page}, 实际总页数={actual_total_pages}")
+
+            # 调用列表函数
+            await list_subscriptions(update, context)
+            return
+        except (ValueError, IndexError) as e:
+            _module_interface.logger.error(f"页码跳转错误: {e}")
+            await callback_query.answer("无效的页码数据")
+            return
+
+    # 处理特殊情况：健康状态页码跳转回调
+    if data.startswith(f"{CALLBACK_PREFIX}health_goto_page:"):
+        # 从回调数据中提取目标页码
+        try:
+            target_page = int(data.split(":")[-1])
+
+            # 获取当前聊天的订阅列表，计算实际总页数
+            chat_id_str = str(update.effective_chat.id)
+            chat_type = "private" if update.effective_chat.type == "private" else "group"
+            subscriptions = _config["subscriptions"][chat_type].get(
+                chat_id_str, [])
+
+            # 设置每页显示的订阅数量
+            page_size = 4  # 健康状态每页显示4个
+            actual_total_pages = max(1, (len(subscriptions) + page_size - 1) //
+                                     page_size)
+
+            # 确保目标页码在有效范围内
+            target_page = max(0, min(target_page, actual_total_pages - 1))
+
+            # 保存到上下文，使用模块特定的键
+            context.user_data["rss_health_page_index"] = target_page
+            context.user_data["rss_health_total_pages"] = actual_total_pages
+
+            _module_interface.logger.info(
+                f"跳转到健康状态页面: {target_page}, 实际总页数={actual_total_pages}")
+
+            # 调用健康状态函数
+            await rss_health_command(update, context)
+            return
+        except (ValueError, IndexError) as e:
+            _module_interface.logger.error(f"健康状态页码跳转错误: {e}")
+            await callback_query.answer("无效的页码数据")
+            return
+
+    # 处理特殊情况：noop 回调
+    if data == "noop":
+        await callback_query.answer()
         return
 
     # 提取操作
@@ -1032,10 +1452,9 @@ async def handle_callback_query(update: Update,
             health_callback = f"{CALLBACK_PREFIX}health"
 
             keyboard = [[
-                InlineKeyboardButton("List", callback_data=list_callback),
                 InlineKeyboardButton("Add", callback_data=add_callback),
-                InlineKeyboardButton("Health", callback_data=health_callback)
-            ]]
+                InlineKeyboardButton("List", callback_data=list_callback)
+            ], [InlineKeyboardButton("Health", callback_data=health_callback)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await callback_query.edit_message_text(
@@ -1123,10 +1542,10 @@ async def handle_callback_query(update: Update,
                                       subscriptions,
                                       chat_id=chat_id)
 
-            # 创建返回按钮
+            # 创建返回按钮（使用cancel操作以清理会话状态）
             keyboard = [[
                 InlineKeyboardButton("⇠ Back",
-                                     callback_data=f"{CALLBACK_PREFIX}list")
+                                     callback_data=f"{CALLBACK_PREFIX}cancel")
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1143,7 +1562,7 @@ async def handle_callback_query(update: Update,
                 text += f"{i}. <b>{safe_title}</b>\n"
 
             text += "\n请输入要删除的订阅序号（1-" + str(len(subscriptions)) + "）\n"
-            text += "可以输入多个序号，用空格分隔，例如：<code>1 3 5</code>"
+            text += "可以输入多个序号，用空格分隔"
 
             await callback_query.edit_message_text(text,
                                                    reply_markup=reply_markup,
@@ -1151,6 +1570,7 @@ async def handle_callback_query(update: Update,
         else:
             await callback_query.answer("未知操作")
     except Exception as e:
+        _module_interface.logger.error(f"处理回调查询时出错: {e}")
         await callback_query.answer("处理请求时出错")
 
 
@@ -1219,8 +1639,10 @@ async def handle_remove_input(update: Update,
         deleted_titles.append(title)
 
         # 从订阅列表中删除
-        if url in _config["subscriptions"][chat_type][chat_id]:
-            _config["subscriptions"][chat_type][chat_id].remove(url)
+        if chat_id_str in _config["subscriptions"][
+                chat_type] and url in _config["subscriptions"][chat_type][
+                    chat_id_str]:
+            _config["subscriptions"][chat_type][chat_id_str].remove(url)
 
         # 检查这个源是否还被其他聊天订阅
         still_subscribed = False

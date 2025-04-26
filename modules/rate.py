@@ -344,10 +344,10 @@ async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = ("💱 *汇率转换帮助*\n\n"
                      "*使用方法:*\n"
                      "/rate <金额> <源货币> <目标货币>\n"
-                     "/rate <源货币> <目标货币> [金额=1]\n\n"
-                     "*示例:*\n"
-                     "`/rate 100 USD CNY` - 将 100 美元转换为人民币\n"
-                     "`/rate BTC USD` - 显示 1 比特币等于多少美元\n\n"
+                     "/rate <源货币> <目标货币> \\[金额=1]\n\n"
+                     "*示例:*（支持多种输入方式）\n"
+                     "`/rate 100 USD 中国`\n"
+                     "`/rate 比特币 CN`\n\n"
                      "*支持的货币:*\n"
                      "- 法币: CNY, USD, EUR, GBP, JPY 等\n"
                      "- 虚拟货币: BTC, ETH, USDT 等\n\n"
@@ -421,6 +421,11 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
     user_id = update.effective_user.id
+
+    # 检查是否是私聊
+    if update.effective_chat.type != "private":
+        await message.reply_text("⚠️ 出于安全考虑，汇率模块配置只能在私聊中进行")
+        return
 
     # 检查权限 - 仅超级管理员可用
     if not _module_interface.config_manager.is_admin(user_id):
@@ -519,8 +524,9 @@ async def handle_callback_query(update: Update,
 
         await query.edit_message_text(
             "请输入 ExchangeRate API 密钥：\n\n"
-            "您可以在 https://www.exchangerate-api.com/ 注册获取免费 API 密钥",
+            "您可以在 [exchangerate-api.com](https://www.exchangerate-api.com/) 注册获取免费 API 密钥",
             reply_markup=reply_markup,
+            parse_mode="MARKDOWN",
             disable_web_page_preview=True)
 
     elif action == "set_interval":
@@ -568,8 +574,8 @@ async def handle_callback_query(update: Update,
         config = load_config()
         api_key = config.get("api_key", "")
         # 隐藏部分 API 密钥以保护安全
-        masked_key = "未设置" if not api_key else f"{api_key[:4]}...{api_key[-4:]}" if len(
-            api_key) > 8 else "已设置"
+        masked_key = "未设置" if not api_key else f"{api_key[:3]}*****{api_key[-3:]}" if len(
+            api_key) > 6 else "已设置"
         update_interval = config.get("update_interval", 3600)
 
         # 构建按钮

@@ -87,10 +87,11 @@ class PaginationHelper:
         else:
             row.append(InlineKeyboardButton(" ", callback_data="noop"))
 
-        # 页码指示
+        # 页码指示 - 点击可以选择页码
         row.append(
-            InlineKeyboardButton(f"{page_index + 1}/{self.total_pages}",
-                                 callback_data="noop"))
+            InlineKeyboardButton(
+                f"{page_index + 1}/{self.total_pages}",
+                callback_data=f"{self.callback_prefix}:select:{id(self)}"))
 
         # 下一页按钮
         if page_index < self.total_pages - 1:
@@ -117,6 +118,11 @@ class PaginationHelper:
             Message: 发送的消息
         """
         content, keyboard = self.get_page_content(page_index)
+
+        # 保存分页信息到上下文，用于页码选择功能
+        if context:
+            context.user_data["page_index"] = page_index
+            context.user_data["total_pages"] = self.total_pages
 
         # 如果是回调查询
         if update.callback_query:
@@ -169,19 +175,52 @@ class PaginationHelper:
                 return
 
             prefix = parts[0]
-            page_index = int(parts[1])
+            action = parts[1]
+
+            # 处理页码选择
+            if action == "select" and len(parts) >= 3:
+                # 显示页码选择界面
+                await PaginationHelper.show_page_selector(
+                    update, context, prefix, parts[2])
+                return
+            elif action.startswith("goto_") and len(parts) >= 3:
+                # 处理页码跳转
+                try:
+                    page_index = int(action.replace("goto_", ""))
+                    # 根据前缀确定要调用的命令处理器
+                    if prefix == "mod_page":
+                        context.user_data["page_index"] = page_index
+                        await context.bot_data["command_manager"
+                                               ]._list_modules_command(
+                                                   update, context)
+                    elif prefix == "cmd_page":
+                        context.user_data["page_index"] = page_index
+                        await context.bot_data["command_manager"
+                                               ]._list_commands_command(
+                                                   update, context)
+                    else:
+                        # 其他模块的回调处理器
+                        context.user_data["page_index"] = page_index
+                        await query.answer("跳转到页面...")
+                except ValueError:
+                    await query.answer("无效的页码")
+                return
+
+            # 常规页面导航
+            page_index = int(action)
 
             # 根据前缀确定要调用的命令处理器
             if prefix == "mod_page":
-                # 调用 _list_modules_command
+                context.user_data["page_index"] = page_index
                 await context.bot_data[
                     "command_manager"]._list_modules_command(update, context)
             elif prefix == "cmd_page":
-                # 调用 _list_commands_command
+                context.user_data["page_index"] = page_index
                 await context.bot_data[
                     "command_manager"]._list_commands_command(update, context)
             else:
                 # 其他模块的回调处理器
+                context.user_data["page_index"] = page_index
                 await query.answer("处理中...")
 
         except Exception as e:
@@ -190,3 +229,60 @@ class PaginationHelper:
             print(f"回调处理错误: {e}")
             print(traceback.format_exc())
             await query.answer("处理回调时出错")
+
+    @staticmethod
+    async def show_page_selector(update, context, prefix, obj_id):
+        """显示页码选择界面
+
+        Args:
+            update: 更新对象
+            context: 上下文对象
+            prefix: 回调前缀
+            obj_id: 分页对象ID
+        """
+        query = update.callback_query
+
+        # 从上下文中获取总页数
+        total_pages = context.user_data.get("total_pages", 10)  # 默认10页
+        current_page = context.user_data.get("page_index", 0) + 1  # 转为1-based
+
+        # 创建页码选择键盘
+        keyboard = []
+
+        # 每行最多3个按钮
+        buttons_per_row = 3
+
+        # 计算需要多少行
+        rows_needed = (total_pages + buttons_per_row - 1) // buttons_per_row
+
+        # 生成页码按钮
+        for row in range(rows_needed):
+            button_row = []
+            for i in range(1, buttons_per_row + 1):
+                page_num = row * buttons_per_row + i
+                if page_num <= total_pages:
+                    # 当前页使用不同样式
+                    if page_num == current_page:
+                        button_text = f"▷ {page_num}"
+                    else:
+                        button_text = str(page_num)
+
+                    button_row.append(
+                        InlineKeyboardButton(
+                            button_text,
+                            callback_data=f"{prefix}:goto_{page_num-1}:{obj_id}"
+                        ))
+            if button_row:  # 只添加非空行
+                keyboard.append(button_row)
+
+        # 添加返回按钮
+        keyboard.append([
+            InlineKeyboardButton(
+                "⇠ Back", callback_data=f"{prefix}:{current_page-1}:{obj_id}")
+        ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # 更新消息
+        await query.edit_message_text("请选择要跳转的页码：", reply_markup=reply_markup)
+        await query.answer()

@@ -27,6 +27,9 @@ class CommandManager:
         # 锁
         self.command_lock = asyncio.Lock()
 
+        # 暂时存储 start 贴纸的 Telegram 文件 ID
+        self.start_sticker_id = None
+
         # 添加未知命令处理器
         self.application.add_handler(
             MessageHandler(
@@ -39,7 +42,8 @@ class CommandManager:
         self.application.add_handler(
             CallbackQueryHandler(
                 self._handle_command_page_callback,
-                pattern=r"^(mod_page|cmd_page):\d+:\d+$|^noop$"))
+                pattern=
+                r"^(mod_page|cmd_page):(select|\d+|goto_\d+):\d+$|^noop$"))
 
     async def register_core_commands(self, bot_engine):
         """注册核心命令"""
@@ -99,12 +103,6 @@ class CommandManager:
                 "callback": bot_engine._add_allowed_group_command,
                 "admin_level": "super_admin",
                 "description": "添加群组到白名单"
-            },
-            {
-                "name": "removegroup",
-                "callback": bot_engine._remove_allowed_group_command,
-                "admin_level": "super_admin",
-                "description": "从白名单移除群组"
             }
         ]
 
@@ -415,7 +413,7 @@ class CommandManager:
                 command = message.text.split()[0][1:].split('@')[0]
 
             # 超级管理员的特权命令列表
-            special_commands = ["addgroup", "listgroups", "removegroup"]
+            special_commands = ["addgroup", "listgroups"]
 
             # 如果是超级管理员且正在使用特权命令，允许执行
             if is_super_admin and command in special_commands:
@@ -554,10 +552,27 @@ class CommandManager:
         # 获取消息对象（可能是新消息或编辑的消息）
         message = update.message or update.edited_message
 
-        await message.reply_sticker(
-            sticker=
-            'CAACAgEAAxkBAAIBmGJ1Mt3gP0VaAvccwfw1lwgt53VlAAIXCQACkSkAARB0sik1UbskECQE'
-        )
+        # 如果已有贴纸 ID，直接使用
+        if self.start_sticker_id:
+            try:
+                await message.reply_sticker(sticker=self.start_sticker_id)
+                return
+            except Exception as e:
+                self.logger.warning(f"使用已保存的贴纸 ID 失败: {e}")
+                # 如果失败，重置 ID 并尝试发送文件
+                self.start_sticker_id = None
+
+        # 如果没有贴纸 ID 或使用 ID 失败，发送文件并保存返回的 ID
+        try:
+            with open("start.webp", "rb") as sticker_file:
+                sticker_message = await message.reply_sticker(
+                    sticker=sticker_file)
+                # 保存返回的贴纸 ID 以便下次使用
+                if sticker_message and sticker_message.sticker:
+                    self.start_sticker_id = sticker_message.sticker.file_id
+                    self.logger.debug(f"已暂存 start.webp 贴纸的 Telegram 文件 ID")
+        except Exception as e:
+            self.logger.error(f"发送贴纸失败: {e}")
 
     async def _help_command(self, update, context):
         """处理 /help 命令
@@ -586,7 +601,6 @@ class CommandManager:
             help_text += "/stats - 显示机器人统计信息\n"
             help_text += "/listgroups - 列出允许的群组\n"
             help_text += "/addgroup \\[群组 ID] - 添加群组到白名单\n"
-            help_text += "/removegroup <群组 ID> - 从白名单移除群组\n"
 
         # 获取消息对象（可能是新消息或编辑的消息）
         message = update.message or update.edited_message
@@ -857,6 +871,96 @@ class CommandManager:
         else:
             return f"{command_part} - {description} *[{module}]*"
 
+    async def _calculate_modules_total_pages(self, context):
+        """计算模块列表的总页数
+
+        Args:
+            context: 上下文对象
+
+        Returns:
+            tuple: (总页数, 页面大小)
+        """
+        # 模块列表分页
+        module_manager = context.bot_data.get("module_manager")
+        installed_modules = module_manager.discover_modules()
+
+        # 过滤掉以下划线开头的模块
+        module_list = [m for m in installed_modules if not m.startswith('_')]
+
+        # 计算总页数
+        page_size = 8  # 与 _list_modules_command 中的值保持一致
+        actual_total_pages = max(1, (len(module_list) + page_size - 1) //
+                                 page_size)
+
+        return actual_total_pages, page_size
+
+    async def _calculate_commands_total_pages(self, context, user_id, chat_id,
+                                              chat_type):
+        """计算命令列表的总页数
+
+        Args:
+            context: 上下文对象
+            user_id: 用户ID
+            chat_id: 聊天ID
+            chat_type: 聊天类型
+
+        Returns:
+            tuple: (总页数, 页面大小)
+        """
+        # 命令列表分页
+        # 获取用户权限
+        is_super_admin = self.config_manager.is_admin(user_id)
+
+        is_group_admin = False
+        if chat_type in ["group", "supergroup"]:
+            try:
+                chat_member = await context.bot.get_chat_member(
+                    chat_id, user_id)
+                is_group_admin = chat_member.status in [
+                    "creator", "administrator"
+                ]
+            except Exception:
+                pass
+
+        # 过滤命令列表
+        current_chat_type = "private" if chat_type == "private" else "group"
+        module_manager = context.bot_data.get("module_manager")
+
+        # 收集命令信息
+        command_list = []
+        for cmd_name, cmd_info in self.commands.items():
+            module_name = cmd_info["module"]
+            admin_level = cmd_info["admin_level"]
+
+            # 检查权限
+            if admin_level == "super_admin" and not is_super_admin:
+                continue
+
+            if admin_level == "group_admin" and not (is_super_admin
+                                                     or is_group_admin):
+                continue
+
+            # 核心模块命令总是可用
+            if module_name == "core":
+                command_list.append(cmd_name)
+                continue
+
+            # 检查非核心模块命令是否支持当前聊天类型
+            module_info = module_manager.get_module_info(module_name)
+            if module_info:
+                module = module_info["module"]
+                supported_types = getattr(module, "MODULE_CHAT_TYPES",
+                                          ["private", "group"])
+                if current_chat_type in supported_types:
+                    command_list.append(cmd_name)
+
+        # 计算总页数
+        page_size = 10  # 与 _list_commands_command 中的值保持一致
+        actual_total_pages = max(1, (len(command_list) + page_size - 1) //
+                                 page_size)
+
+        return actual_total_pages, page_size
+
     async def _handle_command_page_callback(self, update, context):
         """处理命令分页回调
 
@@ -875,11 +979,113 @@ class CommandManager:
             # 解析回调数据
             parts = query.data.split(":")
             prefix = parts[0]
-            page_index = int(parts[1])
+            action = parts[1]
 
             chat_id = update.effective_chat.id
             chat_type = update.effective_chat.type
             current_chat_type = "private" if chat_type == "private" else "group"
+
+            # 处理页码选择
+            if action == "select" and len(parts) >= 3:
+                # 重新计算实际的总页数
+                if prefix == "mod_page":
+                    # 模块列表分页
+                    actual_total_pages, _ = await self._calculate_modules_total_pages(
+                        context)
+
+                    # 保存到上下文
+                    context.user_data["total_pages"] = actual_total_pages
+
+                elif prefix == "cmd_page":
+                    # 命令列表分页
+                    user_id = update.effective_user.id
+                    chat_id = update.effective_chat.id
+                    chat_type = update.effective_chat.type
+
+                    actual_total_pages, _ = await self._calculate_commands_total_pages(
+                        context, user_id, chat_id, chat_type)
+
+                    # 保存到上下文
+                    context.user_data["total_pages"] = actual_total_pages
+
+                # 显示页码选择界面
+                await PaginationHelper.show_page_selector(
+                    update, context, prefix, parts[2])
+                return
+            elif action.startswith("goto_") and len(parts) >= 3:
+                # 处理页码跳转
+                try:
+                    page_index = int(action.replace("goto_", ""))
+
+                    # 重新计算实际的总页数
+                    if prefix == "mod_page":
+                        # 模块列表分页
+                        actual_total_pages, _ = await self._calculate_modules_total_pages(
+                            context)
+
+                        # 确保页码在有效范围内
+                        page_index = max(
+                            0, min(page_index, actual_total_pages - 1))
+
+                        # 保存到上下文
+                        context.user_data["total_pages"] = actual_total_pages
+
+                    elif prefix == "cmd_page":
+                        # 命令列表分页
+                        user_id = update.effective_user.id
+                        chat_id = update.effective_chat.id
+                        chat_type = update.effective_chat.type
+
+                        actual_total_pages, _ = await self._calculate_commands_total_pages(
+                            context, user_id, chat_id, chat_type)
+
+                        # 确保页码在有效范围内
+                        page_index = max(
+                            0, min(page_index, actual_total_pages - 1))
+
+                        # 保存到上下文
+                        context.user_data["total_pages"] = actual_total_pages
+
+                except ValueError:
+                    await query.answer("无效的页码")
+                    return
+            else:
+                # 常规页面导航
+                try:
+                    page_index = int(action)
+
+                    # 重新计算实际的总页数
+                    if prefix == "mod_page":
+                        # 模块列表分页
+                        actual_total_pages, _ = await self._calculate_modules_total_pages(
+                            context)
+
+                        # 确保页码在有效范围内
+                        page_index = max(
+                            0, min(page_index, actual_total_pages - 1))
+
+                        # 保存到上下文
+                        context.user_data["total_pages"] = actual_total_pages
+
+                    elif prefix == "cmd_page":
+                        # 命令列表分页
+                        user_id = update.effective_user.id
+                        chat_id = update.effective_chat.id
+                        chat_type = update.effective_chat.type
+
+                        actual_total_pages, _ = await self._calculate_commands_total_pages(
+                            context, user_id, chat_id, chat_type)
+
+                        # 确保页码在有效范围内
+                        page_index = max(
+                            0, min(page_index, actual_total_pages - 1))
+
+                        # 保存到上下文
+                        context.user_data["total_pages"] = actual_total_pages
+
+                except ValueError:
+                    await query.answer("无效的页码")
+                    return
 
             # 获取用户权限
             user_id = update.effective_user.id
@@ -1038,7 +1244,18 @@ class CommandManager:
         days, remainder = divmod(uptime_seconds, 86400)
         hours, remainder = divmod(remainder, 3600)
         minutes, seconds = divmod(remainder, 60)
-        uptime_str = f"{int(days)} 天 {int(hours)} 小时 {int(minutes)} 分钟 {int(seconds)} 秒"
+
+        # 只显示非零的时间单位
+        uptime_parts = []
+        if int(days) > 0:
+            uptime_parts.append(f"{int(days)} 天")
+        if int(hours) > 0 or int(days) > 0:
+            uptime_parts.append(f"{int(hours)} 小时")
+        if int(minutes) > 0 or int(hours) > 0 or int(days) > 0:
+            uptime_parts.append(f"{int(minutes)} 分钟")
+        uptime_parts.append(f"{int(seconds)} 秒")
+
+        uptime_str = " ".join(uptime_parts)
 
         # 获取已加载模块数量
         loaded_modules = len(module_manager.loaded_modules)
@@ -1052,7 +1269,6 @@ class CommandManager:
         # 获取系统信息
         import platform
         stats_message += f"🖥️ 系统: {platform.system()} {platform.release()}\n"
-        stats_message += f"🐍 Python: {platform.python_version()}\n"
 
         # 获取活跃会话数量
         active_sessions = await session_manager.get_active_sessions_count()
@@ -1113,6 +1329,7 @@ class CommandManager:
         # 获取消息对象（可能是新消息或编辑的消息）
         message = update.message or update.edited_message
         user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
 
         # 获取会话管理器
         session_manager = context.bot_data.get("session_manager")
@@ -1120,17 +1337,17 @@ class CommandManager:
             await message.reply_text("⚠️ 系统错误：无法获取会话管理器")
             return
 
-        # 获取当前会话数据
-        session_data = await session_manager.get_all(user_id)
+        # 获取当前会话数据（指定 chat_id）
+        session_data = await session_manager.get_all(user_id, chat_id=chat_id)
 
         # 检查是否有活跃会话
         if not session_data:
             await message.reply_text("没有需要取消的操作")
             return
 
-        # 清除用户的所有会话数据
-        await session_manager.clear(user_id)
+        # 清除用户的所有会话数据（指定 chat_id）
+        await session_manager.clear(user_id, chat_id=chat_id)
 
         # 回复用户
         await message.reply_text("✅ 已取消当前操作")
-        self.logger.info(f"用户 {user_id} 取消了当前操作")
+        self.logger.info(f"用户 {user_id} 在聊天 {chat_id} 中取消了当前操作")

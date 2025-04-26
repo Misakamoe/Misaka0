@@ -580,7 +580,12 @@ async def convert_webp_to_format(webp_path, format_str="PNG"):
     try:
         if PIL_AVAILABLE:
             # 设置输出路径
-            output_path = webp_path.replace(".webp", f".{format_str.lower()}")
+            # 统一使用小写扩展名
+            ext = format_str.lower()
+            # 将 jpg 转换为 jpeg 作为格式标识符
+            format_str = "JPEG" if format_str.upper(
+            ) == "JPG" else format_str.upper()
+            output_path = webp_path.replace(".webp", f".{ext}")
 
             # 打开并转换图片
             img = Image.open(webp_path)
@@ -595,7 +600,7 @@ async def convert_webp_to_format(webp_path, format_str="PNG"):
                          format=format_str,
                          lossless=True,
                          quality=100)
-            else:
+            elif format_str == "JPEG":
                 # JPG 不支持透明度，添加白色背景
                 bg = Image.new("RGB", img.size, (255, 255, 255))
                 if img.mode == 'RGBA':

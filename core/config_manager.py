@@ -31,11 +31,11 @@ class ConfigManager:
 
     def _load_json_file(self, file_path, default_value=None):
         """从文件加载 JSON 数据
-        
+
         Args:
             file_path: 文件路径
             default_value: 默认值
-            
+
         Returns:
             dict: 加载的数据或默认值
         """
@@ -60,11 +60,11 @@ class ConfigManager:
 
     def _save_json_file(self, file_path, data):
         """保存 JSON 数据到文件
-        
+
         Args:
             file_path: 文件路径
             data: 要保存的数据
-            
+
         Returns:
             bool: 是否成功保存
         """
@@ -82,7 +82,7 @@ class ConfigManager:
 
     def _backup_corrupted_file(self, file_path):
         """备份损坏的配置文件
-        
+
         Args:
             file_path: 文件路径
         """
@@ -96,7 +96,7 @@ class ConfigManager:
 
     def reload_main_config(self):
         """重新加载主配置
-        
+
         Returns:
             dict: 加载的配置
         """
@@ -138,7 +138,7 @@ class ConfigManager:
 
     def save_main_config(self):
         """保存主配置
-        
+
         Returns:
             bool: 是否成功保存
         """
@@ -146,7 +146,7 @@ class ConfigManager:
 
     def get_token(self):
         """获取 Bot Token
-        
+
         Returns:
             str: Bot Token
         """
@@ -168,10 +168,10 @@ class ConfigManager:
 
     def set_token(self, token):
         """设置 Bot Token
-        
+
         Args:
             token: Token 字符串
-            
+
         Returns:
             bool: 是否成功设置
         """
@@ -187,7 +187,7 @@ class ConfigManager:
 
     def get_valid_admin_ids(self):
         """获取有效的管理员 ID 列表
-        
+
         Returns:
             list: 管理员 ID 列表
         """
@@ -209,10 +209,10 @@ class ConfigManager:
 
     def is_admin(self, user_id):
         """检查用户是否为管理员
-        
+
         Args:
             user_id: 用户 ID
-            
+
         Returns:
             bool: 是否为管理员
         """
@@ -220,10 +220,10 @@ class ConfigManager:
 
     def add_admin(self, user_id):
         """添加管理员
-        
+
         Args:
             user_id: 用户 ID
-            
+
         Returns:
             bool: 是否成功添加
         """
@@ -239,10 +239,10 @@ class ConfigManager:
 
     def remove_admin(self, user_id):
         """移除管理员
-        
+
         Args:
             user_id: 用户 ID
-            
+
         Returns:
             bool: 是否成功移除
         """
@@ -253,23 +253,24 @@ class ConfigManager:
 
     def is_allowed_group(self, group_id):
         """检查群组是否允许使用 bot
-        
+
         Args:
             group_id: 群组 ID
-            
+
         Returns:
             bool: 是否允许
         """
         allowed_groups = self.main_config.get("allowed_groups", {})
         return str(group_id) in allowed_groups
 
-    def add_allowed_group(self, group_id, added_by):
+    def add_allowed_group(self, group_id, added_by, group_name=None):
         """添加允许的群组到白名单
-        
+
         Args:
             group_id: 群组 ID
             added_by: 添加者 ID
-            
+            group_name: 群组名称（可选）
+
         Returns:
             bool: 是否成功添加
         """
@@ -278,10 +279,13 @@ class ConfigManager:
             self.main_config["allowed_groups"] = {}
 
         group_id_str = str(group_id)
-        self.main_config["allowed_groups"][group_id_str] = {
-            "added_by": added_by,
-            "added_at": time.time()
-        }
+        group_data = {"added_by": added_by, "added_at": time.time()}
+
+        # 如果提供了群组名称，添加到数据中
+        if group_name:
+            group_data["group_name"] = group_name
+
+        self.main_config["allowed_groups"][group_id_str] = group_data
 
         # 保存配置
         success = self.save_main_config()
@@ -291,10 +295,10 @@ class ConfigManager:
 
     def remove_allowed_group(self, group_id):
         """从白名单移除群组
-        
+
         Args:
             group_id: 群组 ID
-            
+
         Returns:
             bool: 是否成功移除
         """
@@ -310,7 +314,7 @@ class ConfigManager:
 
     def list_allowed_groups(self):
         """列出所有允许的群组
-        
+
         Returns:
             dict: 群组信息
         """

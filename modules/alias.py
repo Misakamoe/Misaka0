@@ -336,13 +336,12 @@ async def show_alias_main_menu(update: Update, _: ContextTypes.DEFAULT_TYPE):
     if not has_aliases:
         reply += "<i>暂无别名</i>\n"
 
-    # 构建按钮 - 使用短英文文本和水平排列
+    # 构建按钮 - 使用短英文文本和两行排列
     keyboard = [[
         InlineKeyboardButton("Add", callback_data=f"{CALLBACK_PREFIX}add"),
         InlineKeyboardButton("Remove",
-                             callback_data=f"{CALLBACK_PREFIX}remove"),
-        InlineKeyboardButton("Help", callback_data=f"{CALLBACK_PREFIX}help")
-    ]]
+                             callback_data=f"{CALLBACK_PREFIX}remove")
+    ], [InlineKeyboardButton("Help", callback_data=f"{CALLBACK_PREFIX}help")]]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -488,11 +487,7 @@ async def handle_callback_query(update: Update,
     elif action == "help":
         # 显示帮助信息
         help_text = "<b>📚 命令别名帮助</b>\n\n"
-        help_text += "命令别名允许您为现有命令创建更易记的名称，特别是中文名称。\n\n"
-        help_text += "<b>使用方法：</b>\n"
-        help_text += "• 使用 <code>/alias</code> 命令打开别名管理界面\n"
-        help_text += "• 点击 <b>Add</b> 按钮添加新别名\n"
-        help_text += "• 点击 <b>Remove</b> 按钮删除现有别名\n\n"
+        help_text += "您可以为现有命令创建更易记的名称，特别是中文名称。\n\n"
         help_text += "<b>示例：</b>\n"
         help_text += "添加别名 <code>帮助</code> 给命令 <code>/help</code>\n"
         help_text += "您可以使用 <code>/帮助</code> 代替 <code>/help</code>"
@@ -606,7 +601,7 @@ async def handle_callback_query(update: Update,
         # 提示用户输入别名
         text = f"<b>➕ 添加别名</b>\n\n"
         text += f"已选择命令: <code>/{cmd}</code>\n\n"
-        text += "请输入要添加的别名（不需要加 / 前缀）："
+        text += "请输入要添加的别名（不需要加 /）"
 
         # 添加取消按钮 - 使用短英文文本
         keyboard = [[
@@ -749,7 +744,7 @@ async def show_add_alias_menu(update: Update,
 
     # 构建HTML格式的消息
     text = "<b>➕ 添加别名</b>\n\n"
-    text += "请选择要为其添加别名的命令："
+    text += "请选择要为其添加别名的命令：\n"
     if pagination.total_pages > 1:
         text += f"\n<i>第 {page + 1}/{pagination.total_pages} 页</i>"
 
@@ -838,7 +833,7 @@ async def show_remove_alias_menu(update: Update,
     # 创建分页助手
     pagination = PaginationHelper(
         items=all_aliases,
-        page_size=10,  # 每页10个别名
+        page_size=5,  # 每页10个别名
         format_item=lambda item: f"{item[0]} → {item[1]}",  # 格式化为 "命令 → 别名"
         title="删除别名",
         callback_prefix=f"{CALLBACK_PREFIX}remove_page")
@@ -888,7 +883,7 @@ async def show_remove_alias_menu(update: Update,
 
     # 构建HTML格式的消息
     text = "<b>➖ 删除别名</b>\n\n"
-    text += "请选择要删除的别名："
+    text += "请选择要删除的别名：\n"
     if pagination.total_pages > 1:
         text += f"\n<i>第 {page + 1}/{pagination.total_pages} 页</i>"
 
@@ -901,10 +896,6 @@ async def show_remove_alias_menu(update: Update,
 async def handle_alias_input(update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
     """处理用户输入的别名"""
-    # 只处理私聊消息
-    if update.effective_chat.type != "private":
-        return
-
     message = update.message
     if not message:
         return
@@ -1019,9 +1010,8 @@ async def setup(interface):
                                               admin_level="super_admin")
 
     # 注册文本输入处理器 - 使用较高优先级，确保在其他模块之前处理
-    text_input_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-        handle_alias_input)
+    text_input_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                        handle_alias_input)
     await interface.register_handler(text_input_handler, group=1)
 
     # 延迟注册处理器，确保所有命令已经注册
