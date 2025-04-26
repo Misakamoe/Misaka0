@@ -15,7 +15,7 @@ from utils.formatter import TextFormatter
 
 # 模块元数据
 MODULE_NAME = "rss"
-MODULE_VERSION = "3.0.0"
+MODULE_VERSION = "3.0.1"
 MODULE_DESCRIPTION = "RSS 订阅，智能间隔和健康监控"
 MODULE_COMMANDS = ["rss"]
 MODULE_CHAT_TYPES = ["private", "group"]  # 支持私聊和群组
@@ -106,6 +106,41 @@ async def rss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message:
         _module_interface.logger.error("无法获取消息对象")
         return
+
+    # 在群组中检查用户是否为管理员
+    if update.effective_chat.type != "private":
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+
+        try:
+            # 检查是否是超级管理员
+            if context.bot_data.get("config_manager").is_admin(user_id):
+                pass  # 超级管理员可以使用
+            else:
+                # 检查是否是群组管理员
+                chat_member = await context.bot.get_chat_member(
+                    chat_id, user_id)
+                is_admin = chat_member.status in ["creator", "administrator"]
+
+                if not is_admin:
+                    if hasattr(update,
+                               'callback_query') and update.callback_query:
+                        await update.callback_query.answer(
+                            "⚠️ 只有管理员可以管理 RSS 订阅")
+                        return
+                    else:
+                        await message.reply_text("⚠️ 只有管理员可以管理 RSS 订阅")
+                        return
+        except Exception as e:
+            # 使用全局模块接口记录日志
+            if _module_interface:
+                _module_interface.logger.error(f"检查群组权限时出错: {e}")
+            if hasattr(update, 'callback_query') and update.callback_query:
+                await update.callback_query.answer("⚠️ 检查权限时出错，请稍后再试")
+                return
+            else:
+                await message.reply_text("⚠️ 检查权限时出错，请稍后再试")
+                return
 
     # 显示主菜单
     list_callback = f"{CALLBACK_PREFIX}list"
@@ -1271,6 +1306,28 @@ async def handle_callback_query(update: Update,
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
+    # 在群组中检查用户是否为管理员
+    if update.effective_chat.type != "private":
+        try:
+            # 检查是否是超级管理员
+            if context.bot_data.get("config_manager").is_admin(user_id):
+                pass  # 超级管理员可以使用
+            else:
+                # 检查是否是群组管理员
+                chat_member = await context.bot.get_chat_member(
+                    chat_id, user_id)
+                is_admin = chat_member.status in ["creator", "administrator"]
+
+                if not is_admin:
+                    await callback_query.answer("⚠️ 只有管理员可以管理 RSS 订阅")
+                    return
+        except Exception as e:
+            # 使用全局模块接口记录日志
+            if _module_interface:
+                _module_interface.logger.error(f"检查群组权限时出错: {e}")
+            await callback_query.answer("⚠️ 检查权限时出错，请稍后再试")
+            return
+
     # 检查是否是 RSS 模块的回调
     if not data.startswith(CALLBACK_PREFIX):
         return
@@ -1713,6 +1770,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_active:
         return
 
+    # 在群组中检查用户是否为管理员
+    if update.effective_chat.type != "private":
+        try:
+            # 检查是否是超级管理员
+            if context.bot_data.get("config_manager").is_admin(user_id):
+                pass  # 超级管理员可以使用
+            else:
+                # 检查是否是群组管理员
+                chat_member = await context.bot.get_chat_member(
+                    chat_id, user_id)
+                is_admin = chat_member.status in ["creator", "administrator"]
+
+                if not is_admin:
+                    await update.message.reply_text("⚠️ 只有管理员可以管理 RSS 订阅")
+                    # 清除会话状态
+                    await session_manager.delete(user_id,
+                                                 "rss_active",
+                                                 chat_id=chat_id)
+                    await session_manager.delete(user_id,
+                                                 "rss_step",
+                                                 chat_id=chat_id)
+                    return
+        except Exception as e:
+            # 使用全局模块接口记录日志
+            if _module_interface:
+                _module_interface.logger.error(f"检查群组权限时出错: {e}")
+            await update.message.reply_text("⚠️ 检查权限时出错，请稍后再试")
+            return
+
     # 获取当前步骤
     step = await session_manager.get(user_id,
                                      "rss_step",
@@ -1759,17 +1845,17 @@ async def setup(interface):
     if saved_state:
         _state.update(saved_state)
 
-    # 注册命令，在群组中只允许管理员使用
+    # 注册命令 - 所有人可用，在群组中的权限检查将在命令处理函数中实现
     await interface.register_command("rss",
                                      rss_command,
-                                     admin_level="group_admin",
+                                     admin_level=False,
                                      description="管理 RSS 订阅")
 
-    # 注册带权限验证的回调查询处理器
+    # 注册带权限验证的回调查询处理器 - 所有人可用，在群组中的权限检查将在回调处理函数中实现
     await interface.register_callback_handler(handle_callback_query,
                                               pattern=f"^{CALLBACK_PREFIX}",
-                                              admin_level="group_admin")
-    interface.logger.info("已注册带权限验证的回调查询处理器")
+                                              admin_level=False)
+    interface.logger.info("已注册回调查询处理器")
 
     # 注册消息处理器（用于会话流程）
     # 使用 group=5 确保不会干扰其他模块的会话处理

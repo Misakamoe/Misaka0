@@ -3869,7 +3869,7 @@ async def setup(module_interface):
     await module_interface.register_command("ai",
                                             ai_command,
                                             admin_level=False,
-                                            description="与 ai 进行对话")
+                                            description="与 AI 进行对话")
 
     # 注册私聊消息处理器
     text_handler = MessageHandler(

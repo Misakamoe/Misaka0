@@ -12,7 +12,7 @@ from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
 MODULE_NAME = "reminder"
-MODULE_VERSION = "3.1.0"
+MODULE_VERSION = "3.1.1"
 MODULE_DESCRIPTION = "周期性和一次性提醒功能"
 MODULE_COMMANDS = ["remind"]
 MODULE_CHAT_TYPES = ["private", "group"]  # 支持所有聊天类型
@@ -1108,6 +1108,31 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
 
+    # 在群组中检查用户是否为管理员
+    if update.effective_chat.type != "private":
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+
+        try:
+            # 检查是否是超级管理员
+            if context.bot_data.get("config_manager").is_admin(user_id):
+                pass  # 超级管理员可以使用
+            else:
+                # 检查是否是群组管理员
+                chat_member = await context.bot.get_chat_member(
+                    chat_id, user_id)
+                is_admin = chat_member.status in ["creator", "administrator"]
+
+                if not is_admin:
+                    await message.reply_text("⚠️ 只有管理员可以创建和管理提醒")
+                    return
+        except Exception as e:
+            # 使用全局模块接口记录日志
+            if _module_interface:
+                _module_interface.logger.error(f"检查群组权限时出错: {e}")
+            await message.reply_text("⚠️ 检查权限时出错，请稍后再试")
+            return
+
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
     if not session_manager:
@@ -1146,6 +1171,7 @@ async def handle_reminder_input(update: Update,
 
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
+    chat_type = update.effective_chat.type
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
@@ -1159,6 +1185,32 @@ async def handle_reminder_input(update: Update,
                                           chat_id=chat_id)
     if not is_active:
         return
+
+    # 在群组中检查用户是否为管理员
+    if chat_type != "private":
+        try:
+            chat_member = await context.bot.get_chat_member(chat_id, user_id)
+            is_admin = chat_member.status in ["creator", "administrator"]
+
+            if not is_admin and not context.bot_data.get(
+                    "config_manager").is_admin(user_id):
+                await message.reply_text("⚠️ 只有管理员可以创建和管理提醒")
+                # 清除会话状态
+                await session_manager.delete(user_id,
+                                             "reminder_active",
+                                             chat_id=chat_id)
+                await session_manager.delete(user_id,
+                                             "reminder_type",
+                                             chat_id=chat_id)
+                await session_manager.delete(user_id,
+                                             "reminder_step",
+                                             chat_id=chat_id)
+                return
+        except Exception as e:
+            # 使用全局模块接口记录日志
+            if _module_interface:
+                _module_interface.logger.error(f"检查群组权限时出错: {e}")
+            return
 
     # 获取会话状态
     reminder_type = await session_manager.get(user_id,
@@ -1498,6 +1550,28 @@ async def handle_callback_query(update: Update,
 
     # 移除前缀
     action = callback_data[len(CALLBACK_PREFIX):]
+
+    # 在群组中检查用户是否为管理员
+    if update.effective_chat.type != "private":
+        try:
+            # 检查是否是超级管理员
+            if context.bot_data.get("config_manager").is_admin(user_id):
+                pass  # 超级管理员可以使用
+            else:
+                # 检查是否是群组管理员
+                chat_member = await context.bot.get_chat_member(
+                    chat_id, user_id)
+                is_admin = chat_member.status in ["creator", "administrator"]
+
+                if not is_admin:
+                    await query.answer("⚠️ 只有管理员可以创建和管理提醒")
+                    return
+        except Exception as e:
+            # 使用全局模块接口记录日志
+            if _module_interface:
+                _module_interface.logger.error(f"检查群组权限时出错: {e}")
+            await query.answer("⚠️ 检查权限时出错，请稍后再试")
+            return
 
     # 获取会话管理器
     session_manager = context.bot_data.get("session_manager")
@@ -1868,11 +1942,9 @@ async def setup(interface):
                                      description="创建提醒")
 
     # 注册带权限验证的按钮回调处理器
-    await interface.register_callback_handler(
-        handle_callback_query,
-        pattern=f"^{CALLBACK_PREFIX}",
-        admin_level=False  # 所有用户都可以使用
-    )
+    await interface.register_callback_handler(handle_callback_query,
+                                              pattern=f"^{CALLBACK_PREFIX}",
+                                              admin_level=False)
 
     # 注册文本输入处理器，处理所有聊天类型的消息
     text_input_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,

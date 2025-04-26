@@ -6,7 +6,7 @@ import os
 import asyncio
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CallbackQueryHandler
+from telegram.ext import ContextTypes
 
 # 模块元数据
 MODULE_NAME = "weather"
