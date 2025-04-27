@@ -1238,7 +1238,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"✅ 已生成 *{target_name}* 格式的订阅链接：\n\n"
             f"`{subscription_link}`\n\n"
-            "点击下方按钮下载配置文件或返回：",
+            "可以选择下载配置文件（5 秒内有效）：",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown")
 
