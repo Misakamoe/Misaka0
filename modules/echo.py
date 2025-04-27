@@ -87,7 +87,7 @@ async def handle_callback_query(update: Update,
         await session_manager.delete(user_id, "echo_active", chat_id=chat_id)
 
         # 发送取消消息
-        await query.edit_message_text("已取消操作")
+        await query.edit_message_text("操作已取消")
 
     # 确保回调查询得到响应
     await query.answer()
@@ -161,11 +161,17 @@ async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 否则，启动会话模式
+    # 设置会话状态，1 分钟后自动过期
     await session_manager.set(user_id,
                               "echo_waiting_for",
                               "text",
-                              chat_id=chat_id)
-    await session_manager.set(user_id, "echo_active", True, chat_id=chat_id)
+                              chat_id=chat_id,
+                              expire_after=60)
+    await session_manager.set(user_id,
+                              "echo_active",
+                              True,
+                              chat_id=chat_id,
+                              expire_after=60)
 
     # 发送提示消息
     keyboard = [[

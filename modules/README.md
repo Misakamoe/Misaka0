@@ -95,6 +95,8 @@ interface.save_state(state_data)  # 状态数据必须可 JSON 序列化
 state = interface.load_state(default=None)  # default 参数是可选的
 ```
 
+> **注意**：状态管理系统用于模块的持久化数据存储，适合存储配置和用户设置等数据。对于临时的用户交互状态，应使用会话管理系统。
+
 ### 4. 消息处理器注册
 
 ```python
@@ -203,7 +205,7 @@ pagination = PaginationHelper(
     page_size=5,                # 每页显示 5 项
     format_item=format_item,    # 项目格式化函数
     title="项目列表",           # 页面标题
-    callback_prefix="items_page" # 回调数据前缀
+    callback_prefix="module_page" # 回调数据前缀（使用模块名作为前缀）
 )
 
 # 显示第一页
@@ -213,7 +215,7 @@ await pagination.send_page(update, context, 0)
 # 使用带权限验证的回调处理器注册方法
 await interface.register_callback_handler(
     handle_pagination_callback,
-    pattern=r"^items_page:\d+$",
+    pattern=r"^module_page:(\d+|select|goto_\d+):\d+$",
     admin_level=False  # 所有用户都可以使用
 )
 
@@ -221,6 +223,13 @@ await interface.register_callback_handler(
 async def handle_pagination_callback(update, context):
     await PaginationHelper.handle_callback(update, context)
 ```
+
+> **注意**：
+>
+> 1. 分页系统支持页码选择功能，用户可以点击中间的页码按钮直接跳转到指定页面。
+> 2. 按钮布局标准为：`◁ Prev [页码] Next ▷`，当前页码使用 `▷` 标记。
+> 3. 回调处理器的模式需要匹配三种格式：页码导航、页码选择和页码跳转。
+> 4. 每个模块应使用自己的前缀（如 `module_page`）来避免冲突。
 
 ### 3. 发送长消息
 
@@ -321,9 +330,41 @@ await interface.register_callback_handler(
     pattern=f"^{CALLBACK_PREFIX}super_",
     admin_level="super_admin"
 )
+
+# 自定义权限检查（私聊允许所有用户，群组仅允许管理员）
+async def custom_permission_check(update, context):
+    # 获取聊天类型
+    chat_type = interface.get_chat_type(update)
+
+    # 私聊允许所有用户
+    if chat_type == "private":
+        return True
+
+    # 群组仅允许管理员
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    # 检查是否是群组管理员
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id, user_id)
+        if chat_member.status in ["creator", "administrator"]:
+            return True
+    except Exception:
+        pass
+
+    # 检查是否是超级管理员
+    if interface.config_manager.is_admin(user_id):
+        return True
+
+    return False
 ```
 
-> **注意**：使用 `register_callback_handler` 注册的回调处理器会自动进行权限验证，无需在回调函数中手动检查权限。
+> **注意**：
+>
+> 1. 使用 `register_callback_handler` 注册的回调处理器会自动进行权限验证，无需在回调函数中手动检查权限。
+> 2. 当设置 `admin_level="group_admin"` 时，该命令或按钮在私聊中也会被限制，只有超级管理员可用。
+> 3. 如果需要在私聊中允许所有用户使用，但在群组中限制为管理员，应使用自定义权限检查。
+> 4. 按钮回调处理器的权限验证会自动回应无权限的用户，避免按钮一直显示加载状态。
 
 ### 处理消息
 
@@ -332,16 +373,43 @@ from telegram.ext import MessageHandler, filters
 
 async def setup(interface):
     # 注册消息处理器
-    handler = MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    await interface.register_handler(handler)
+    # 注意：默认情况下，MessageHandler 不会处理编辑的消息
+    # 要处理编辑的消息，需要使用 filters.UpdateType.EDITED_MESSAGE
+    handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND &
+        (filters.UpdateType.MESSAGE | filters.UpdateType.EDITED_MESSAGE),
+        handle_message
+    )
+    await interface.register_handler(handler, group=5)  # 使用唯一的组号
 
 async def handle_message(update, context):
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
 
+    # 检查是否有其他模块的活跃会话
+    session_manager = context.bot_data.get("session_manager")
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    # 检查是否有其他模块的活跃会话
+    for module_name in ["other_module", "another_module"]:
+        is_active = await session_manager.get(
+            user_id, f"{module_name}_active", False, chat_id=chat_id
+        )
+        if is_active:
+            return  # 其他模块有活跃会话，不处理此消息
+
+    # 处理消息
     text = message.text
     await message.reply_text(f"你发送了: {text}")
 ```
+
+> **注意**：
+>
+> 1. 所有模块都应该处理编辑的消息，使用 `message = update.message or update.edited_message` 模式。
+> 2. 消息处理器应该使用唯一的组号，避免与其他模块冲突。
+> 3. 在处理消息前，应检查是否有其他模块的活跃会话，避免干扰。
+> 4. 在群组中，必须同时使用用户 ID 和聊天 ID 来检查会话状态。
 
 ### 模块间通信
 
@@ -400,10 +468,17 @@ async def start_survey(update, context):
     # 获取会话管理器
     session_manager = context.bot_data["session_manager"]
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
-    # 设置会话状态（会话与用户 ID 绑定）
-    await session_manager.set(user_id, "module_active", True)  # 标记模块会话为活跃
-    await session_manager.set(user_id, "waiting_for_name", True)
+    # 设置会话状态（会话与用户 ID 和聊天 ID 绑定）
+    # 注意：在群组中，必须同时使用 user_id 和 chat_id
+    await session_manager.set(user_id, "module_waiting_for", "name", chat_id=chat_id)
+    await session_manager.set(user_id, "module_active", True, chat_id=chat_id)
+
+    # 设置会话键的自动过期时间（秒）
+    await session_manager.set(user_id, "module_temp_data", "some_value",
+                             chat_id=chat_id, expire_after=300)  # 5分钟后自动过期
+
     await message.reply_text("请输入您的名字:")
 
 async def handle_message(update, context):
@@ -412,24 +487,33 @@ async def handle_message(update, context):
 
     session_manager = context.bot_data["session_manager"]
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     # 首先检查是否是本模块的活跃会话
-    is_active = await session_manager.get(user_id, "module_active", False)
+    is_active = await session_manager.get(user_id, "module_active", False, chat_id=chat_id)
     if not is_active:
         return  # 不是本模块的会话，不处理
 
     # 检查会话状态
-    waiting_for_name = await session_manager.get(user_id, "waiting_for_name", False)
+    waiting_for = await session_manager.get(user_id, "module_waiting_for", None, chat_id=chat_id)
 
-    if waiting_for_name:
+    if waiting_for == "name":
         name = message.text
-        await session_manager.set(user_id, "name", name)
-        await session_manager.delete(user_id, "waiting_for_name")
-        await session_manager.delete(user_id, "module_active")  # 会话结束，清除活跃标记
+        # 存储用户输入
+        await session_manager.set(user_id, "module_name", name, chat_id=chat_id)
+        # 清除会话状态
+        await session_manager.delete(user_id, "module_waiting_for", chat_id=chat_id)
+        await session_manager.delete(user_id, "module_active", chat_id=chat_id)
         await message.reply_text(f"谢谢，{name}！")
 ```
 
-> **注意**：会话是与用户 ID 绑定的，而不是与聊天 ID 绑定。这意味着只有启动会话的用户的输入才会被处理。在处理消息时，应该首先检查是否是本模块的活跃会话，避免干扰其他模块的会话处理。
+> **注意**：
+>
+> 1. 会话是与用户 ID 和聊天 ID 的组合绑定的，而不仅仅是用户 ID。在群组中必须同时指定两者。
+> 2. 会话键应当使用模块名作为前缀（如 `module_active`），避免与其他模块冲突。
+> 3. 可以使用 `expire_after` 参数设置会话键的自动过期时间（秒），适用于临时数据。
+> 4. 在处理消息时，应该首先检查是否是本模块的活跃会话，避免干扰其他模块的会话处理。
+> 5. 按钮回调处理完成后，应当清除相关的临时会话状态。
 
 ### 发送文件和图片
 
@@ -467,9 +551,10 @@ async def send_image_command(update, context):
 
 1. **命名规范**
 
-   - 模块名使用小写字母和下划线
+   - 模块名使用小写字母
    - 命令名使用小写字母，避免下划线
    - 常量使用大写字母和下划线
+   - 会话键使用模块名作为前缀，如 `module_active`
 
 2. **文档与注释**
 
@@ -488,12 +573,14 @@ async def send_image_command(update, context):
    - 在 `cleanup` 中释放所有资源
    - 不要在模块级别创建长期运行的任务
    - 使用 `interface` 提供的方法而不是直接访问底层组件
+   - 使用框架的状态系统存储用户配置，而不是内存存储
 
 5. **性能考虑**
 
    - 避免阻塞操作
    - 对耗时操作使用异步
    - 合理使用缓存减少重复计算
+   - 为临时会话状态设置合理的过期时间
 
 6. **格式化与中英文**
 
@@ -501,10 +588,30 @@ async def send_image_command(update, context):
    - 使用 Markdown 格式化消息时注意转义特殊字符
    - 长文本应当分段发送，避免单条消息过长
 
-7. **输出消息标准**
+7. **用户界面标准**
+
    - 使用 Markdown 时，确保转义特殊字符
    - 为复杂格式提供降级方案，在格式无法显示时 fallback 到纯文本
    - 避免过度使用格式，保持消息清晰易读
+   - 按钮文本使用英文，避免使用中文
+   - 返回按钮统一使用 `⇠ Back` 格式
+   - 确认按钮使用 `◯ Confirm ⨉ Cancel` 格式
+   - 分页按钮使用 `◁ Prev [页码] Next ▷` 格式
+   - 当前选中项使用 `▷` 标记
+   - 按钮每行最多放置三个，避免过于拥挤
+
+8. **会话管理**
+
+   - 会话键使用模块名作为前缀
+   - 在群组中同时使用用户 ID 和聊天 ID
+   - 为临时会话状态设置自动过期时间
+   - 按钮回调处理完成后清除相关临时会话状态
+   - 使用会话状态仅用于多步骤用户输入处理，不用于按钮回调
+
+9. **权限管理**
+   - 在群组中限制命令使用权限时，考虑私聊场景
+   - 需要在私聊允许所有用户使用，但在群组限制为管理员时，使用自定义权限检查
+   - 按钮权限检查应与命令权限检查保持一致
 
 ## 六、示例模块
 
