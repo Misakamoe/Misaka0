@@ -18,13 +18,6 @@ body:
       required: true
 
   - type: textarea
-    id: context
-    attributes:
-      label: Context
-      description: What are you trying to accomplish? Providing context helps us give better answers.
-      placeholder: I'm trying to set up...
-
-  - type: textarea
     id: attempted
     attributes:
       label: What I've Tried

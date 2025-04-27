@@ -1,0 +1,162 @@
+name: Build and Release
+
+# 触发条件：只在版本相关的提交或手动触发时运行
+# 不会在每次推送时触发，只有当提交消息包含版本信息时才会触发
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".vscode/**"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. v1.0.0)"
+        required: true
+        default: ""
+      prerelease:
+        description: "Is this a prerelease?"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  GITHUB_REGISTRY: ghcr.io
+  DOCKERHUB_REGISTRY: docker.io
+  GITHUB_IMAGE_NAME: ${{ github.repository }}
+  DOCKERHUB_IMAGE_NAME: misakamoe/misaka0
+
+jobs:
+  # 检查提交消息是否包含版本关键词
+  check-commit:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' }}
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.extract-version.outputs.version }}
+    steps:
+      - name: Check commit message
+        id: check
+        run: |
+          # 获取最近的提交消息
+          COMMIT_MSG=$(git log -1 --pretty=format:%s ${{ github.sha }})
+          echo "Commit message: $COMMIT_MSG"
+
+          # 检查是否包含版本关键词（如 v1.0.0, version, release）
+          if echo "$COMMIT_MSG" | grep -E '(v[0-9]+\.[0-9]+\.[0-9]+|version|release)'; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "✅ Version-related keywords found, triggering release"
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "❌ No version-related keywords found, skipping release"
+          fi
+
+      - name: Extract version
+        id: extract-version
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          # 从提交消息中提取版本号
+          COMMIT_MSG=$(git log -1 --pretty=format:%s ${{ github.sha }})
+          VERSION=$(echo "$COMMIT_MSG" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+          # 如果没有找到版本号，使用当前日期作为版本号
+          if [ -z "$VERSION" ]; then
+            VERSION="v$(date +'%Y.%m.%d')"
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+  # 构建和发布
+  build-and-release:
+    runs-on: ubuntu-latest
+    needs: check-commit
+    if: |
+      (github.event_name == 'push' && needs.check-commit.outputs.should_release == 'true') ||
+      github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set version
+        id: set-version
+        run: |
+          # 根据触发方式确定版本号
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            # 手动触发时使用输入的版本号
+            VERSION="${{ github.event.inputs.version }}"
+            if [ -z "$VERSION" ]; then
+              VERSION="v$(date +'%Y.%m.%d')"
+            fi
+          else
+            # 自动触发时使用从提交消息中提取的版本号
+            VERSION="${{ needs.check-commit.outputs.version }}"
+          fi
+
+          # 确保版本号以 v 开头
+          if [[ ! "$VERSION" =~ ^v ]]; then
+            VERSION="v$VERSION"
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Using version: $VERSION"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GITHUB_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract GitHub metadata
+        id: meta-github
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GITHUB_REGISTRY }}/${{ env.GITHUB_IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.set-version.outputs.version }}
+
+      - name: Extract Docker Hub metadata
+        id: meta-dockerhub
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.set-version.outputs.version }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta-github.outputs.tags }}
+            ${{ steps.meta-dockerhub.outputs.tags }}
+          labels: ${{ steps.meta-github.outputs.labels }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.set-version.outputs.version }}
+          name: Release ${{ steps.set-version.outputs.version }}
+          draft: false
+          prerelease: ${{ github.event.inputs.prerelease || false }}
+          generate_release_notes: true
