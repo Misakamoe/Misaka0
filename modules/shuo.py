@@ -195,7 +195,7 @@ async def publish_shuo(update: Update, _: ContextTypes.DEFAULT_TYPE,
         if success:
             # 发送成功消息
             await waiting_message.edit_text(
-                f"✅ 说说已成功发布！\n\n"
+                f"✅ 说说已成功发布\n\n"
                 f"*Key:* {new_post['key']}\n"
                 f"*时间:* {new_post['date']}\n"
                 f"*内容:*\n{content}",

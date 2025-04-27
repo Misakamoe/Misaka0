@@ -873,7 +873,7 @@ async def handle_callback_query(update, context):
 
             if success:
                 share_link = f"https://t.me/addstickers/{set_name}"
-                message = f"✅ 贴纸包创建成功！\n[点击查看贴纸包]({share_link})"
+                message = f"✅ 贴纸包创建成功\n[点击查看贴纸包]({share_link})"
                 await query.message.edit_text(message, parse_mode="MARKDOWN")
             else:
                 await query.message.edit_text("❌ 创建贴纸包失败，请稍后重试")

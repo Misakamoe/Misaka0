@@ -82,22 +82,43 @@ class SessionManager:
             pass
 
     def cleanup(self):
-        """清理过期会话
+        """清理过期会话和过期的会话键
 
         Returns:
-            int: 清理的会话数量
+            int: 清理的会话数量和键数量
         """
         now = time.time()
         expired_sessions = []
+        expired_keys_count = 0
 
         for session_key, session in self.sessions.items():
+            # 检查整个会话是否过期
             if session.get("last_activity", 0) + self.timeout < now:
                 expired_sessions.append(session_key)
+                continue
 
+            # 检查会话中的各个键是否有单独的过期时间
+            keys_to_delete = []
+            for key, value in session.items():
+                # 跳过特殊键
+                if key == "last_activity":
+                    continue
+
+                # 检查键是否有过期时间
+                if isinstance(value, dict) and "_expire_at" in value:
+                    if value["_expire_at"] < now:
+                        keys_to_delete.append(key)
+
+            # 删除过期的键
+            for key in keys_to_delete:
+                del session[key]
+                expired_keys_count += 1
+
+        # 删除过期的会话
         for session_key in expired_sessions:
             del self.sessions[session_key]
 
-        return len(expired_sessions)
+        return len(expired_sessions) + expired_keys_count
 
     async def get(self, user_id, key, default=None, chat_id=None):
         """获取会话数据
@@ -116,9 +137,29 @@ class SessionManager:
         async with self.locks[session_key]:
             session = self.sessions[session_key]
             session["last_activity"] = time.time()
-            return session.get(key, default)
 
-    async def set(self, user_id, key, value, chat_id=None):
+            # 获取值
+            value = session.get(key)
+
+            # 如果键不存在，返回默认值
+            if value is None:
+                return default
+
+            # 检查值是否是带有过期时间的字典
+            if isinstance(value, dict) and "_expire_at" in value:
+                # 检查是否已过期
+                if value["_expire_at"] < time.time():
+                    # 已过期，删除键并返回默认值
+                    del session[key]
+                    return default
+
+                # 未过期，返回实际值
+                return value.get("_value", value)
+
+            # 普通值，直接返回
+            return value
+
+    async def set(self, user_id, key, value, chat_id=None, expire_after=None):
         """设置会话数据
 
         Args:
@@ -126,11 +167,25 @@ class SessionManager:
             key: 数据键
             value: 数据值
             chat_id: 聊天 ID
+            expire_after: 可选，键的过期时间（秒），如果设置，该键将在指定时间后自动过期
         """
         session_key = self._get_session_key(user_id, chat_id)
 
         async with self.locks[session_key]:
             session = self.sessions[session_key]
+
+            # 如果设置了过期时间，将值包装在字典中
+            if expire_after is not None:
+                # 如果值已经是字典并且包含 _expire_at，则更新它
+                if isinstance(value, dict) and "_expire_at" in value:
+                    value["_expire_at"] = time.time() + expire_after
+                else:
+                    # 否则创建一个新的包装字典
+                    value = {
+                        "_value": value,
+                        "_expire_at": time.time() + expire_after
+                    }
+
             session[key] = value
             session["last_activity"] = time.time()
 
@@ -184,7 +239,23 @@ class SessionManager:
         async with self.locks[session_key]:
             session = self.sessions[session_key]
             session["last_activity"] = time.time()
-            return key in session
+
+            # 检查键是否存在
+            if key not in session:
+                return False
+
+            # 获取值
+            value = session[key]
+
+            # 检查值是否是带有过期时间的字典
+            if isinstance(value, dict) and "_expire_at" in value:
+                # 检查是否已过期
+                if value["_expire_at"] < time.time():
+                    # 已过期，删除键并返回 False
+                    del session[key]
+                    return False
+
+            return True
 
     async def get_all(self, user_id, chat_id=None):
         """获取用户的所有会话数据
@@ -201,8 +272,36 @@ class SessionManager:
         async with self.locks[session_key]:
             session = self.sessions[session_key]
             session["last_activity"] = time.time()
-            # 返回副本，不包括 last_activity
-            return {k: v for k, v in session.items() if k != "last_activity"}
+
+            # 处理过期的键
+            now = time.time()
+            keys_to_delete = []
+            result = {}
+
+            for k, v in session.items():
+                # 跳过 last_activity
+                if k == "last_activity":
+                    continue
+
+                # 检查值是否是带有过期时间的字典
+                if isinstance(v, dict) and "_expire_at" in v:
+                    # 检查是否已过期
+                    if v["_expire_at"] < now:
+                        # 已过期，标记为删除
+                        keys_to_delete.append(k)
+                        continue
+
+                    # 未过期，添加实际值到结果
+                    result[k] = v.get("_value", v)
+                else:
+                    # 普通值，直接添加
+                    result[k] = v
+
+            # 删除过期的键
+            for k in keys_to_delete:
+                del session[k]
+
+            return result
 
     async def get_active_sessions_count(self):
         """获取活跃会话数量
@@ -237,6 +336,49 @@ class SessionManager:
 
         return user_sessions
 
+    async def get_all_keys(self, user_id, chat_id=None):
+        """获取用户会话中的所有键名
+
+        Args:
+            user_id: 用户 ID
+            chat_id: 聊天 ID
+
+        Returns:
+            list: 键名列表
+        """
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            session = self.sessions[session_key]
+            session["last_activity"] = time.time()
+
+            # 处理过期的键
+            now = time.time()
+            keys_to_delete = []
+            result = []
+
+            for k, v in session.items():
+                # 跳过 last_activity
+                if k == "last_activity":
+                    continue
+
+                # 检查值是否是带有过期时间的字典
+                if isinstance(v, dict) and "_expire_at" in v:
+                    # 检查是否已过期
+                    if v["_expire_at"] < now:
+                        # 已过期，标记为删除
+                        keys_to_delete.append(k)
+                        continue
+
+                # 添加键名到结果
+                result.append(k)
+
+            # 删除过期的键
+            for k in keys_to_delete:
+                del session[k]
+
+            return result
+
     def _save_sessions(self):
         """保存会话数据到文件"""
         try:
@@ -245,9 +387,28 @@ class SessionManager:
             active_sessions = {}
 
             for session_key, session in self.sessions.items():
+                # 检查会话是否活跃
                 if session.get("last_activity", 0) + self.timeout >= now:
+                    # 创建会话副本
+                    session_copy = {}
+
+                    # 处理会话中的每个键
+                    for k, v in session.items():
+                        # 检查值是否是带有过期时间的字典
+                        if isinstance(v, dict) and "_expire_at" in v:
+                            # 检查是否已过期
+                            if v["_expire_at"] < now:
+                                # 已过期，不保存
+                                continue
+
+                            # 保存原始格式，包括过期时间
+                            session_copy[k] = v
+                        else:
+                            # 普通值，直接保存
+                            session_copy[k] = v
+
                     # 使用会话键作为 JSON 键
-                    active_sessions[session_key] = session
+                    active_sessions[session_key] = session_copy
 
             # 保存到文件
             sessions_file = os.path.join(self.storage_dir, "sessions.json")
