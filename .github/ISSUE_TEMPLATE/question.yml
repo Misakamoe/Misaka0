@@ -1,0 +1,32 @@
+name: Question
+description: Ask a question about this project
+title: "[QUESTION] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template if you have questions about how to use the project, its features, or other aspects.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+      description: What would you like to know?
+      placeholder: I'd like to understand how to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What are you trying to accomplish? Providing context helps us give better answers.
+      placeholder: I'm trying to set up...
+
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What I've Tried
+      description: Have you tried anything to solve your problem?
+      placeholder: I've already looked at...
