@@ -1,0 +1,74 @@
+name: Bug Report
+description: Report a bug to help us improve
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+
+  - type: input
+    id: module-name
+    attributes:
+      label: Module Name
+      description: Which module has the issue?
+      placeholder: e.g., rss, ai, reminder
+    validations:
+      required: true
+
+  - type: input
+    id: module-version
+    attributes:
+      label: Module Version
+      description: The version of the module
+      placeholder: e.g., 3.0.1
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Issue Description
+      description: Describe what's happening and what you expected instead
+      placeholder: When I use the command, X happens instead of Y...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: How can we reproduce this issue?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      description: How are you running the bot?
+      options:
+        - Docker
+        - Docker Compose
+        - Python Virtual Environment
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: bot-version
+    attributes:
+      label: Bot Version
+      description: Version or commit hash of the bot
+      placeholder: e.g., v1.0.0 or commit hash like 7a2d3f5
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs/Screenshots
+      description: If applicable, add logs or screenshots
+      render: shell
