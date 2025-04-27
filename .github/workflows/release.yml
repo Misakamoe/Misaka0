@@ -31,7 +31,7 @@ jobs:
   # 检查提交消息是否包含版本关键词
   check-commit:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' }}
+    # 无论是推送还是手动触发都运行此任务
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
       version: ${{ steps.extract-version.outputs.version }}
@@ -44,30 +44,46 @@ jobs:
       - name: Check commit message
         id: check
         run: |
-          # 获取最近的提交消息
-          COMMIT_MSG=$(git log -1 --pretty=format:%s ${{ github.sha }})
-          echo "Commit message: $COMMIT_MSG"
-
-          # 检查是否包含版本号格式（如 v1.0.0）
-          if echo "$COMMIT_MSG" | grep -E 'v[0-9]+\.[0-9]+\.[0-9]+'; then
+          # 如果是手动触发，直接设置为 true
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             echo "should_release=true" >> $GITHUB_OUTPUT
-            echo "✅ Version-related keywords found, triggering release"
+            echo "✅ Manual trigger, proceeding with release"
           else
-            echo "should_release=false" >> $GITHUB_OUTPUT
-            echo "❌ No version-related keywords found, skipping release"
+            # 获取最近的提交消息
+            COMMIT_MSG=$(git log -1 --pretty=format:%s ${{ github.sha }})
+            echo "Commit message: $COMMIT_MSG"
+
+            # 检查是否包含版本号格式（如 v1.0.0）
+            if echo "$COMMIT_MSG" | grep -E 'v[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "should_release=true" >> $GITHUB_OUTPUT
+              echo "✅ Version-related keywords found, triggering release"
+            else
+              echo "should_release=false" >> $GITHUB_OUTPUT
+              echo "❌ No version-related keywords found, skipping release"
+            fi
           fi
 
       - name: Extract version
         id: extract-version
         if: steps.check.outputs.should_release == 'true'
         run: |
-          # 从提交消息中提取版本号
-          COMMIT_MSG=$(git log -1 --pretty=format:%s ${{ github.sha }})
-          VERSION=$(echo "$COMMIT_MSG" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          # 如果是手动触发，使用输入的版本号
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # 从提交消息中提取版本号
+            COMMIT_MSG=$(git log -1 --pretty=format:%s ${{ github.sha }})
+            VERSION=$(echo "$COMMIT_MSG" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 
-          # 如果没有找到版本号，使用当前日期作为版本号
-          if [ -z "$VERSION" ]; then
-            VERSION="v$(date +'%Y.%m.%d')"
+            # 如果没有找到版本号，使用当前日期
+            if [ -z "$VERSION" ]; then
+              VERSION="v$(date +'%Y.%m.%d')"
+            fi
+          fi
+
+          # 确保版本号以 v 开头
+          if [[ ! "$VERSION" =~ ^v ]]; then
+            VERSION="v$VERSION"
           fi
 
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -93,23 +109,8 @@ jobs:
       - name: Set version
         id: set-version
         run: |
-          # 根据触发方式确定版本号
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            # 手动触发时使用输入的版本号
-            VERSION="${{ github.event.inputs.version }}"
-            if [ -z "$VERSION" ]; then
-              VERSION="v$(date +'%Y.%m.%d')"
-            fi
-          else
-            # 自动触发时使用从提交消息中提取的版本号
-            VERSION="${{ needs.check-commit.outputs.version }}"
-          fi
-
-          # 确保版本号以 v 开头
-          if [[ ! "$VERSION" =~ ^v ]]; then
-            VERSION="v$VERSION"
-          fi
-
+          # 使用从 check-commit 任务中提取的版本号
+          VERSION="${{ needs.check-commit.outputs.version }}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Using version: $VERSION"
 
