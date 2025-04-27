@@ -36,6 +36,11 @@ jobs:
       should_release: ${{ steps.check.outputs.should_release }}
       version: ${{ steps.extract-version.outputs.version }}
     steps:
+      - name: Checkout code first
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Check commit message
         id: check
         run: |
@@ -43,8 +48,8 @@ jobs:
           COMMIT_MSG=$(git log -1 --pretty=format:%s ${{ github.sha }})
           echo "Commit message: $COMMIT_MSG"
 
-          # 检查是否包含版本关键词（如 v1.0.0, version, release）
-          if echo "$COMMIT_MSG" | grep -E '(v[0-9]+\.[0-9]+\.[0-9]+|version|release)'; then
+          # 检查是否包含版本号格式（如 v1.0.0）
+          if echo "$COMMIT_MSG" | grep -E 'v[0-9]+\.[0-9]+\.[0-9]+'; then
             echo "should_release=true" >> $GITHUB_OUTPUT
             echo "✅ Version-related keywords found, triggering release"
           else
