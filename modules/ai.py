@@ -39,7 +39,7 @@ MAX_CONCURRENT_REQUESTS = 5  # 最大并发请求数
 # 服务商模板
 PROVIDER_TEMPLATES = {
     "openai": {
-        "name": "OpenAI",
+        "name": "ChatGPT",
         "api_url": "https://api.openai.com/v1/chat/completions",
         "api_key": "",
         "model": "gpt-4o",
@@ -199,14 +199,14 @@ class OpenAIProvider:
                        images: Optional[List[Dict[str, Any]]] = None,
                        stream: bool = False) -> Dict[str, Any]:
         """格式化 OpenAI 请求"""
-        # 如果有图像且模型支持图像
-        if images and provider.get("model", "").startswith(
-            ("gpt-4-vision", "gpt-4o")):
+        # 如果有图像且服务商支持图像
+        if images and provider.get("supports_image", False):
             # 构建包含图像的消息
             vision_messages = []
 
-            for msg in messages:
-                if msg["role"] == "user" and images:
+            for i, msg in enumerate(messages):
+                # 只为最后一条用户消息添加图像
+                if msg["role"] == "user" and i == len(messages) - 1:
                     # 为用户消息添加图像
                     content = [{"type": "text", "text": msg["content"]}]
 
@@ -303,10 +303,10 @@ class AnthropicProvider:
         # 构建消息列表
         anthropic_messages = []
 
-        for msg in messages:
+        for i, msg in enumerate(messages):
             if msg["role"] == "user":
                 # 处理用户消息，可能包含图像
-                if images and msg == messages[-1]:
+                if images and i == len(messages) - 1:  # 只为最后一条用户消息添加图像
                     # 构建包含图像的内容
                     content = [{"type": "text", "text": msg["content"]}]
 
@@ -977,7 +977,12 @@ class AIManager:
             # 转换为 base64
             image_base64 = base64.b64encode(image_data).decode('utf-8')
 
-            return {"data": image_base64, "mime_type": "image/jpeg"}
+            # 返回包含 MIME 类型的图像数据
+            return {
+                "data": image_base64,
+                "mime_type": "image/jpeg",
+                "size": len(image_data)
+            }
         except Exception as e:
             _interface.logger.error(f"处理图像失败: {e}")
             return None
@@ -1024,8 +1029,14 @@ async def show_config_main_menu(update: Update,
     # 检查是否是回调查询
     if update.callback_query:
         # 如果是回调查询，使用 edit_message_text
-        await update.callback_query.edit_message_text(
-            menu_text, reply_markup=reply_markup, parse_mode="HTML")
+        try:
+            await update.callback_query.edit_message_text(
+                menu_text, reply_markup=reply_markup, parse_mode="HTML")
+        except telegram.error.BadRequest as e:
+            # 忽略"消息未修改"错误
+            if "Message is not modified" not in str(e):
+                _interface.logger.error(f"更新配置菜单失败: {str(e)}")
+                await update.callback_query.answer("更新消息失败，请重试")
     else:
         # 如果是直接命令，使用 reply_text
         message = update.message or update.edited_message
@@ -2829,7 +2840,8 @@ async def ai_command(update: Update,
                 image_data = await AIManager.process_image(photo_file)
                 if image_data:
                     images.append(image_data)
-                    # 不再显示"已添加图片"的提示
+                    _interface.logger.debug(
+                        f"已添加图片，大小: {image_data.get('size', 0)} 字节")
             else:
                 await message.reply_text("⚠️ 当前服务商不支持图像处理")
                 return
@@ -3264,7 +3276,8 @@ async def handle_private_message(update: Update,
                 image_data = await AIManager.process_image(photo_file)
                 if image_data:
                     images.append(image_data)
-                    # 不显示"已添加图片"的提示
+                    _interface.logger.debug(
+                        f"已添加图片，大小: {image_data.get('size', 0)} 字节")
             else:
                 await message.reply_text("⚠️ 当前服务商不支持图像处理")
                 return
@@ -3300,7 +3313,8 @@ async def handle_private_message(update: Update,
             image_data = await AIManager.process_image(photo_file)
             if image_data:
                 images.append(image_data)
-                # 不发送确认消息，保持对话流畅
+                _interface.logger.debug(
+                    f"已添加图片，大小: {image_data.get('size', 0)} 字节")
         else:
             await message.reply_text("⚠️ 当前服务商不支持图像处理")
             # 清除会话状态
@@ -3414,6 +3428,8 @@ async def handle_private_photo(update: Update,
         # 清除会话状态
         await session_manager.delete(user_id, "ai_active", chat_id=chat_id)
         return
+
+    _interface.logger.debug(f"已处理图片，大小: {image_data.get('size', 0)} 字节")
 
     # 获取消息文本(如果有)
     message_text = update.message.caption or "分析这张图片"
