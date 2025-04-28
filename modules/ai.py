@@ -15,7 +15,7 @@ from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
 MODULE_NAME = "ai"
-MODULE_VERSION = "3.1.0"
+MODULE_VERSION = "3.1.1"
 MODULE_DESCRIPTION = "支持多种 AI 的聊天助手"
 MODULE_COMMANDS = ["ai", "aiconfig", "aiclear", "aiwhitelist"]
 MODULE_CHAT_TYPES = ["private", "group"]  # 支持私聊和群组
@@ -42,7 +42,7 @@ PROVIDER_TEMPLATES = {
         "name": "OpenAI",
         "api_url": "https://api.openai.com/v1/chat/completions",
         "api_key": "",
-        "model": "gpt-4.1-nano",
+        "model": "gpt-4o",
         "temperature": 0.7,
         "system_prompt": "你是一个有用的助手。",
         "request_format": "openai",
@@ -51,19 +51,29 @@ PROVIDER_TEMPLATES = {
     "gemini": {
         "name": "Gemini",
         "api_url":
-        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         "api_key": "",
-        "model": "gemini-1.5-flash",
+        "model": "gemini-2.0-flash",
         "temperature": 0.7,
         "system_prompt": "你是一个有用的助手。",
-        "request_format": "gemini",
+        "request_format": "openai",  # 使用 OpenAI 兼容模式
+        "supports_image": True
+    },
+    "xai": {
+        "name": "Grok",
+        "api_url": "https://api.x.ai/v1/chat/completions",
+        "api_key": "",
+        "model": "grok-3-beta",
+        "temperature": 0.7,
+        "system_prompt": "你是一个有用的助手。",
+        "request_format": "openai",  # 使用 OpenAI 兼容模式
         "supports_image": True
     },
     "anthropic": {
         "name": "Claude",
         "api_url": "https://api.anthropic.com/v1/messages",
         "api_key": "",
-        "model": "claude-3-5-sonnet-latest",
+        "model": "claude-3-7-sonnet-latest",
         "temperature": 0.7,
         "system_prompt": "你是一个有用的助手。",
         "request_format": "anthropic",
@@ -122,9 +132,6 @@ class AIServiceProvider:
         if request_format == "openai":
             return OpenAIProvider.format_request(provider, messages, images,
                                                  stream)
-        elif request_format == "gemini":
-            return GeminiProvider.format_request(provider, messages, images,
-                                                 stream)
         elif request_format == "anthropic":
             return AnthropicProvider.format_request(provider, messages, images,
                                                     stream)
@@ -147,8 +154,6 @@ class AIServiceProvider:
 
         if request_format == "openai":
             return OpenAIProvider.parse_response(response_data)
-        elif request_format == "gemini":
-            return GeminiProvider.parse_response(response_data)
         elif request_format == "anthropic":
             return AnthropicProvider.parse_response(response_data)
         else:
@@ -171,17 +176,6 @@ class AIServiceProvider:
 
         # 准备 API URL
         api_url = provider["api_url"]
-        if "{model}" in api_url:
-            api_url = api_url.replace("{model}", provider["model"])
-
-        # 如果是 Gemini 且需要流式返回，使用流式端点
-        if request_format == "gemini" and request_data.get("_stream", False):
-            # 删除内部标记，不发送给 API
-            if "_stream" in request_data:
-                del request_data["_stream"]
-            # 使用流式端点
-            api_url = api_url.replace(":generateContent",
-                                      ":streamGenerateContent")
 
         # 准备请求头
         headers = {"Content-Type": "application/json"}
@@ -189,13 +183,6 @@ class AIServiceProvider:
         # 不同服务商的认证方式
         if request_format == "openai":
             headers["Authorization"] = f"Bearer {provider['api_key']}"
-        elif request_format == "gemini":
-            # Gemini 使用 URL 参数传递 API 密钥
-            # 如果是流式请求，添加 alt=sse 参数
-            if "streamGenerateContent" in api_url:
-                api_url = f"{api_url}?alt=sse&key={provider['api_key']}"
-            else:
-                api_url = f"{api_url}?key={provider['api_key']}"
         elif request_format == "anthropic":
             headers["x-api-key"] = provider["api_key"]
             headers["anthropic-version"] = "2023-06-01"
@@ -294,119 +281,7 @@ class OpenAIProvider:
         return full_response
 
 
-class GeminiProvider:
-    """Google Gemini 服务提供商实现"""
-
-    @staticmethod
-    def format_request(provider: Dict[str, Any],
-                       messages: List[Dict[str, str]],
-                       images: Optional[List[Dict[str, Any]]] = None,
-                       stream: bool = False) -> Dict[str, Any]:
-        """格式化 Gemini 请求"""
-        # 转换消息格式为 Gemini 格式
-        gemini_messages = []
-        system_prompt = None
-
-        # 首先提取系统提示（如果有）
-        for msg in messages:
-            if msg["role"] == "system":
-                system_prompt = msg["content"]
-                break
-
-        # 构建对话历史
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-
-            # 确保内容不为空
-            if not content.strip():
-                content = " "  # 使用空格代替空字符串
-
-            if role == "system":
-                # 系统消息已单独处理，跳过
-                continue
-            elif role == "user":
-                user_parts = [{"text": content}]
-
-                # 添加图像（如果有且是最后一条用户消息）
-                if images and msg == messages[-1] and msg["role"] == "user":
-                    for img in images:
-                        user_parts.append({
-                            "inline_data": {
-                                "mime_type": "image/jpeg",
-                                "data": img["data"]
-                            }
-                        })
-
-                gemini_messages.append({"role": "user", "parts": user_parts})
-            elif role == "assistant":
-                gemini_messages.append({
-                    "role": "model",
-                    "parts": [{
-                        "text": content
-                    }]
-                })
-
-        # 构建请求
-        request = {
-            "contents": gemini_messages,
-            "generationConfig": {
-                "temperature": provider["temperature"],
-                "maxOutputTokens": 4096,
-                "topP": 0.95,
-                "topK": 40
-            }
-        }
-
-        # Gemini API 不支持在请求中直接使用 stream 参数
-        # 而是通过使用不同的端点来实现流式返回
-        # 添加内部标记，用于在 prepare_api_request 中切换端点
-        if stream:
-            request["_stream"] = True
-
-        # Gemini API 不直接支持 system_instruction 字段
-        if system_prompt:
-            # 确保系统提示不为空
-            if not system_prompt.strip():
-                system_prompt = " "
-
-            # 在消息列表开头添加系统指令作为用户的第一条消息
-            gemini_messages.insert(0, {
-                "role": "user",
-                "parts": [{
-                    "text": system_prompt
-                }]
-            })
-
-            # 更新请求中的消息列表
-            request["contents"] = gemini_messages
-
-        return request
-
-    @staticmethod
-    def parse_response(response_data: Dict[str, Any]) -> str:
-        """解析 Gemini 响应"""
-        try:
-            # 检查响应格式
-            if "candidates" in response_data and response_data["candidates"]:
-                candidate = response_data["candidates"][0]
-                if "content" in candidate and "parts" in candidate["content"]:
-                    # 提取所有文本部分
-                    text_parts = []
-                    for part in candidate["content"]["parts"]:
-                        if "text" in part:
-                            text_parts.append(part["text"])
-                    return "".join(text_parts)
-
-            # 如果找不到预期的结构，记录错误并返回 None
-            _interface.logger.error(f"无法解析 Gemini 响应: {response_data}")
-            return None
-        except (KeyError, IndexError) as e:
-            _interface.logger.error(f"解析 Gemini 响应失败: {e}")
-            return None
-
-    # 注意: 我们现在直接在 _stream_request 方法中处理流式响应
-    # 不再需要单独的 process_stream 方法
+# 注意: 我们现在使用 OpenAI 兼容模式，不再需要单独的 GeminiProvider 类
 
 
 class AnthropicProvider:
@@ -812,7 +687,7 @@ class AIManager:
 
                     # 根据不同服务商处理流式响应
                     if request_format == "openai":
-                        # OpenAI 流式响应处理
+                        # OpenAI 流式响应处理 (包括 Gemini OpenAI 兼容模式)
                         async for line in response.content:
                             line = line.strip()
 
@@ -846,106 +721,6 @@ class AIManager:
                             current_time = time.time()
                             if current_time - last_update_time >= MIN_UPDATE_INTERVAL:
                                 last_update_time = current_time
-
-                    elif request_format == "gemini":
-                        # Gemini 流式响应处理 (Server-Sent Events)
-                        _interface.logger.debug("Gemini 流式响应开始")
-
-                        # 使用文本缓冲区收集完整的文本
-                        text_buffer = ""
-                        sse_buffer = ""
-
-                        # 处理 Server-Sent Events (SSE) 格式
-                        async for line in response.content:
-                            line_str = line.decode('utf-8', errors='ignore')
-
-                            # 将行添加到 SSE 缓冲区
-                            sse_buffer += line_str
-
-                            # 如果收到空行，表示一个 SSE 事件结束
-                            if line_str.strip() == "":
-                                # 处理完整的 SSE 事件
-                                event_lines = sse_buffer.strip().split('\n')
-                                sse_buffer = ""
-
-                                # 提取数据行
-                                data_content = ""
-                                for event_line in event_lines:
-                                    if event_line.startswith('data: '):
-                                        data_content = event_line[6:].strip()
-                                        break
-
-                                # 如果有数据内容
-                                if data_content:
-                                    try:
-                                        # 解析 JSON 数据
-                                        data = json.loads(data_content)
-
-                                        # 检查是否有错误
-                                        if "error" in data:
-                                            error_msg = data.get("error",
-                                                                 {}).get(
-                                                                     "message",
-                                                                     "未知错误")
-                                            _interface.logger.error(
-                                                f"Gemini 流式响应错误: {error_msg}")
-                                            continue
-
-                                        # 提取文本内容
-                                        if "candidates" in data and data[
-                                                "candidates"]:
-                                            candidate = data["candidates"][0]
-                                            if "content" in candidate and "parts" in candidate[
-                                                    "content"]:
-                                                for part in candidate[
-                                                        "content"]["parts"]:
-                                                    if "text" in part and part[
-                                                            "text"]:
-                                                        # 添加新文本到缓冲区
-                                                        text_buffer += part[
-                                                            "text"]
-
-                                                        # 更新完整响应
-                                                        full_response = text_buffer
-
-                                                        # 调用回调函数更新消息
-                                                        if full_response.strip(
-                                                        ):
-                                                            await AIManager._throttled_update(
-                                                                full_response,
-                                                                update_callback,
-                                                                last_update_time
-                                                            )
-
-                                                        # 更新最后更新时间
-                                                        current_time = time.time(
-                                                        )
-                                                        if current_time - last_update_time >= MIN_UPDATE_INTERVAL:
-                                                            last_update_time = current_time
-
-                                        # 检查是否是最后一条消息
-                                        if "candidates" in data and data[
-                                                "candidates"] and "finishReason" in data[
-                                                    "candidates"][0]:
-                                            finish_reason = data["candidates"][
-                                                0]["finishReason"]
-                                            _interface.logger.debug(
-                                                f"Gemini 流式响应完成，原因: {finish_reason}"
-                                            )
-
-                                    except json.JSONDecodeError as e:
-                                        _interface.logger.error(
-                                            f"Gemini 流式响应 JSON 解析错误: {e}")
-                                    except Exception as e:
-                                        _interface.logger.error(
-                                            f"Gemini 流式响应处理错误: {e}")
-
-                        # 如果有未处理的 SSE 缓冲区内容，尝试处理
-                        if sse_buffer.strip():
-                            # 处理逻辑与上面相同
-                            pass
-
-                        _interface.logger.debug("Gemini 流式响应完成")
 
             # 更新使用统计
             _state["usage_stats"]["total_requests"] += 1
@@ -2212,6 +1987,12 @@ async def handle_config_callback(update: Update,
         action = "delete_confirm"
     elif len(parts) >= 2 and parts[0] == "edit" and parts[1] == "param":
         action = "edit_param"
+        # 确保完整保留参数名称，不要截断
+        if len(parts) >= 4:
+            # 如果参数名称包含下划线，需要重新组合
+            if len(parts) > 4:
+                # 重新组合参数名称（从索引3开始到最后）
+                parts = parts[:3] + ["_".join(parts[3:])]
     elif len(parts) >= 2 and parts[0] == "test" and parts[1] == "provider":
         action = "test_provider"
     elif len(parts) >= 3 and parts[0] == "whitelist" and parts[
@@ -2532,12 +2313,6 @@ async def handle_config_callback(update: Update,
         if len(parts) >= 4:
             provider_id = parts[2]
             param_name = parts[3]
-
-            # 处理特殊参数名称
-            if param_name == "system":
-                param_name = "system_prompt"
-            elif param_name == "supports":
-                param_name = "supports_image"
 
             # 记录操作日志
             _interface.logger.debug(
@@ -3253,6 +3028,11 @@ async def handle_config_input(update: Update,
         # 处理编辑参数输入
         parts = waiting_for.split("_")
 
+        # 如果参数名称包含下划线，需要重新组合
+        if len(parts) > 4:
+            # 重新组合参数名称（从索引3开始到最后）
+            parts = parts[:3] + ["_".join(parts[3:])]
+
         # 记录操作日志
         _interface.logger.debug(f"处理编辑参数输入: waiting_for={waiting_for}")
 
@@ -3260,12 +3040,6 @@ async def handle_config_input(update: Update,
         if len(parts) >= 4:
             provider_id = parts[2]
             param_name = parts[3]
-
-            # 处理特殊参数名称
-            if param_name == "system":
-                param_name = "system_prompt"
-            elif param_name == "supports":
-                param_name = "supports_image"
 
             # 验证服务商是否存在
             if provider_id not in _state["providers"]:
