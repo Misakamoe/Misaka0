@@ -1,7 +1,8 @@
 services:
   telegram-bot:
     build: .
-    container_name: modular-telegram-bot
+    image: misaka0
+    container_name: misaka0
     restart: unless-stopped
     volumes:
       # 持久化配置

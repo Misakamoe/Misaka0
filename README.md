@@ -104,13 +104,19 @@ docker-compose logs -f
 
 ```bash
 # 构建镜像
-docker build -t modular-telegram-bot .
+docker build -t misaka0 .
 
 # 运行容器（使用已配置的 config）
-docker run -d --name telegram-bot -v ./config:/app/config modular-telegram-bot
+docker run -d --name telegram-bot -v ./config:/app/config misaka0
 
 # 或者使用环境变量运行
-docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./config:/app/config modular-telegram-bot
+docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./config:/app/config misaka0
+
+# 或者直接使用 Docker Hub 镜像
+docker run -d --name telegram-bot -v ./config:/app/config misakamoe/misaka0
+
+# 使用环境变量运行 Docker Hub 镜像
+docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./config:/app/config misakamoe/misaka0
 ```
 
 **方式 4: Systemd 服务**
