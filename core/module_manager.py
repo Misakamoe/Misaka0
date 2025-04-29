@@ -276,7 +276,7 @@ class ModuleManager:
             sys.path.append(os.path.abspath(modules_dir))
 
         # 模块管理器初始化完成
-        self.logger.info("模块管理器初始化完成")
+        self.logger.debug("模块管理器初始化完成")
 
     async def start(self):
         """启动模块管理器"""
@@ -292,10 +292,10 @@ class ModuleManager:
         """加载所有可用模块"""
         # 获取所有可用模块
         available_modules = self.discover_modules()
-        self.logger.info(f"正在加载所有可用模块: {available_modules}")
+        self.logger.debug(f"正在加载所有可用模块: {available_modules}")
 
         if not available_modules:
-            self.logger.info("没有可用模块需要加载")
+            self.logger.debug("没有可用模块需要加载")
             return
 
         # 加载所有模块
@@ -315,7 +315,6 @@ class ModuleManager:
         async with self._get_module_lock(module_name):
             # 检查模块是否已加载
             if module_name in self.loaded_modules:
-                self.logger.debug(f"模块 {module_name} 已加载")
                 return True
 
             try:
@@ -338,7 +337,7 @@ class ModuleManager:
 
                 # 检查模块是否声明了支持的聊天类型
                 if not hasattr(module, "MODULE_CHAT_TYPES"):
-                    self.logger.warning(
+                    self.logger.debug(
                         f"模块 {module_name} 未声明 MODULE_CHAT_TYPES，默认为全部支持")
                     setattr(module, "MODULE_CHAT_TYPES", ["private", "group"])
 
@@ -359,17 +358,15 @@ class ModuleManager:
                         "metadata": metadata
                     }
 
-                    self.logger.info(f"模块 {module_name} 已加载")
+                    self.logger.debug(f"模块 {module_name} 已加载")
                     return True
 
                 except Exception as e:
                     self.logger.error(f"初始化模块 {module_name} 失败: {e}")
-                    self.logger.debug(traceback.format_exc())
                     return False
 
             except Exception as e:
                 self.logger.error(f"加载模块 {module_name} 时出错: {e}")
-                self.logger.debug(traceback.format_exc())
                 return False
 
     async def unload_module(self, module_name):
@@ -385,75 +382,55 @@ class ModuleManager:
         async with self._get_module_lock(module_name):
             # 检查模块是否已加载
             if module_name not in self.loaded_modules:
-                self.logger.debug(f"模块 {module_name} 未加载，无需卸载")
                 return True
 
-            # 卸载模块
-            success = await self._unload_module(module_name)
-            if success:
-                self.logger.info(f"模块 {module_name} 已卸载")
+            try:
+                # 获取模块信息
+                module_info = self.loaded_modules[module_name]
+                module = module_info["module"]
+                interface = module_info["interface"]
+
+                # 调用模块的 cleanup 方法（如果存在）
+                if hasattr(module, "cleanup") and callable(module.cleanup):
+                    try:
+                        await module.cleanup(interface)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"调用模块 {module_name} 的 cleanup 方法出错: {e}")
+
+                # 清理模块接口 - 这会安排处理器移除操作而不是直接移除
+                await interface.cleanup()
+
+                # 注销命令
+                await self.command_manager.unregister_module_commands(
+                    module_name)
+
+                # 从已加载模块中移除
+                del self.loaded_modules[module_name]
+
+                # 尝试从缓存中卸载模块
+                module_path = f"{self.modules_dir}.{module_name}"
+                if module_path in sys.modules:
+                    del sys.modules[module_path]
+
+                if module_name in sys.modules:
+                    del sys.modules[module_name]
+
+                self.logger.debug(f"模块 {module_name} 已卸载")
                 return True
-            else:
-                self.logger.error(f"卸载模块 {module_name} 失败")
+
+            except Exception as e:
+                self.logger.error(f"卸载模块 {module_name} 时出错: {e}")
                 return False
-
-    async def _unload_module(self, module_name):
-        """卸载模块
-
-        Args:
-            module_name: 模块名称
-
-        Returns:
-            bool: 是否成功卸载
-        """
-        if module_name not in self.loaded_modules:
-            return True
-
-        try:
-            # 获取模块信息
-            module_info = self.loaded_modules[module_name]
-            module = module_info["module"]
-            interface = module_info["interface"]
-
-            # 调用模块的 cleanup 方法（如果存在）
-            if hasattr(module, "cleanup") and callable(module.cleanup):
-                try:
-                    await module.cleanup(interface)
-                except Exception as e:
-                    self.logger.error(
-                        f"调用模块 {module_name} 的 cleanup 方法出错: {e}")
-
-            # 清理模块接口 - 这会安排处理器移除操作而不是直接移除
-            await interface.cleanup()
-
-            # 注销命令
-            await self.command_manager.unregister_module_commands(module_name)
-
-            # 从已加载模块中移除
-            del self.loaded_modules[module_name]
-
-            # 尝试从缓存中卸载模块
-            module_path = f"{self.modules_dir}.{module_name}"
-            if module_path in sys.modules:
-                del sys.modules[module_path]
-
-            if module_name in sys.modules:
-                del sys.modules[module_name]
-
-            return True
-
-        except Exception as e:
-            self.logger.error(f"卸载模块 {module_name} 时出错: {e}")
-            return False
 
     async def unload_all_modules(self):
         """卸载所有模块"""
         modules_to_unload = list(self.loaded_modules.keys())
 
         for module_name in modules_to_unload:
-            await self._unload_module(module_name)
+            await self.unload_module(module_name)
 
-        self.logger.info(f"已卸载全部 {len(modules_to_unload)} 个模块")
+        self.logger.debug(f"已卸载全部 {len(modules_to_unload)} 个模块")
 
     def get_module_info(self, module_name):
         """获取模块信息
@@ -548,7 +525,6 @@ class ModuleManager:
                     f"{self.modules_dir}.{module_name}")
         except Exception as e:
             self.logger.error(f"导入模块 {module_name} 失败: {e}")
-            self.logger.debug(traceback.format_exc())
             return None
 
     async def _get_module_metadata(self, module_name):
@@ -565,7 +541,7 @@ class ModuleManager:
 
         # 检查文件是否存在
         if not os.path.exists(module_file):
-            self.logger.error(f"模块文件不存在: {module_file}")
+            self.logger.warning(f"模块文件不存在: {module_file}")
             return None
 
         try:
@@ -584,13 +560,11 @@ class ModuleManager:
                 getattr(module, "MODULE_DESCRIPTION", ""),
                 "commands":
                 getattr(module, "MODULE_COMMANDS", []),
-                "author":
-                getattr(module, "MODULE_AUTHOR", "unknown"),
                 "chat_types":
                 getattr(module, "MODULE_CHAT_TYPES", ["private", "group"]),
             }
 
             return metadata
         except Exception as e:
-            self.logger.error(f"获取模块 {module_name} 元数据失败: {e}")
+            self.logger.warning(f"获取模块 {module_name} 元数据失败: {e}")
             return None

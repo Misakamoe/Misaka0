@@ -37,7 +37,7 @@ class BotEngine:
         # 如果提供了 token，更新配置
         if token:
             self.config_manager.set_token(token)
-            self.logger.info("已通过命令行更新 Bot Token")
+            self.logger.debug("已通过命令行更新 Bot Token")
 
         # 获取 Token
         self.token = self.config_manager.get_token()
@@ -47,7 +47,7 @@ class BotEngine:
         # 检查管理员 ID
         admin_ids = self.config_manager.get_valid_admin_ids()
         if not admin_ids:
-            self.logger.warning("未设置有效的管理员 ID，只有机器人本身能执行管理操作")
+            self.logger.warning("未设置有效的管理员 ID")
 
         # 初始化组件
         self.application = None
@@ -67,7 +67,7 @@ class BotEngine:
             "module_stats": {}
         }
 
-        self.logger.info("Bot 引擎已创建")
+        self.logger.debug("Bot 引擎已创建")
 
     async def initialize(self):
         """初始化机器人组件"""
@@ -80,16 +80,8 @@ class BotEngine:
         self.write_timeout = network_config.get("write_timeout", 20.0)
         self.poll_interval = network_config.get("poll_interval", 1.0)
 
-        # 检查是否配置了代理
-        self.proxy_url = self.config_manager.main_config.get("proxy_url", None)
-
         # 初始化 Telegram Application
         builder = Application.builder().token(self.token)
-
-        # 如果配置了代理，应用代理设置
-        if self.proxy_url:
-            self.logger.info(f"使用代理: {self.proxy_url}")
-            builder = builder.proxy_url(self.proxy_url)
 
         self.application = builder.build()
 
@@ -123,26 +115,32 @@ class BotEngine:
         self.application.bot_data["module_manager"] = self.module_manager
 
         # 注册群组成员变更处理器
-        from telegram.ext import ChatMemberHandler, CallbackQueryHandler
+        from telegram.ext import ChatMemberHandler
         self.application.add_handler(
             ChatMemberHandler(self._handle_my_chat_member,
                               ChatMemberHandler.MY_CHAT_MEMBER))
 
-        # 移除调试回调处理器
-
-        # 注册群组管理回调处理器
-        self.application.add_handler(
-            CallbackQueryHandler(self._handle_select_remove_group_callback,
-                                 pattern=r"^select_remove_group$"))
-        self.application.add_handler(
-            CallbackQueryHandler(self._handle_remove_group_callback,
-                                 pattern=r"^remove_group_-?\d+$"))
-        self.application.add_handler(
-            CallbackQueryHandler(self._handle_confirm_remove_group_callback,
-                                 pattern=r"^confirm_remove_group_-?\d+$"))
-        self.application.add_handler(
-            CallbackQueryHandler(self._handle_cancel_remove_group_callback,
-                                 pattern=r"^cancel_remove_group$"))
+        # 注册群组管理回调处理器（使用 command_manager 的权限检查）
+        await self.command_manager.register_callback_handler(
+            "core",
+            self._handle_select_remove_group_callback,
+            pattern=r"^select_remove_group$",
+            admin_level="super_admin")
+        await self.command_manager.register_callback_handler(
+            "core",
+            self._handle_remove_group_callback,
+            pattern=r"^remove_group_-?\d+$",
+            admin_level="super_admin")
+        await self.command_manager.register_callback_handler(
+            "core",
+            self._handle_confirm_remove_group_callback,
+            pattern=r"^confirm_remove_group_-?\d+$",
+            admin_level="super_admin")
+        await self.command_manager.register_callback_handler(
+            "core",
+            self._handle_cancel_remove_group_callback,
+            pattern=r"^cancel_remove_group$",
+            admin_level="super_admin")
 
         # 注册错误处理器
         self.application.add_error_handler(self.handle_error)
@@ -184,7 +182,7 @@ class BotEngine:
         # 启动配置文件监控任务
         config_watch_task = asyncio.create_task(self.watch_config_changes())
         self.tasks.append(config_watch_task)
-        self.logger.info("已启动配置文件监控，修改配置文件将自动生效")
+        self.logger.debug("已启动主配置文件监控")
 
         self.logger.info("机器人已成功启动")
 
@@ -236,8 +234,7 @@ class BotEngine:
         if update and hasattr(
                 update, 'effective_message') and update.effective_message:
             try:
-                await update.effective_message.reply_text("处理命令时发生错误，请查看日志获取详情"
-                                                          )
+                await update.effective_message.reply_text("处理时发生错误，请查看日志获取详情")
             except Exception as e:
                 self.logger.warning(f"无法发送错误消息: {e}")
 
@@ -254,7 +251,7 @@ class BotEngine:
             while True:
                 await asyncio.sleep(interval)
 
-                self.logger.info("开始执行资源清理...")
+                self.logger.debug("开始执行资源清理...")
                 start_time = time.time()
 
                 # 执行垃圾回收
@@ -265,10 +262,10 @@ class BotEngine:
                 self.stats["last_cleanup"] = time.time()
 
                 elapsed = time.time() - start_time
-                self.logger.info(f"资源清理完成，耗时 {elapsed:.2f} 秒")
+                self.logger.debug(f"资源清理完成，耗时 {elapsed:.2f} 秒")
 
         except asyncio.CancelledError:
-            self.logger.info("资源清理任务已取消")
+            self.logger.debug("资源清理任务已取消")
             raise
 
     async def watch_config_changes(self):
@@ -310,7 +307,7 @@ class BotEngine:
                     await asyncio.sleep(check_interval)
 
         except asyncio.CancelledError:
-            self.logger.info("配置文件监控任务已取消")
+            self.logger.debug("配置文件监控任务已取消")
             raise
 
     async def _handle_my_chat_member(self, update, context):
@@ -347,8 +344,8 @@ class BotEngine:
                                                text="✅ Bot 已被授权在此群组使用")
             else:
                 self.logger.warning(f"Bot 被非超级管理员 {user.id} 添加到群组 {chat.id}")
-                await context.bot.send_message(
-                    chat_id=chat.id, text="⚠️ Bot 只能由超级管理员添加到群组，将自动退出")
+                await context.bot.send_message(chat_id=chat.id,
+                                               text="⚠️ Bot 未被授权在此群组使用，将自动退出")
                 # 尝试离开群组
                 try:
                     await context.bot.leave_chat(chat.id)
@@ -372,25 +369,25 @@ class BotEngine:
         if is_callback:
             query = update.callback_query
             # 如果是回调查询，我们将编辑现有消息而不是发送新消息
-            self.logger.info("通过回调查询显示群组列表")
+            self.logger.debug("通过回调查询显示群组列表")
         else:
             # 获取消息对象（可能是新消息或编辑的消息）
             message_obj = update.message or update.edited_message
             if not message_obj:
                 self.logger.error("无法获取消息对象")
                 return
-            self.logger.info("通过命令显示群组列表")
+            self.logger.debug("通过命令显示群组列表")
 
         allowed_groups = self.config_manager.list_allowed_groups()
 
         if not allowed_groups:
             if is_callback:
-                await query.edit_message_text("当前没有允许的群组")
+                await query.edit_message_text("当前没有授权的群组")
             else:
-                await message_obj.reply_text("当前没有允许的群组")
+                await message_obj.reply_text("当前没有授权的群组")
             return
 
-        groups_message = "📋 允许使用 Bot 的群组列表:\n\n"
+        groups_message = "📋 已授权使用 Bot 的群组列表:\n\n"
 
         # 创建按钮列表
         keyboard = []
@@ -409,14 +406,12 @@ class BotEngine:
             groups_message += f"   👤 添加者: `{group_info.get('added_by', '未知')}`\n"
             groups_message += f"   ⏰ 添加时间: {added_time}\n\n"
 
-        # 只添加一个移除按钮
+        # 添加一个移除按钮
         if allowed_groups:
             keyboard.append([
                 telegram.InlineKeyboardButton(
                     "Remove Group", callback_data="select_remove_group")
             ])
-
-        # 群组列表不需要返回按钮
 
         reply_markup = telegram.InlineKeyboardMarkup(keyboard)
 
@@ -450,12 +445,6 @@ class BotEngine:
     async def _handle_remove_group_callback(self, update, context):
         """处理移除群组的回调查询"""
         query = update.callback_query
-        user_id = update.effective_user.id
-
-        # 检查是否是超级管理员
-        if not self.config_manager.is_admin(user_id):
-            await query.answer("⚠️ 您没有执行此操作的权限")
-            return
 
         # 解析回调数据
         try:
@@ -504,12 +493,6 @@ class BotEngine:
     async def _handle_confirm_remove_group_callback(self, update, context):
         """处理确认移除群组的回调查询"""
         query = update.callback_query
-        user_id = update.effective_user.id
-
-        # 检查是否是超级管理员
-        if not self.config_manager.is_admin(user_id):
-            await query.answer("⚠️ 您没有执行此操作的权限")
-            return
 
         # 解析回调数据
         try:
@@ -539,7 +522,7 @@ class BotEngine:
         # 尝试向目标群组发送通知
         try:
             await context.bot.send_message(chat_id=group_id,
-                                           text="⚠️ 此群组已从授权列表中移除")
+                                           text="⚠️ 此群组已从授权列表中移除，Bot 将自动退出")
         except Exception as e:
             self.logger.warning(f"向群组 {group_id} 发送退出通知失败: {e}")
 
@@ -557,7 +540,7 @@ class BotEngine:
         try:
             await self._list_allowed_groups_command(update, context)
         except Exception:
-            await query.edit_message_text("群组已成功移除，请重新执行 /listgroups 命令查看群组列表")
+            await query.edit_message_text("更新群组列表失败，请重新执行 /listgroups")
 
     async def _handle_cancel_remove_group_callback(self, update, context):
         """处理取消移除群组的回调查询"""
@@ -570,23 +553,17 @@ class BotEngine:
         try:
             await self._list_allowed_groups_command(update, context)
         except Exception:
-            await query.edit_message_text("返回群组列表失败，请重新执行 /listgroups 命令")
+            await query.edit_message_text("返回群组列表失败，请重新执行 /listgroups")
 
     async def _handle_select_remove_group_callback(self, update, context):
         """处理选择移除群组的回调查询"""
         query = update.callback_query
-        user_id = update.effective_user.id
-
-        # 检查是否是超级管理员
-        if not self.config_manager.is_admin(user_id):
-            await query.answer("⚠️ 您没有执行此操作的权限")
-            return
 
         # 获取所有允许的群组
         allowed_groups = self.config_manager.list_allowed_groups()
 
         if not allowed_groups:
-            await query.answer("当前没有允许的群组")
+            await query.answer("当前没有授权的群组")
             return
 
         # 构建选择消息
@@ -625,8 +602,6 @@ class BotEngine:
         # 编辑消息
         await query.edit_message_text(select_text, reply_markup=reply_markup)
 
-    # 已移除 _handle_back_to_groups_list_callback 和 _handle_debug_callback 方法，因为不再需要
-
     async def _add_allowed_group_command(self, update, context):
         """手动添加群组到白名单"""
         # 获取消息对象（可能是新消息或编辑的消息）
@@ -635,7 +610,7 @@ class BotEngine:
         chat = update.effective_chat
         user_id = update.effective_user.id
 
-        self.logger.info(
+        self.logger.debug(
             f"用户 {user_id} 执行 /addgroup 命令，聊天类型: {chat.type}, 聊天 ID: {chat.id}"
         )
 
@@ -646,7 +621,7 @@ class BotEngine:
                 group_name = chat.title
 
                 # 添加到白名单
-                self.logger.info(f"尝试添加当前群组 {chat.id} 到白名单")
+                self.logger.debug(f"尝试添加当前群组 {chat.id} 到白名单")
                 if self.config_manager.add_allowed_group(
                         chat.id, user_id, group_name):
                     await message_obj.reply_text(f"✅ 已将当前群组 {chat.id} 添加到白名单")
@@ -662,7 +637,7 @@ class BotEngine:
         # 带参数时，添加指定群组
         try:
             group_id = int(context.args[0])
-            self.logger.info(f"尝试添加群组 {group_id} 到白名单")
+            self.logger.debug(f"尝试添加群组 {group_id} 到白名单")
 
             # 添加到白名单
             if self.config_manager.add_allowed_group(group_id, user_id):
@@ -676,5 +651,3 @@ class BotEngine:
         except Exception as e:
             self.logger.error(f"添加群组失败: {e}", exc_info=True)
             await message_obj.reply_text(f"添加群组失败: {e}")
-
-    # 已移除 _remove_allowed_group_command 方法，使用按钮界面替代

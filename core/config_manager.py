@@ -20,14 +20,10 @@ class ConfigManager:
         self.main_config = {}
 
         # 确保配置目录存在
-        self._ensure_config_dir()
+        os.makedirs(self.config_dir, exist_ok=True)
 
         # 加载配置
         self.reload_all_configs()
-
-    def _ensure_config_dir(self):
-        """确保配置目录存在"""
-        os.makedirs(self.config_dir, exist_ok=True)
 
     def _load_json_file(self, file_path, default_value=None):
         """从文件加载 JSON 数据
@@ -74,7 +70,7 @@ class ConfigManager:
 
             # 保存数据
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
+                json.dump(data, f, indent=2, ensure_ascii=False)
             return True
         except Exception as e:
             self.logger.error(f"保存配置文件 {file_path} 失败: {e}")
@@ -90,7 +86,7 @@ class ConfigManager:
             backup_path = f"{file_path}.bak.{int(time.time())}"
             try:
                 os.rename(file_path, backup_path)
-                self.logger.info(f"已将损坏的配置文件备份为 {backup_path}")
+                self.logger.debug(f"已将损坏的配置文件备份为 {backup_path}")
             except Exception as e:
                 self.logger.error(f"备份损坏的配置文件 {file_path} 失败: {e}")
 
@@ -126,7 +122,7 @@ class ConfigManager:
         # 如果有缺失的配置项，保存配置
         if needs_save:
             self._save_json_file(self.main_config_path, config)
-            self.logger.info("已自动补充主配置中的缺失项并保存")
+            self.logger.debug("已自动补充主配置中的缺失项并保存")
 
         self.main_config = config
         return config
@@ -134,7 +130,7 @@ class ConfigManager:
     def reload_all_configs(self):
         """重新加载所有配置"""
         self.reload_main_config()
-        self.logger.info("所有配置已重新加载")
+        self.logger.debug("所有配置已重新加载")
 
     def save_main_config(self):
         """保存主配置
@@ -218,39 +214,6 @@ class ConfigManager:
         """
         return user_id in self.get_valid_admin_ids()
 
-    def add_admin(self, user_id):
-        """添加管理员
-
-        Args:
-            user_id: 用户 ID
-
-        Returns:
-            bool: 是否成功添加
-        """
-        # 检查是否是示例 ID
-        if user_id == 123456789:
-            self.logger.warning("尝试添加示例管理员 ID，操作被拒绝")
-            return False
-
-        if user_id not in self.main_config.get("admin_ids", []):
-            self.main_config.setdefault("admin_ids", []).append(user_id)
-            return self.save_main_config()
-        return True
-
-    def remove_admin(self, user_id):
-        """移除管理员
-
-        Args:
-            user_id: 用户 ID
-
-        Returns:
-            bool: 是否成功移除
-        """
-        if user_id in self.main_config.get("admin_ids", []):
-            self.main_config["admin_ids"].remove(user_id)
-            return self.save_main_config()
-        return True
-
     def is_allowed_group(self, group_id):
         """检查群组是否允许使用 bot
 
@@ -290,7 +253,7 @@ class ConfigManager:
         # 保存配置
         success = self.save_main_config()
         if success:
-            self.logger.info(f"群组 {group_id} 已添加到白名单")
+            self.logger.debug(f"群组 {group_id} 已添加到白名单")
         return success
 
     def remove_allowed_group(self, group_id):
@@ -308,7 +271,7 @@ class ConfigManager:
                 del self.main_config["allowed_groups"][group_id_str]
                 success = self.save_main_config()
                 if success:
-                    self.logger.info(f"群组 {group_id} 已从白名单移除")
+                    self.logger.debug(f"群组 {group_id} 已从白名单移除")
                 return success
         return False
 

@@ -65,7 +65,7 @@ class CommandManager:
                 "name": "id",
                 "callback": self._id_command,
                 "admin_level": False,
-                "description": "显示用户和聊天 ID 信息"
+                "description": "显示用户和聊天 ID"
             },
             {
                 "name": "modules",
@@ -164,7 +164,6 @@ class CommandManager:
 
             # 添加到应用
             self.application.add_handler(handler)
-            self.logger.debug(f"已注册命令 /{command_name} (模块: {module_name})")
 
             return True
 
@@ -230,7 +229,7 @@ class CommandManager:
                 self.logger.warning(f"权限错误: {e}")
                 return
             except Exception as e:
-                self.logger.error(f"权限包装器中发生错误: {e}", exc_info=True)
+                self.logger.error(f"权限包装器中发生错误: {e}")
                 return
 
         # 创建回调处理器
@@ -238,8 +237,6 @@ class CommandManager:
 
         # 添加到应用
         self.application.add_handler(handler, group)
-        self.logger.debug(
-            f"已注册带权限验证的回调查询处理器 (模块: {module_name}, 权限: {admin_level})")
 
         return True
 
@@ -283,7 +280,6 @@ class CommandManager:
                 if not self.module_commands[module_name]:
                     del self.module_commands[module_name]
 
-            self.logger.debug(f"已注销命令 /{command_name}")
             return True
 
     async def unregister_module_commands(self, module_name):
@@ -325,9 +321,9 @@ class CommandManager:
                 # 获取消息对象（可能是新消息或编辑的消息）
                 message = update.message or update.edited_message
 
-                # 如果是编辑的消息，记录日志
+                # 如果是编辑的消息，记录调试日志
                 if update.edited_message:
-                    self.logger.info(
+                    self.logger.debug(
                         f"处理编辑后的命令: /{command_name} (用户: {update.effective_user.id})"
                     )
 
@@ -371,14 +367,13 @@ class CommandManager:
                 self.logger.warning(f"执行命令 /{command_name} 时发生权限错误: {e}")
                 return
             except Exception as e:
-                self.logger.error(f"执行命令 /{command_name} 时出错: {e}",
-                                  exc_info=True)
+                self.logger.error(f"执行命令 /{command_name} 时出错: {e}")
                 message = update.message or update.edited_message
                 if message:
                     try:
                         await message.reply_text("执行命令时出错，请查看日志了解详情")
                     except Exception as reply_error:
-                        self.logger.warning(f"无法发送错误消息: {reply_error}")
+                        self.logger.debug(f"无法发送错误消息: {reply_error}")
 
         return wrapper
 
@@ -417,7 +412,7 @@ class CommandManager:
 
             # 如果是超级管理员且正在使用特权命令，允许执行
             if is_super_admin and command in special_commands:
-                self.logger.info(
+                self.logger.debug(
                     f"超级管理员 {user.id} 在非白名单群组 {chat.id} 中使用特权命令: /{command}")
                 return True
 
@@ -432,7 +427,7 @@ class CommandManager:
 
             # 确保消息对象存在，如果不存在（例如机器人被踢出群组），则直接返回 False
             if not msg:
-                self.logger.warning(f"无法在群组 {chat.id} 中发送消息，可能是机器人已被踢出")
+                self.logger.info(f"无法在群组 {chat.id} 中发送消息，可能是机器人已被踢出")
                 return False
 
             # 如果是超级管理员，提供快速添加到白名单的提示
@@ -489,7 +484,7 @@ class CommandManager:
                 self.logger.warning(f"检查群组权限时发生权限错误: {e}")
                 return False
             except Exception as e:
-                self.logger.error(f"检查群组权限时出错: {e}")
+                self.logger.warning(f"检查群组权限时出错: {e}")
 
             # 如果是回调查询，不需要回复消息，因为已经在 permission_wrapper 中处理了
             if not update.callback_query:
@@ -497,8 +492,6 @@ class CommandManager:
                 if message:
                     await message.reply_text("⚠️ 您没有执行此命令的权限")
             return False
-
-        return False
 
     async def _handle_unknown_command(self, update, context):
         """处理未知命令
@@ -558,7 +551,7 @@ class CommandManager:
                 await message.reply_sticker(sticker=self.start_sticker_id)
                 return
             except Exception as e:
-                self.logger.warning(f"使用已保存的贴纸 ID 失败: {e}")
+                self.logger.debug(f"使用已保存的贴纸 ID 失败: {e}")
                 # 如果失败，重置 ID 并尝试发送文件
                 self.start_sticker_id = None
 
@@ -570,7 +563,6 @@ class CommandManager:
                 # 保存返回的贴纸 ID 以便下次使用
                 if sticker_message and sticker_message.sticker:
                     self.start_sticker_id = sticker_message.sticker.file_id
-                    self.logger.debug(f"已暂存 start.webp 贴纸的 Telegram 文件 ID")
         except Exception as e:
             self.logger.error(f"发送贴纸失败: {e}")
 
@@ -581,32 +573,21 @@ class CommandManager:
             update: 更新对象
             context: 上下文对象
         """
-        help_text = "🫥 *机器人帮助*\n\n"
+        help_text = "🫥 *使用帮助*\n\n"
+        help_text += "*开源地址*：[Misakamoe/Misaka0](https://github.com/Misakamoe/Misaka0)\n\n"
         help_text += "*基本命令：*\n"
-        help_text += "/start - 启动机器人\n"
         help_text += "/help - 显示此帮助信息\n"
         help_text += "/id - 显示用户和聊天 ID 信息\n"
         help_text += "/modules - 列出可用模块\n"
         help_text += "/commands - 列出可用命令\n\n"
 
-        # 检查用户权限
-        user_id = update.effective_user.id
-
-        # 检查是否是超级管理员
-        is_super_admin = self.config_manager.is_admin(user_id)
-
-        # 显示超级管理员命令
-        if is_super_admin:
-            help_text += "*超级管理员命令：*\n"
-            help_text += "/stats - 显示机器人统计信息\n"
-            help_text += "/listgroups - 列出允许的群组\n"
-            help_text += "/addgroup \\[群组 ID] - 添加群组到白名单\n"
-
         # 获取消息对象（可能是新消息或编辑的消息）
         message = update.message or update.edited_message
 
         try:
-            await message.reply_text(help_text, parse_mode="MARKDOWN")
+            await message.reply_text(help_text,
+                                     parse_mode="MARKDOWN",
+                                     disable_web_page_preview=True)
         except Exception:
             # 如果 Markdown 解析失败，发送纯文本
             await message.reply_text(TextFormatter.markdown_to_plain(help_text)
@@ -676,64 +657,15 @@ class CommandManager:
             update: 更新对象
             context: 上下文对象
         """
-        chat_id = update.effective_chat.id
         chat_type = update.effective_chat.type
         current_chat_type = "private" if chat_type == "private" else "group"
 
-        # 获取已安装的模块
-        module_manager = context.bot_data.get("module_manager")
-        installed_modules = module_manager.discover_modules()
+        # 构建模块列表
+        module_list = self._build_module_list(context, current_chat_type)
 
-        # 构建模块信息列表
-        module_list = []
-
-        for module_name in installed_modules:
-            if module_name.startswith('_'):
-                continue
-
-            # 获取模块信息
-            module_info = module_manager.get_module_info(module_name)
-
-            if module_info:
-                metadata = module_info["metadata"]
-                description = metadata.get("description", "")
-                version = metadata.get("version", "unknown")
-
-                # 获取模块支持的聊天类型
-                module = module_info["module"]
-                supported_types = getattr(module, "MODULE_CHAT_TYPES",
-                                          ["private", "group"])
-            else:
-                metadata = None
-                description = ""
-                version = "unknown"
-                supported_types = ["private", "group"]  # 默认全部支持
-
-            # 检查是否支持当前聊天类型
-            supports_current_type = current_chat_type in supported_types
-
-            module_list.append({
-                "name": module_name,
-                "supports_current_type": supports_current_type,
-                "supported_types": supported_types,
-                "description": description,
-                "version": version,
-                "loaded": module_info is not None
-            })
-
-        # 按当前聊天类型支持状态和名称排序
-        module_list.sort(
-            key=lambda x: (not x["supports_current_type"], x["name"]))
-
-        # 使用分页帮助器
-        pagination = PaginationHelper(
-            items=module_list,
-            page_size=8,
-            format_item=lambda item: self._format_module_item(item),
-            title=f"模块列表（当前聊天类型：{current_chat_type}）",
-            callback_prefix="mod_page")
-
-        # 显示第一页
+        # 创建分页助手并显示第一页
+        pagination = self._create_module_pagination(module_list,
+                                                    current_chat_type)
         await pagination.send_page(update, context, 0)
 
     def _format_module_item(self, item):
@@ -772,9 +704,88 @@ class CommandManager:
         chat_id = update.effective_chat.id
         chat_type = update.effective_chat.type
         current_chat_type = "private" if chat_type == "private" else "group"
-
-        # 获取用户权限
         user_id = update.effective_user.id
+
+        # 构建命令列表
+        command_list = await self._build_command_list(context, user_id,
+                                                      chat_id, chat_type,
+                                                      current_chat_type)
+
+        # 创建分页助手并显示第一页
+        pagination = self._create_command_pagination(command_list,
+                                                     current_chat_type)
+        await pagination.send_page(update, context, 0)
+
+    def _build_module_list(self, context, current_chat_type):
+        """构建模块列表
+
+        Args:
+            context: 上下文对象
+            current_chat_type: 当前聊天类型 ("private" 或 "group")
+
+        Returns:
+            list: 模块信息列表
+        """
+        module_manager = context.bot_data.get("module_manager")
+        installed_modules = module_manager.discover_modules()
+
+        # 构建模块信息列表
+        module_list = []
+        for module_name in installed_modules:
+            if module_name.startswith('_'):
+                continue
+
+            # 获取模块信息
+            module_info = module_manager.get_module_info(module_name)
+
+            if module_info:
+                metadata = module_info["metadata"]
+                description = metadata.get("description", "")
+                version = metadata.get("version", "unknown")
+
+                # 获取模块支持的聊天类型
+                module = module_info["module"]
+                supported_types = getattr(module, "MODULE_CHAT_TYPES",
+                                          ["private", "group"])
+            else:
+                metadata = None
+                description = ""
+                version = "unknown"
+                supported_types = ["private", "group"]  # 默认全部支持
+
+            # 检查是否支持当前聊天类型
+            supports_current_type = current_chat_type in supported_types
+
+            module_list.append({
+                "name": module_name,
+                "supports_current_type": supports_current_type,
+                "supported_types": supported_types,
+                "description": description,
+                "version": version,
+                "loaded": module_info is not None
+            })
+
+        # 按当前聊天类型支持状态和名称排序
+        module_list.sort(
+            key=lambda x: (not x["supports_current_type"], x["name"]))
+
+        return module_list
+
+    async def _build_command_list(self, context, user_id, chat_id, chat_type,
+                                  current_chat_type):
+        """构建命令列表
+
+        Args:
+            context: 上下文对象
+            user_id: 用户ID
+            chat_id: 聊天ID
+            chat_type: 原始聊天类型
+            current_chat_type: 简化的聊天类型 ("private" 或 "group")
+
+        Returns:
+            list: 命令信息列表
+        """
+        # 获取用户权限
         is_super_admin = self.config_manager.is_admin(user_id)
 
         is_group_admin = False
@@ -835,16 +846,41 @@ class CommandManager:
         command_list.sort(
             key=lambda x: (x["module"] != "core", x["module"], x["name"]))
 
-        # 使用分页帮助器
-        pagination = PaginationHelper(
+        return command_list
+
+    def _create_module_pagination(self, module_list, current_chat_type):
+        """创建模块分页助手
+
+        Args:
+            module_list: 模块信息列表
+            current_chat_type: 当前聊天类型
+
+        Returns:
+            PaginationHelper: 分页助手实例
+        """
+        return PaginationHelper(
+            items=module_list,
+            page_size=8,
+            format_item=lambda item: self._format_module_item(item),
+            title=f"模块列表（当前聊天类型：{current_chat_type}）",
+            callback_prefix="mod_page")
+
+    def _create_command_pagination(self, command_list, current_chat_type):
+        """创建命令分页助手
+
+        Args:
+            command_list: 命令信息列表
+            current_chat_type: 当前聊天类型
+
+        Returns:
+            PaginationHelper: 分页助手实例
+        """
+        return PaginationHelper(
             items=command_list,
             page_size=10,
             format_item=lambda item: self._format_command_item(item),
             title=f"命令列表（当前聊天类型：{current_chat_type}）",
             callback_prefix="cmd_page")
-
-        # 显示第一页
-        await pagination.send_page(update, context, 0)
 
     def _format_command_item(self, item):
         """格式化命令项目
@@ -880,15 +916,14 @@ class CommandManager:
         Returns:
             tuple: (总页数, 页面大小)
         """
-        # 模块列表分页
-        module_manager = context.bot_data.get("module_manager")
-        installed_modules = module_manager.discover_modules()
+        # 获取当前聊天类型（这里不重要，因为我们只需要计算总数）
+        current_chat_type = "private"  # 默认值，实际上不影响计数
 
-        # 过滤掉以下划线开头的模块
-        module_list = [m for m in installed_modules if not m.startswith('_')]
+        # 使用辅助方法构建模块列表
+        module_list = self._build_module_list(context, current_chat_type)
 
         # 计算总页数
-        page_size = 8  # 与 _list_modules_command 中的值保持一致
+        page_size = 8  # 与 _create_module_pagination 中的值保持一致
         actual_total_pages = max(1, (len(module_list) + page_size - 1) //
                                  page_size)
 
@@ -907,55 +942,16 @@ class CommandManager:
         Returns:
             tuple: (总页数, 页面大小)
         """
-        # 命令列表分页
-        # 获取用户权限
-        is_super_admin = self.config_manager.is_admin(user_id)
-
-        is_group_admin = False
-        if chat_type in ["group", "supergroup"]:
-            try:
-                chat_member = await context.bot.get_chat_member(
-                    chat_id, user_id)
-                is_group_admin = chat_member.status in [
-                    "creator", "administrator"
-                ]
-            except Exception:
-                pass
-
-        # 过滤命令列表
+        # 简化聊天类型
         current_chat_type = "private" if chat_type == "private" else "group"
-        module_manager = context.bot_data.get("module_manager")
 
-        # 收集命令信息
-        command_list = []
-        for cmd_name, cmd_info in self.commands.items():
-            module_name = cmd_info["module"]
-            admin_level = cmd_info["admin_level"]
-
-            # 检查权限
-            if admin_level == "super_admin" and not is_super_admin:
-                continue
-
-            if admin_level == "group_admin" and not (is_super_admin
-                                                     or is_group_admin):
-                continue
-
-            # 核心模块命令总是可用
-            if module_name == "core":
-                command_list.append(cmd_name)
-                continue
-
-            # 检查非核心模块命令是否支持当前聊天类型
-            module_info = module_manager.get_module_info(module_name)
-            if module_info:
-                module = module_info["module"]
-                supported_types = getattr(module, "MODULE_CHAT_TYPES",
-                                          ["private", "group"])
-                if current_chat_type in supported_types:
-                    command_list.append(cmd_name)
+        # 使用辅助方法构建命令列表
+        command_list = await self._build_command_list(context, user_id,
+                                                      chat_id, chat_type,
+                                                      current_chat_type)
 
         # 计算总页数
-        page_size = 10  # 与 _list_commands_command 中的值保持一致
+        page_size = 10  # 与 _create_command_pagination 中的值保持一致
         actual_total_pages = max(1, (len(command_list) + page_size - 1) //
                                  page_size)
 
@@ -1087,142 +1083,34 @@ class CommandManager:
                     await query.answer("无效的页码")
                     return
 
-            # 获取用户权限
+            # 获取用户ID
             user_id = update.effective_user.id
-            is_super_admin = self.config_manager.is_admin(user_id)
-
-            is_group_admin = False
-            if chat_type in ["group", "supergroup"]:
-                try:
-                    chat_member = await context.bot.get_chat_member(
-                        chat_id, user_id)
-                    is_group_admin = chat_member.status in [
-                        "creator", "administrator"
-                    ]
-                except Exception:
-                    pass
 
             if prefix == "mod_page":
                 # 模块列表分页
-                module_manager = context.bot_data.get("module_manager")
-                installed_modules = module_manager.discover_modules()
+                module_list = self._build_module_list(context,
+                                                      current_chat_type)
 
-                # 构建模块信息列表
-                module_list = []
-                for module_name in installed_modules:
-                    if module_name.startswith('_'):
-                        continue
-
-                    # 获取模块信息
-                    module_info = module_manager.get_module_info(module_name)
-
-                    if module_info:
-                        metadata = module_info["metadata"]
-                        description = metadata.get("description", "")
-                        version = metadata.get("version", "unknown")
-
-                        # 获取模块支持的聊天类型
-                        module = module_info["module"]
-                        supported_types = getattr(module, "MODULE_CHAT_TYPES",
-                                                  ["private", "group"])
-                    else:
-                        metadata = None
-                        description = ""
-                        version = "unknown"
-                        supported_types = ["private", "group"]  # 默认全部支持
-
-                    # 检查是否支持当前聊天类型
-                    supports_current_type = current_chat_type in supported_types
-
-                    module_list.append({
-                        "name": module_name,
-                        "supports_current_type": supports_current_type,
-                        "supported_types": supported_types,
-                        "description": description,
-                        "version": version,
-                        "loaded": module_info is not None
-                    })
-
-                # 按支持当前聊天类型和名称排序
-                module_list.sort(
-                    key=lambda x: (not x["supports_current_type"], x["name"]))
-
-                # 使用分页帮助器
-                pagination = PaginationHelper(
-                    items=module_list,
-                    page_size=8,
-                    format_item=lambda item: self._format_module_item(item),
-                    title=f"模块列表（当前聊天类型：{current_chat_type}）",
-                    callback_prefix="mod_page")
-
-                # 显示请求的页面
+                # 创建分页助手并显示请求的页面
+                pagination = self._create_module_pagination(
+                    module_list, current_chat_type)
                 await pagination.send_page(update, context, page_index)
 
             elif prefix == "cmd_page":
                 # 命令列表分页
-                # 收集命令信息
-                command_list = []
+                command_list = await self._build_command_list(
+                    context, user_id, chat_id, chat_type, current_chat_type)
 
-                # 获取模块管理器
-                module_manager = context.bot_data.get("module_manager")
-
-                for cmd_name, cmd_info in self.commands.items():
-                    module_name = cmd_info["module"]
-                    admin_level = cmd_info["admin_level"]
-                    description = cmd_info["description"]
-
-                    # 检查权限
-                    if admin_level == "super_admin" and not is_super_admin:
-                        continue
-
-                    if admin_level == "group_admin" and not (is_super_admin or
-                                                             is_group_admin):
-                        continue
-
-                    # 核心模块命令总是可用
-                    if module_name == "core":
-                        command_list.append({
-                            "name": cmd_name,
-                            "module": module_name,
-                            "admin_level": admin_level,
-                            "description": description
-                        })
-                        continue
-
-                    # 检查非核心模块命令是否支持当前聊天类型
-                    module_info = module_manager.get_module_info(module_name)
-                    if module_info:
-                        module = module_info["module"]
-                        supported_types = getattr(module, "MODULE_CHAT_TYPES",
-                                                  ["private", "group"])
-                        if current_chat_type in supported_types:
-                            command_list.append({
-                                "name": cmd_name,
-                                "module": module_name,
-                                "admin_level": admin_level,
-                                "description": description
-                            })
-
-                # 按模块和名称排序
-                command_list.sort(key=lambda x: (x["module"] != "core", x[
-                    "module"], x["name"]))
-
-                # 使用分页帮助器
-                pagination = PaginationHelper(
-                    items=command_list,
-                    page_size=10,
-                    format_item=lambda item: self._format_command_item(item),
-                    title=f"命令列表（当前聊天类型：{current_chat_type}）",
-                    callback_prefix="cmd_page")
-
-                # 显示请求的页面
+                # 创建分页助手并显示请求的页面
+                pagination = self._create_command_pagination(
+                    command_list, current_chat_type)
                 await pagination.send_page(update, context, page_index)
 
             else:
                 await query.answer("未知的回调类型")
 
         except Exception as e:
-            self.logger.error(f"处理分页回调时出错: {e}", exc_info=True)
+            self.logger.error(f"处理分页回调时出错: {e}")
             await query.answer("处理回调时出错")
 
     async def _stats_command(self, update, context):
@@ -1291,20 +1179,10 @@ class CommandManager:
             self.logger.warning("无法导入 psutil 模块，跳过内存使用统计")
             pass
 
-        # 网络统计信息
-        stats_message += "\n*网络信息:*\n"
-
         # 获取网络配置
         network_config = self.config_manager.main_config.get("network", {})
         poll_interval = network_config.get("poll_interval", 1.0)
         stats_message += f"📡 轮询间隔: {poll_interval} 秒\n"
-
-        # 获取代理信息
-        proxy_url = self.config_manager.main_config.get("proxy_url", None)
-        if proxy_url:
-            stats_message += f"🔄 代理: {proxy_url}\n"
-        else:
-            stats_message += f"🔄 代理: 未使用\n"
 
         # 最后清理时间
         if bot_engine.stats.get("last_cleanup", 0) > 0:
@@ -1350,4 +1228,4 @@ class CommandManager:
 
         # 回复用户
         await message.reply_text("✅ 已取消当前操作")
-        self.logger.info(f"用户 {user_id} 在聊天 {chat_id} 中取消了当前操作")
+        self.logger.debug(f"用户 {user_id} 在聊天 {chat_id} 中取消了当前操作")

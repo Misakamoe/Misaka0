@@ -1,7 +1,6 @@
 name: Build and Release
 
 # 触发条件：只在版本相关的提交或手动触发时运行
-# 不会在每次推送时触发，只有当提交消息包含版本信息时才会触发
 on:
   push:
     branches: [main, master]
@@ -31,7 +30,6 @@ jobs:
   # 检查提交消息是否包含版本关键词
   check-commit:
     runs-on: ubuntu-latest
-    # 无论是推送还是手动触发都运行此任务
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
       version: ${{ steps.extract-version.outputs.version }}
@@ -74,11 +72,6 @@ jobs:
             # 从提交消息中提取版本号
             COMMIT_MSG=$(git log -1 --pretty=format:%s ${{ github.sha }})
             VERSION=$(echo "$COMMIT_MSG" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-
-            # 如果没有找到版本号，使用当前日期
-            if [ -z "$VERSION" ]; then
-              VERSION="v$(date +'%Y.%m.%d')"
-            fi
           fi
 
           # 确保版本号以 v 开头
@@ -145,6 +138,9 @@ jobs:
             type=raw,value=latest
             type=raw,value=${{ steps.set-version.outputs.version }}
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -153,6 +149,9 @@ jobs:
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ${{ steps.meta-github.outputs.tags }}
             ${{ steps.meta-dockerhub.outputs.tags }}
