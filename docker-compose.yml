@@ -13,15 +13,3 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - ADMIN_IDS=${ADMIN_IDS:-}
       # - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    # 健康检查
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import json; f=open('/app/config/config.json'); c=json.load(f); exit(0 if c.get('token') and c.get('admin_ids') else 1)",
-        ]
-      interval: 1m
-      timeout: 10s
-      retries: 3
