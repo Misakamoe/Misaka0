@@ -11,7 +11,7 @@ class StateManager:
 
     def __init__(self, storage_dir="data/states"):
         """初始化状态管理器
-        
+
         Args:
             storage_dir: 状态存储目录
         """
@@ -23,11 +23,11 @@ class StateManager:
 
     def get_state_file_path(self, module_name, format="json"):
         """获取状态文件路径
-        
+
         Args:
             module_name: 模块名称
             format: 文件格式
-            
+
         Returns:
             str: 文件路径
         """
@@ -35,12 +35,12 @@ class StateManager:
 
     def save_state(self, module_name, state, format="json"):
         """保存模块状态
-        
+
         Args:
             module_name: 模块名称
             state: 要保存的状态数据
             format: 存储格式，支持 'json' 或 'pickle'
-            
+
         Returns:
             bool: 是否成功保存
         """
@@ -57,10 +57,9 @@ class StateManager:
                 with open(file_path, 'wb') as f:
                     pickle.dump(state, f)
             else:
-                self.logger.error(f"不支持的存储格式: {format}")
+                self.logger.warning(f"不支持的存储格式: {format}")
                 return False
 
-            self.logger.debug(f"已保存模块 {module_name} 的状态")
             return True
 
         except Exception as e:
@@ -69,12 +68,12 @@ class StateManager:
 
     def load_state(self, module_name, default=None, format="json"):
         """加载模块状态
-        
+
         Args:
             module_name: 模块名称
             default: 默认值
             format: 存储格式
-            
+
         Returns:
             任意: 加载的状态或默认值
         """
@@ -91,20 +90,23 @@ class StateManager:
                 with open(file_path, 'rb') as f:
                     return pickle.load(f)
             else:
-                self.logger.error(f"不支持的存储格式: {format}")
+                self.logger.warning(f"不支持的存储格式: {format}")
                 return default
 
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"解析模块 {module_name} 的JSON状态文件时出错: {e}")
+            return default
         except Exception as e:
             self.logger.error(f"加载模块 {module_name} 状态时出错: {e}")
             return default
 
     def delete_state(self, module_name, format="json"):
         """删除模块状态
-        
+
         Args:
             module_name: 模块名称
             format: 存储格式
-            
+
         Returns:
             bool: 是否成功删除
         """
@@ -113,7 +115,6 @@ class StateManager:
 
             if os.path.exists(file_path):
                 os.remove(file_path)
-                self.logger.debug(f"已删除模块 {module_name} 的状态")
                 return True
             return False
 

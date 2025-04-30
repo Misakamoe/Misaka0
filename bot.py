@@ -24,14 +24,13 @@ async def main_async():
 
     # 设置主日志
     logger = setup_logger("Main", args.log_level)
-    logger.info("正在启动模块化 Telegram Bot...")
+    logger.info("启动中...")
 
     # 创建停止事件
     stop_event = asyncio.Event()
 
     # 信号处理
     def signal_handler():
-        logger.info("收到停止信号，准备关闭...")
         stop_event.set()
 
     # 设置信号处理
@@ -59,13 +58,12 @@ async def main_async():
             await stop_event.wait()
         except asyncio.CancelledError:
             # 捕获 CancelledError，这通常是由 Ctrl+C 触发的
-            logger.info("收到取消信号，准备关闭...")
+            pass
 
-        logger.info("正在优雅地关闭...")
+        logger.info("正在关闭...")
         await bot.stop()
 
     except KeyboardInterrupt:
-        logger.info("收到键盘中断，正在关闭...")
         if bot:
             await bot.stop()
     except Exception as e:
@@ -74,7 +72,6 @@ async def main_async():
             await bot.stop()
         return 1
 
-    logger.info("机器人已完全关闭")
     return 0
 
 

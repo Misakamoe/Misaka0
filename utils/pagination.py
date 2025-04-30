@@ -131,7 +131,7 @@ class PaginationHelper:
                     text=content, reply_markup=keyboard, parse_mode="MARKDOWN")
                 await update.callback_query.answer()
                 return update.callback_query.message
-            except Exception as e:
+            except Exception:
                 # 如果 Markdown 解析失败，尝试纯文本
                 plain_content = TextFormatter.markdown_to_plain(content)
                 await update.callback_query.edit_message_text(
@@ -146,7 +146,7 @@ class PaginationHelper:
                 return await message.reply_text(text=content,
                                                 reply_markup=keyboard,
                                                 parse_mode="MARKDOWN")
-            except Exception as e:
+            except Exception:
                 # 如果 Markdown 解析失败，尝试纯文本
                 plain_content = TextFormatter.markdown_to_plain(content)
                 return await message.reply_text(text=plain_content,
@@ -223,11 +223,8 @@ class PaginationHelper:
                 context.user_data["page_index"] = page_index
                 await query.answer("处理中...")
 
-        except Exception as e:
+        except Exception:
             # 处理错误
-            import traceback
-            print(f"回调处理错误: {e}")
-            print(traceback.format_exc())
             await query.answer("处理回调时出错")
 
     @staticmethod
@@ -286,3 +283,104 @@ class PaginationHelper:
         # 更新消息
         await query.edit_message_text("请选择要跳转的页码：", reply_markup=reply_markup)
         await query.answer()
+
+    @staticmethod
+    def paginate_buttons(buttons,
+                         page_index=0,
+                         rows_per_page=5,
+                         buttons_per_row=3,
+                         nav_callback_prefix="btn_page",
+                         show_nav_buttons=True,
+                         back_button=None):
+        """对按钮进行分页处理
+
+        当按钮数量很多时，将它们分成多个页面显示，每页最多显示指定行数的按钮。
+
+        Args:
+            buttons: 按钮列表，每个元素是 (text, callback_data) 元组或 InlineKeyboardButton 对象
+            page_index: 当前页码（从 0 开始）
+            rows_per_page: 每页显示的最大行数，默认为 5
+            buttons_per_row: 每行显示的最大按钮数，默认为 3
+            nav_callback_prefix: 导航按钮的回调数据前缀
+            show_nav_buttons: 是否显示导航按钮，当只有一页时可以设为 False
+            back_button: 返回按钮，如果提供，将添加到键盘底部
+
+        Returns:
+            InlineKeyboardMarkup: 分页后的按钮键盘
+        """
+        if not buttons:
+            return InlineKeyboardMarkup([[]])  # 返回空键盘
+
+        # 计算总页数
+        buttons_per_page = rows_per_page * buttons_per_row
+        total_buttons = len(buttons)
+        total_pages = max(1, math.ceil(total_buttons / buttons_per_page))
+
+        # 确保页码有效
+        page_index = max(0, min(page_index, total_pages - 1))
+
+        # 计算当前页的按钮范围
+        start_idx = page_index * buttons_per_page
+        end_idx = min(start_idx + buttons_per_page, total_buttons)
+
+        # 创建当前页的按钮键盘
+        keyboard = []
+        current_row = []
+
+        for i in range(start_idx, end_idx):
+            try:
+                # 获取按钮
+                button = buttons[i]
+
+                # 如果按钮是元组，创建 InlineKeyboardButton 对象
+                if isinstance(button, tuple) and len(button) >= 2:
+                    button = InlineKeyboardButton(text=button[0],
+                                                  callback_data=button[1])
+
+                # 添加按钮到当前行
+                current_row.append(button)
+
+                # 如果当前行已满或已到达最后一个按钮，添加行到键盘
+                if len(current_row) >= buttons_per_row or i == end_idx - 1:
+                    keyboard.append(current_row.copy())  # 添加当前行的副本
+                    current_row = []
+            except Exception as e:
+                # 继续处理下一个按钮
+                pass
+
+        # 只有当需要显示导航按钮且总页数大于1时，才添加导航按钮
+        if show_nav_buttons and total_pages > 1:
+            nav_row = []
+
+            # 上一页按钮
+            if page_index > 0:
+                nav_row.append(
+                    InlineKeyboardButton(
+                        "◁ Prev",
+                        callback_data=f"{nav_callback_prefix}:{page_index - 1}"
+                    ))
+            else:
+                nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+            # 页码指示（不可点击）
+            nav_row.append(
+                InlineKeyboardButton(f"{page_index + 1}/{total_pages}",
+                                     callback_data="noop"))
+
+            # 下一页按钮
+            if page_index < total_pages - 1:
+                nav_row.append(
+                    InlineKeyboardButton(
+                        "Next ▷",
+                        callback_data=f"{nav_callback_prefix}:{page_index + 1}"
+                    ))
+            else:
+                nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+            keyboard.append(nav_row)
+
+        # 添加返回按钮
+        if back_button:
+            keyboard.append([back_button])
+
+        return InlineKeyboardMarkup(keyboard)

@@ -12,8 +12,8 @@ class SessionManager:
     """会话管理器，用于支持多步骤交互，会话绑定到聊天ID和用户ID的组合"""
 
     def __init__(self,
-                 timeout=300,
-                 cleanup_interval=600,
+                 timeout=180,
+                 cleanup_interval=60,
                  storage_dir="data/sessions"):
         """初始化会话管理器
 
@@ -135,6 +135,10 @@ class SessionManager:
         session_key = self._get_session_key(user_id, chat_id)
 
         async with self.locks[session_key]:
+            # 检查会话是否存在
+            if session_key not in self.sessions:
+                return default
+
             session = self.sessions[session_key]
             session["last_activity"] = time.time()
 
@@ -154,12 +158,27 @@ class SessionManager:
                     return default
 
                 # 未过期，返回实际值
-                return value.get("_value", value)
+                if "_value" in value:
+                    return value["_value"]
+                elif "value" in value:  # 处理旧格式
+                    return value["value"]
+                else:
+                    # 返回不包含 _expire_at 的字典
+                    return {
+                        k: v
+                        for k, v in value.items() if k != "_expire_at"
+                    }
 
             # 普通值，直接返回
             return value
 
-    async def set(self, user_id, key, value, chat_id=None, expire_after=None):
+    async def set(self,
+                  user_id,
+                  key,
+                  value,
+                  chat_id=None,
+                  expire_after=None,
+                  module_name=None):
         """设置会话数据
 
         Args:
@@ -168,10 +187,17 @@ class SessionManager:
             value: 数据值
             chat_id: 聊天 ID
             expire_after: 可选，键的过期时间（秒），如果设置，该键将在指定时间后自动过期
+            module_name: 可选，设置会话所有者
         """
         session_key = self._get_session_key(user_id, chat_id)
 
         async with self.locks[session_key]:
+            # 确保会话存在
+            if session_key not in self.sessions:
+                self.sessions[session_key] = {"last_activity": time.time()}
+                if module_name:
+                    self.sessions[session_key]["active_module"] = module_name
+
             session = self.sessions[session_key]
 
             # 如果设置了过期时间，将值包装在字典中
@@ -186,6 +212,11 @@ class SessionManager:
                         "_expire_at": time.time() + expire_after
                     }
 
+            # 如果设置了模块名称且会话没有所有者，设置所有者
+            if module_name and "active_module" not in session:
+                session["active_module"] = module_name
+
+            # 设置键值对
             session[key] = value
             session["last_activity"] = time.time()
 
@@ -203,6 +234,10 @@ class SessionManager:
         session_key = self._get_session_key(user_id, chat_id)
 
         async with self.locks[session_key]:
+            # 检查会话是否存在
+            if session_key not in self.sessions:
+                return False
+
             session = self.sessions[session_key]
             session["last_activity"] = time.time()
             if key in session:
@@ -221,7 +256,157 @@ class SessionManager:
 
         async with self.locks[session_key]:
             if session_key in self.sessions:
-                self.sessions[session_key] = {"last_activity": time.time()}
+                # 完全删除会话
+                del self.sessions[session_key]
+
+    async def claim_session(self, user_id, module_name, chat_id=None):
+        """声明会话所有权
+
+        Args:
+            user_id: 用户 ID
+            module_name: 模块名称
+            chat_id: 聊天 ID
+
+        Returns:
+            bool: 是否成功声明所有权
+        """
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            if session_key not in self.sessions:
+                # 会话不存在，创建新会话并声明所有权
+                self.sessions[session_key] = {
+                    "last_activity": time.time(),
+                    "active_module": module_name
+                }
+                self.logger.debug(f"模块 {module_name} 创建并声明了新会话 {session_key}")
+                return True
+
+            session = self.sessions[session_key]
+
+            # 检查会话是否已被其他模块声明
+            active_module = session.get("active_module")
+            if active_module and active_module != module_name:
+                return False
+
+            # 声明所有权
+            session["active_module"] = module_name
+            session["last_activity"] = time.time()
+            return True
+
+    async def release_session(self, user_id, module_name, chat_id=None):
+        """释放会话所有权
+
+        Args:
+            user_id: 用户 ID
+            module_name: 模块名称
+            chat_id: 聊天 ID
+
+        Returns:
+            bool: 是否成功释放所有权
+        """
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            if session_key not in self.sessions:
+                return False
+
+            session = self.sessions[session_key]
+
+            # 检查会话是否被指定模块声明
+            active_module = session.get("active_module")
+            if active_module != module_name:
+                return False
+
+            # 释放所有权
+            session.pop("active_module", None)
+            session["last_activity"] = time.time()
+            self.logger.debug(f"模块 {module_name} 释放了会话 {session_key} 的所有权")
+            return True
+
+    async def get_session_owner(self, user_id, chat_id=None):
+        """获取会话的当前所有者
+
+        Args:
+            user_id: 用户 ID
+            chat_id: 聊天 ID
+
+        Returns:
+            str: 会话的当前所有者，如果会话不存在或没有所有者则返回 None
+        """
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            if session_key not in self.sessions:
+                return None
+
+            session = self.sessions[session_key]
+            session["last_activity"] = time.time()
+
+            return session.get("active_module")
+
+    async def has_session(self, user_id, chat_id=None):
+        """检查用户是否有会话
+
+        Args:
+            user_id: 用户 ID
+            chat_id: 聊天 ID
+
+        Returns:
+            bool: 是否有会话
+        """
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            return session_key in self.sessions
+
+    async def is_session_owned_by(self, user_id, module_name, chat_id=None):
+        """检查会话是否被特定模块声明
+
+        Args:
+            user_id: 用户 ID
+            module_name: 模块名称
+            chat_id: 聊天 ID
+
+        Returns:
+            bool: 会话是否被特定模块声明
+        """
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            if session_key not in self.sessions:
+                return False
+
+            session = self.sessions[session_key]
+            session["last_activity"] = time.time()
+
+            return session.get("active_module") == module_name
+
+    async def has_other_module_session(self,
+                                       user_id,
+                                       module_name,
+                                       chat_id=None):
+        """检查是否有其他模块的活跃会话
+
+        Args:
+            user_id: 用户 ID
+            module_name: 当前模块的名称
+            chat_id: 聊天 ID
+
+        Returns:
+            bool: 是否有其他模块的活跃会话
+        """
+        session_key = self._get_session_key(user_id, chat_id)
+
+        async with self.locks[session_key]:
+            if session_key not in self.sessions:
+                return False
+
+            session = self.sessions[session_key]
+            session["last_activity"] = time.time()
+
+            active_module = session.get("active_module")
+            return active_module is not None and active_module != module_name
 
     async def has_key(self, user_id, key, chat_id=None):
         """检查会话是否包含指定键
@@ -237,6 +422,10 @@ class SessionManager:
         session_key = self._get_session_key(user_id, chat_id)
 
         async with self.locks[session_key]:
+            # 检查会话是否存在
+            if session_key not in self.sessions:
+                return False
+
             session = self.sessions[session_key]
             session["last_activity"] = time.time()
 
@@ -270,6 +459,10 @@ class SessionManager:
         session_key = self._get_session_key(user_id, chat_id)
 
         async with self.locks[session_key]:
+            # 检查会话是否存在
+            if session_key not in self.sessions:
+                return {}
+
             session = self.sessions[session_key]
             session["last_activity"] = time.time()
 
@@ -292,7 +485,16 @@ class SessionManager:
                         continue
 
                     # 未过期，添加实际值到结果
-                    result[k] = v.get("_value", v)
+                    if "_value" in v:
+                        result[k] = v["_value"]
+                    elif "value" in v:  # 处理旧格式
+                        result[k] = v["value"]
+                    else:
+                        # 返回不包含 _expire_at 的字典
+                        result[k] = {
+                            k2: v2
+                            for k2, v2 in v.items() if k2 != "_expire_at"
+                        }
                 else:
                     # 普通值，直接添加
                     result[k] = v
@@ -349,6 +551,10 @@ class SessionManager:
         session_key = self._get_session_key(user_id, chat_id)
 
         async with self.locks[session_key]:
+            # 检查会话是否存在
+            if session_key not in self.sessions:
+                return []
+
             session = self.sessions[session_key]
             session["last_activity"] = time.time()
 
@@ -432,7 +638,7 @@ class SessionManager:
             for session_key, session in data.items():
                 self.sessions[session_key] = session
 
-            self.logger.info(f"已加载 {len(data)} 个会话")
+            self.logger.debug(f"已加载 {len(data)} 个会话")
 
         except Exception as e:
             self.logger.error(f"加载会话数据时出错: {e}")

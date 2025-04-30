@@ -230,6 +230,12 @@ class CommandManager:
                 return
             except Exception as e:
                 self.logger.error(f"权限包装器中发生错误: {e}")
+                # 如果是回调查询，回应它以避免按钮一直显示加载状态
+                if update.callback_query:
+                    try:
+                        await update.callback_query.answer("处理回调时出错")
+                    except Exception:
+                        pass
                 return
 
         # 创建回调处理器
