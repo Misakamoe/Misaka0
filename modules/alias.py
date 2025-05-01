@@ -493,7 +493,7 @@ async def handle_callback_query(update: Update,
 
         if has_other_session:
             # 如果有其他模块的活跃会话，提醒用户
-            await query.answer("⚠️ 当前有其他活跃会话，请先完成或取消")
+            await query.answer("⚠️ 请先完成或取消其他活跃会话")
             return
 
         # 保存到会话

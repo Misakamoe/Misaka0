@@ -4,7 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, MessageHandler, filters
 
 MODULE_NAME = "echo"
-MODULE_VERSION = "3.1.0"
+MODULE_VERSION = "3.2.0"
 MODULE_DESCRIPTION = "简单复读用户发送的消息"
 MODULE_COMMANDS = ["echo"]
 MODULE_CHAT_TYPES = ["private", "group"]  # 支持所有聊天类型
@@ -31,7 +31,7 @@ async def setup(interface):
     await interface.register_command("echo",
                                      echo_command,
                                      admin_level=False,
-                                     description="回复你发送的文本")
+                                     description="复读你发送的文本")
 
     # 注册带权限验证的按钮回调处理器
     await interface.register_callback_handler(
@@ -43,7 +43,7 @@ async def setup(interface):
     # 注册文本输入处理器（支持私聊和群聊）
     text_input_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
                                         handle_echo_input)
-    await interface.register_handler(text_input_handler, group=2)
+    await interface.register_handler(text_input_handler, group=3)
 
 
 async def cleanup(interface):
@@ -84,7 +84,9 @@ async def handle_callback_query(update: Update,
         await session_manager.delete(user_id,
                                      "echo_waiting_for",
                                      chat_id=chat_id)
-        await session_manager.delete(user_id, "echo_active", chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 发送取消消息
         await query.edit_message_text("操作已取消")
@@ -109,11 +111,8 @@ async def handle_echo_input(update: Update,
         return
 
     # 检查是否是 echo 模块的活跃会话
-    is_active = await session_manager.get(user_id,
-                                          "echo_active",
-                                          False,
-                                          chat_id=chat_id)
-    if not is_active:
+    if not await session_manager.is_session_owned_by(
+            user_id, MODULE_NAME, chat_id=chat_id):
         return
 
     # 获取会话状态
@@ -130,7 +129,9 @@ async def handle_echo_input(update: Update,
         await session_manager.delete(user_id,
                                      "echo_waiting_for",
                                      chat_id=chat_id)
-        await session_manager.delete(user_id, "echo_active", chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 复读文本
         await message.reply_text(f"{text}")
@@ -160,18 +161,21 @@ async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(f"{text}")
         return
 
-    # 否则，启动会话模式
-    # 设置会话状态，1 分钟后自动过期
+    # 检查是否有其他模块的活跃会话
+    if await session_manager.has_other_module_session(user_id,
+                                                      MODULE_NAME,
+                                                      chat_id=chat_id):
+        await message.reply_text("⚠️ 请先完成或取消其他活跃会话")
+        return
+
+    # 否则，进入会话模式
+    # 设置会话状态，15 秒后自动过期
     await session_manager.set(user_id,
                               "echo_waiting_for",
                               "text",
                               chat_id=chat_id,
-                              expire_after=60)
-    await session_manager.set(user_id,
-                              "echo_active",
-                              True,
-                              chat_id=chat_id,
-                              expire_after=60)
+                              expire_after=15,
+                              module_name=MODULE_NAME)
 
     # 发送提示消息
     keyboard = [[
