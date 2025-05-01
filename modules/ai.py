@@ -15,7 +15,7 @@ from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
 MODULE_NAME = "ai"
-MODULE_VERSION = "3.2.0"
+MODULE_VERSION = "3.2.1"
 MODULE_DESCRIPTION = "支持多种 AI 的聊天助手"
 MODULE_COMMANDS = ["ai", "aiconfig", "aiclear", "aiwhitelist"]
 MODULE_CHAT_TYPES = ["private", "group"]  # 支持私聊和群组
@@ -815,13 +815,11 @@ class AIManager:
             await callback(text)
 
     @staticmethod
-    def is_user_authorized(user_id: int,
-                           context: ContextTypes.DEFAULT_TYPE) -> bool:
+    def is_user_authorized(user_id: int) -> bool:
         """检查用户是否有权使用 AI 功能
 
         Args:
             user_id: 用户 ID
-            context: 上下文对象
 
         Returns:
             bool: 是否有权限
@@ -829,7 +827,7 @@ class AIManager:
         global _state
 
         # 超级管理员总是可以使用
-        config_manager = context.bot_data.get("config_manager")
+        config_manager = _interface.config_manager
         if config_manager and config_manager.is_admin(user_id):
             return True
 
@@ -842,19 +840,17 @@ class AIManager:
         return False
 
     @staticmethod
-    def is_super_admin(user_id: int,
-                       context: ContextTypes.DEFAULT_TYPE) -> bool:
+    def is_super_admin(user_id: int) -> bool:
         """检查用户是否是超级管理员
 
         Args:
             user_id: 用户 ID
-            context: 上下文对象
 
         Returns:
             bool: 是否是超级管理员
         """
         # 获取配置管理器
-        config_manager = context.bot_data.get("config_manager")
+        config_manager = _interface.config_manager
         if config_manager and config_manager.is_admin(user_id):
             return True
 
@@ -1348,7 +1344,7 @@ async def handle_specific_actions(update: Update,
     chat_id = update.effective_chat.id
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         await query.answer("系统错误：无法获取会话管理器")
         return
@@ -1984,7 +1980,7 @@ async def handle_config_callback(update: Update,
     chat_id = update.effective_chat.id
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         await query.answer("系统错误：无法获取会话管理器")
         return
@@ -2565,7 +2561,7 @@ async def ai_clear_command(update: Update,
     message = update.message or update.edited_message
 
     # 检查权限 - 仅超级管理员和白名单用户可用
-    if not AIManager.is_user_authorized(user_id, context):
+    if not AIManager.is_user_authorized(user_id):
         await message.reply_text("⚠️ 您没有使用 AI 功能的权限\n请联系管理员将您添加到白名单")
         _interface.logger.warning(f"用户 {user_id} 尝试使用 AI 功能但没有权限")
         return
@@ -2587,7 +2583,7 @@ async def ai_command(update: Update,
     message = update.message or update.edited_message
 
     # 检查权限 - 仅超级管理员和白名单用户可用
-    if not AIManager.is_user_authorized(user_id, context):
+    if not AIManager.is_user_authorized(user_id):
         await message.reply_text("⚠️ 您没有使用 AI 功能的权限\n请联系管理员将您添加到白名单")
         return
 
@@ -2685,10 +2681,17 @@ async def handle_config_input(update: Update,
     message_text = message.text
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         _interface.logger.error("无法获取会话管理器")
         await message.reply_text("⚠️ 系统错误：无法获取会话管理器")
+        return
+
+    # 检查是否是 ai 模块的活跃会话
+    is_owned = await session_manager.is_session_owned_by(user_id,
+                                                         MODULE_NAME,
+                                                         chat_id=chat_id)
+    if not is_owned:
         return
 
     # 处理不同类型的输入
@@ -2933,7 +2936,7 @@ async def handle_private_message(update: Update,
         return
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         _interface.logger.error("无法获取会话管理器")
         return
@@ -2951,7 +2954,7 @@ async def handle_private_message(update: Update,
         return
 
     # 检查权限 - 仅超级管理员和白名单用户可用
-    if not AIManager.is_user_authorized(user_id, context):
+    if not AIManager.is_user_authorized(user_id):
         # 不回复非白名单用户
         return
 
@@ -3051,12 +3054,12 @@ async def handle_private_photo(update: Update,
         return
 
     # 检查权限 - 仅超级管理员和白名单用户可用
-    if not AIManager.is_user_authorized(user_id, context):
+    if not AIManager.is_user_authorized(user_id):
         # 不回复非白名单用户
         return
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         _interface.logger.error("无法获取会话管理器")
         return
@@ -3147,7 +3150,7 @@ async def handle_group_config_message(
         return
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         _interface.logger.error("无法获取会话管理器")
         return
@@ -3161,7 +3164,7 @@ async def handle_group_config_message(
     # 如果正在等待用户输入，处理用户输入
     if waiting_for:
         # 检查是否是超级管理员
-        if not AIManager.is_super_admin(user_id, context):
+        if not AIManager.is_super_admin(user_id):
             # 非超级管理员不能配置白名单
             return
 
@@ -3320,23 +3323,23 @@ async def setup(module_interface):
                                             admin_level=False,
                                             description="与 AI 进行对话")
 
-    # 注册私聊消息处理器
+    # 注册私聊消息处理器，先于其他模块判断是否有活跃会话
     text_handler = MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND
         & ~filters.Regex(r'^/'), handle_private_message)
-    await module_interface.register_handler(text_handler, group=10)
+    await module_interface.register_handler(text_handler, group=-10)
 
-    # 注册私聊图片处理器
+    # 注册私聊图片处理器，先于其他模块判断是否有活跃会话
     photo_handler = MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE,
                                    handle_private_photo)
-    await module_interface.register_handler(photo_handler, group=10)
+    await module_interface.register_handler(photo_handler, group=-10)
 
     # 注册群聊消息处理器（用于处理群聊中的白名单配置）
     group_config_handler = MessageHandler(
         filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/') &
         (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP),
         handle_group_config_message)
-    await module_interface.register_handler(group_config_handler, group=-1)
+    await module_interface.register_handler(group_config_handler, group=1)
 
     # 注册配置按钮回调处理器（带权限验证）
     await module_interface.register_callback_handler(

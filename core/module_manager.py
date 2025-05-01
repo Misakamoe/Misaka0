@@ -4,7 +4,6 @@ import os
 import sys
 import asyncio
 import importlib
-import traceback
 from utils.logger import setup_logger
 
 
@@ -12,13 +11,15 @@ class ModuleInterface:
     """模块接口，为模块提供与系统交互的标准接口"""
 
     def __init__(self, module_name, application, module_manager,
-                 command_manager, event_system, state_manager):
+                 command_manager, event_system, state_manager,
+                 session_manager):
         self.module_name = module_name
         self.application = application
         self.module_manager = module_manager
         self.command_manager = command_manager
         self.event_system = event_system
         self.state_manager = state_manager
+        self.session_manager = session_manager
         self.config_manager = module_manager.config_manager
         self.logger = setup_logger(f"Module.{module_name}")
 
@@ -255,12 +256,14 @@ class ModuleManager:
                  command_manager,
                  event_system,
                  state_manager,
+                 session_manager,
                  modules_dir="modules"):
         self.application = application
         self.config_manager = config_manager
         self.command_manager = command_manager
         self.event_system = event_system
         self.state_manager = state_manager
+        self.session_manager = session_manager
         self.modules_dir = modules_dir
         self.logger = setup_logger("ModuleManager")
 
@@ -345,7 +348,8 @@ class ModuleManager:
                 interface = ModuleInterface(module_name, self.application,
                                             self, self.command_manager,
                                             self.event_system,
-                                            self.state_manager)
+                                            self.state_manager,
+                                            self.session_manager)
 
                 # 初始化模块
                 try:

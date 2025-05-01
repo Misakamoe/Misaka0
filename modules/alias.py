@@ -11,7 +11,7 @@ from utils.pagination import PaginationHelper
 
 # 模块元数据
 MODULE_NAME = "alias"
-MODULE_VERSION = "3.1.0"
+MODULE_VERSION = "3.2.0"
 MODULE_DESCRIPTION = "命令别名，支持中文命令和动作"
 MODULE_COMMANDS = ["alias"]  # 只包含英文命令
 MODULE_CHAT_TYPES = ["private", "group"]  # 在私聊和群组中都允许使用别名功能
@@ -89,11 +89,6 @@ _reverse_aliases = {}
 # 异步锁
 _state_lock = asyncio.Lock()
 
-# 消息处理器引用
-_message_handler = None
-
-# 模块状态变量
-
 
 def _update_reverse_aliases():
     """更新反向映射表"""
@@ -144,7 +139,6 @@ async def _save_aliases():
             # 同时保存到框架的状态管理中
             if _interface:
                 _interface.save_state(_state)
-                _interface.logger.debug(f"别名数据已保存到 {CONFIG_FILE} 和框架状态")
         except Exception as e:
             if _interface:
                 _interface.logger.error(f"保存别名数据失败: {e}")
@@ -243,13 +237,8 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             args_text = message_text[len(command) + 1:].strip()
             args = args_text.split() if args_text else []
 
-            # 记录命令调用
-            _interface.logger.debug(
-                f"执行别名命令: /{aliased_command} (别名: {command})")
-
             # 获取命令管理器
-            command_manager = _interface.application.bot_data.get(
-                "command_manager")
+            command_manager = _interface.command_manager
             if not command_manager:
                 return
 
@@ -263,22 +252,10 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # 检查用户权限
             if admin_level:
-                user_id = update.effective_user.id
-                chat_id = update.effective_chat.id
-
-                # 根据权限级别进行不同的检查
-                if admin_level == "super_admin":
-                    # 检查是否是超级管理员
-                    if not _interface.config_manager.is_admin(user_id):
-                        await message.reply_text(f"⚠️ 您没有执行此命令的权限")
-                        return
-
-                elif admin_level == "group_admin":
-                    # 检查是否是群组管理员
-                    if not _interface.config_manager.is_chat_admin(
-                            chat_id, user_id):
-                        await message.reply_text(f"⚠️ 您没有执行此命令的权限")
-                        return
+                # 使用命令管理器进行权限检查
+                if not await command_manager._check_permission(
+                        admin_level, update, context):
+                    return
 
             # 保存原始参数
             original_args = context.args if hasattr(context, 'args') else None
@@ -293,11 +270,8 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await callback(update, context)
                     return
 
-                # 如果直接执行失败，尝试通过事件系统
-                await _interface.publish_event("execute_command",
-                                               command=aliased_command,
-                                               update=update,
-                                               context=context)
+                # 如果没有找到回调函数，记录错误
+                _interface.logger.error(f"命令 {aliased_command} 没有回调函数")
 
             finally:
                 # 恢复原始参数
@@ -336,7 +310,7 @@ async def show_alias_main_menu(update: Update, _: ContextTypes.DEFAULT_TYPE):
     if not has_aliases:
         reply += "<i>暂无别名</i>\n"
 
-    # 构建按钮 - 使用短英文文本和两行排列
+    # 构建按钮 - 使用两行排列
     keyboard = [[
         InlineKeyboardButton("Add", callback_data=f"{CALLBACK_PREFIX}add"),
         InlineKeyboardButton("Remove",
@@ -364,7 +338,7 @@ async def show_alias_main_menu(update: Update, _: ContextTypes.DEFAULT_TYPE):
 async def add_alias(cmd: str, alias: str) -> str:
     """添加别名并返回结果消息"""
     # 检查命令是否存在
-    command_manager = _interface.application.bot_data.get("command_manager")
+    command_manager = _interface.command_manager
     if not command_manager or cmd not in command_manager.commands:
         return f"⚠️ 命令 /{cmd} 不存在"
 
@@ -424,29 +398,12 @@ async def remove_alias(cmd: str, alias: str) -> str:
         return f"⚠️ 别名「{alias}」不存在"
 
 
-async def register_message_handler():
-    """注册消息处理器"""
-    global _interface, _message_handler
-
-    # 注册新的消息处理器，使用较低优先级的组(10)，确保其他处理器先处理
-    _message_handler = MessageHandler(filters.Regex(r'^/'), process_message)
-
-    # 使用模块接口注册处理器（组 10，优先级较低）
-    await _interface.register_handler(_message_handler, group=10)
-    _interface.logger.info("别名消息处理器已注册（优先级较低）")
-
-
-# 状态管理函数已移除，使用框架的状态管理功能
-
-
 async def handle_callback_query(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """处理按钮回调查询"""
     query = update.callback_query
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-
-    # 权限检查已在框架层面处理
 
     # 获取回调数据
     callback_data = query.data
@@ -459,7 +416,7 @@ async def handle_callback_query(update: Update,
     action = callback_data[len(CALLBACK_PREFIX):]
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         _interface.logger.error("无法获取会话管理器")
         await query.answer("系统错误，请联系管理员")
@@ -467,32 +424,22 @@ async def handle_callback_query(update: Update,
 
     # 处理不同的操作
     if action == "add":
-        # 重置分页状态
-        await session_manager.set(user_id,
-                                  "alias_cmd_page",
-                                  0,
-                                  chat_id=chat_id)
         # 显示添加别名界面
-        await show_add_alias_menu(update, context)
+        await show_add_alias_menu(update, context, 0)
 
     elif action == "remove":
-        # 重置分页状态
-        await session_manager.set(user_id,
-                                  "alias_remove_page",
-                                  0,
-                                  chat_id=chat_id)
         # 显示删除别名界面
-        await show_remove_alias_menu(update, context)
+        await show_remove_alias_menu(update, context, 0)
 
     elif action == "help":
         # 显示帮助信息
         help_text = "<b>📚 命令别名帮助</b>\n\n"
-        help_text += "您可以为现有命令创建更易记的名称，特别是中文名称。\n\n"
+        help_text += "您可以为现有命令创建更易记的名称，比如中文名称。\n\n"
         help_text += "<b>示例：</b>\n"
         help_text += "添加别名 <code>帮助</code> 给命令 <code>/help</code>\n"
-        help_text += "您可以使用 <code>/帮助</code> 代替 <code>/help</code>"
+        help_text += "然后可以用 <code>/帮助</code> 代替 <code>/help</code>"
 
-        # 添加返回按钮 - 使用短英文文本
+        # 添加返回按钮
         keyboard = [[
             InlineKeyboardButton("⇠ Back",
                                  callback_data=f"{CALLBACK_PREFIX}back")
@@ -508,102 +455,60 @@ async def handle_callback_query(update: Update,
         await session_manager.delete(user_id,
                                      "alias_waiting_for",
                                      chat_id=chat_id)
-        await session_manager.delete(user_id,
-                                     "alias_selected_cmd",
-                                     chat_id=chat_id)
-        await session_manager.delete(user_id, "alias_active", chat_id=chat_id)
-        await session_manager.delete(user_id,
-                                     "alias_cmd_page",
-                                     chat_id=chat_id)
-        await session_manager.delete(user_id,
-                                     "alias_remove_page",
-                                     chat_id=chat_id)
+        # 释放会话所有权
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 返回主菜单
         await show_alias_main_menu(update, context)
 
-    elif action == "prev_page":
-        # 获取当前页码
-        current_page = await session_manager.get(user_id,
-                                                 "alias_cmd_page",
-                                                 0,
-                                                 chat_id=chat_id)
-        # 设置为上一页
-        await session_manager.set(user_id,
-                                  "alias_cmd_page",
-                                  current_page - 1,
-                                  chat_id=chat_id)
-        # 刷新命令选择界面
-        await show_add_alias_menu(update, context)
+    elif action.startswith("cmd_page:"):
+        # 处理命令列表分页
+        try:
+            # 获取页码
+            page_num = int(action.split(":")[1])
+            # 直接传递页码参数
+            await show_add_alias_menu(update, context, page_num)
+        except (ValueError, IndexError):
+            await query.answer("无效的页码")
 
-    elif action == "next_page":
-        # 获取当前页码
-        current_page = await session_manager.get(user_id,
-                                                 "alias_cmd_page",
-                                                 0,
-                                                 chat_id=chat_id)
-        # 设置为下一页
-        await session_manager.set(user_id,
-                                  "alias_cmd_page",
-                                  current_page + 1,
-                                  chat_id=chat_id)
-        # 刷新命令选择界面
-        await show_add_alias_menu(update, context)
-
-    elif action == "prev_remove_page":
-        # 获取当前页码
-        current_page = await session_manager.get(user_id,
-                                                 "alias_remove_page",
-                                                 0,
-                                                 chat_id=chat_id)
-        # 设置为上一页
-        await session_manager.set(user_id,
-                                  "alias_remove_page",
-                                  current_page - 1,
-                                  chat_id=chat_id)
-        # 刷新删除别名界面
-        await show_remove_alias_menu(update, context)
-
-    elif action == "next_remove_page":
-        # 获取当前页码
-        current_page = await session_manager.get(user_id,
-                                                 "alias_remove_page",
-                                                 0,
-                                                 chat_id=chat_id)
-        # 设置为下一页
-        await session_manager.set(user_id,
-                                  "alias_remove_page",
-                                  current_page + 1,
-                                  chat_id=chat_id)
-        # 刷新删除别名界面
-        await show_remove_alias_menu(update, context)
+    elif action.startswith("remove_page:"):
+        # 处理删除别名分页
+        try:
+            # 获取页码
+            page_num = int(action.split(":")[1])
+            # 直接传递页码参数
+            await show_remove_alias_menu(update, context, page_num)
+        except (ValueError, IndexError):
+            await query.answer("无效的页码")
 
     elif action.startswith("select_cmd_"):
         # 选择命令后，提示输入别名
         cmd = action[len("select_cmd_"):]
 
+        # 检查是否有其他模块的活跃会话
+        has_other_session = await session_manager.has_other_module_session(
+            user_id, MODULE_NAME, chat_id=chat_id)
+
+        if has_other_session:
+            # 如果有其他模块的活跃会话，提醒用户
+            await query.answer("⚠️ 当前有其他活跃会话，请先完成或取消")
+            return
+
         # 保存到会话
         await session_manager.set(user_id,
-                                  "alias_selected_cmd",
-                                  cmd,
-                                  chat_id=chat_id)
-        await session_manager.set(user_id,
                                   "alias_waiting_for",
-                                  "alias_input",
-                                  chat_id=chat_id)
-
-        # 设置模块会话标记，防止其他模块处理消息
-        await session_manager.set(user_id,
-                                  "alias_active",
-                                  True,
-                                  chat_id=chat_id)
+                                  f"alias_input:{cmd}",
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
 
         # 提示用户输入别名
         text = f"<b>➕ 添加别名</b>\n\n"
         text += f"已选择命令: <code>/{cmd}</code>\n\n"
         text += "请输入要添加的别名（不需要加 /）"
 
-        # 添加取消按钮 - 使用短英文文本
+        # 添加取消按钮
         keyboard = [[
             InlineKeyboardButton("⨉ Cancel",
                                  callback_data=f"{CALLBACK_PREFIX}back")
@@ -635,146 +540,81 @@ async def handle_callback_query(update: Update,
 
 
 async def show_add_alias_menu(update: Update,
-                              context: ContextTypes.DEFAULT_TYPE):
-    """显示添加别名界面，使用PaginationHelper支持分页"""
+                              context: ContextTypes.DEFAULT_TYPE,
+                              page: int = 0):
+    """显示添加别名界面，使用PaginationHelper支持分页
+
+    Args:
+        update: 更新对象
+        context: 上下文对象
+        page: 页码，默认为0
+    """
     # 确保是回调查询
     if not update.callback_query:
-        _interface.logger.error("show_add_alias_menu 被非回调查询调用")
         return
 
     query = update.callback_query
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
-    if not session_manager:
-        _interface.logger.error("无法获取会话管理器")
-        await query.answer("系统错误，请联系管理员")
-        return
 
     # 获取所有可用命令
-    command_manager = _interface.application.bot_data.get("command_manager")
+    command_manager = _interface.command_manager
     if not command_manager:
         await query.answer("无法获取命令列表")
         return
 
-    # 获取分页信息
-    page = await session_manager.get(user_id,
-                                     "alias_cmd_page",
-                                     0,
-                                     chat_id=chat_id)
-
     # 获取所有命令并排序
     commands = sorted(command_manager.commands.keys())
 
-    # 创建命令按钮生成函数
-    def create_command_buttons(commands_subset):
-        buttons = []
-        row = []
-        for cmd in commands_subset:
-            # 确保回调数据不超过64字节
-            callback_data = f"{CALLBACK_PREFIX}select_cmd_{cmd}"
-            if len(callback_data.encode('utf-8')) <= 64:
-                if len(row) < 3:  # 每行三个按钮
-                    row.append(
-                        InlineKeyboardButton(f"{cmd}",
-                                             callback_data=callback_data))
-                else:
-                    buttons.append(row)
-                    row = [
-                        InlineKeyboardButton(f"{cmd}",
-                                             callback_data=callback_data)
-                    ]
+    # 创建按钮列表
+    buttons = []
+    for cmd in commands:
+        # 确保回调数据不超过64字节
+        callback_data = f"{CALLBACK_PREFIX}select_cmd_{cmd}"
+        if len(callback_data.encode('utf-8')) <= 64:
+            button_tuple = (cmd, callback_data)
+            buttons.append(button_tuple)
 
-        # 添加最后一行
-        if row:
-            buttons.append(row)
+    # 创建返回按钮
+    back_button = InlineKeyboardButton("⇠ Back",
+                                       callback_data=f"{CALLBACK_PREFIX}back")
 
-        # 添加返回按钮
-        buttons.append([
-            InlineKeyboardButton("⇠ Back",
-                                 callback_data=f"{CALLBACK_PREFIX}back")
-        ])
-
-        return buttons
-
-    # 创建分页助手
-    pagination = PaginationHelper(
-        items=commands,
-        page_size=15,  # 每页15个命令
-        format_item=lambda cmd: f"{cmd}",  # 简单格式化
-        title="添加别名 - 选择命令",
-        callback_prefix=f"{CALLBACK_PREFIX}cmd_page")
-
-    # 获取页面内容
-    content, standard_keyboard = pagination.get_page_content(page)
-
-    # 创建自定义按钮布局
-    custom_buttons = create_command_buttons(
-        commands[page * pagination.page_size:min(
-            (page + 1) * pagination.page_size, len(commands))])
-
-    # 在返回按钮前添加分页导航按钮
-    if pagination.total_pages > 1:
-        nav_row = []
-        if page > 0:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "◁ Prev", callback_data=f"{CALLBACK_PREFIX}prev_page"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
-
-        nav_row.append(
-            InlineKeyboardButton(f"{page + 1}/{pagination.total_pages}",
-                                 callback_data="noop"))
-
-        if page < pagination.total_pages - 1:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "Next ▷", callback_data=f"{CALLBACK_PREFIX}next_page"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
-
-        # 插入导航按钮到返回按钮前
-        custom_buttons.insert(len(custom_buttons) - 1, nav_row)
-
-    # 创建自定义键盘标记
-    custom_keyboard = InlineKeyboardMarkup(custom_buttons)
+    # 使用新的 paginate_buttons 方法创建分页按钮
+    try:
+        keyboard = PaginationHelper.paginate_buttons(
+            buttons=buttons,
+            page_index=page,
+            rows_per_page=5,  # 每页显示5行
+            buttons_per_row=3,  # 每行显示3个按钮
+            nav_callback_prefix=f"{CALLBACK_PREFIX}cmd_page",
+            back_button=back_button)
+    except Exception:
+        # 创建一个简单的键盘作为后备
+        keyboard = InlineKeyboardMarkup([[back_button]])
 
     # 构建HTML格式的消息
     text = "<b>➕ 添加别名</b>\n\n"
-    text += "请选择要为其添加别名的命令：\n"
-    if pagination.total_pages > 1:
-        text += f"\n<i>第 {page + 1}/{pagination.total_pages} 页</i>"
-
-    # 保存当前页码
-    await session_manager.set(user_id, "alias_cmd_page", page, chat_id=chat_id)
+    text += "请选择要为其添加别名的命令："
 
     # 发送消息
     await query.edit_message_text(text,
-                                  reply_markup=custom_keyboard,
+                                  reply_markup=keyboard,
                                   parse_mode="HTML")
 
 
 async def show_remove_alias_menu(update: Update,
-                                 context: ContextTypes.DEFAULT_TYPE):
-    """显示删除别名界面，使用PaginationHelper支持分页"""
+                                 context: ContextTypes.DEFAULT_TYPE,
+                                 page: int = 0):
+    """显示删除别名界面，使用PaginationHelper支持分页
+
+    Args:
+        update: 更新对象
+        context: 上下文对象
+        page: 页码，默认为0
+    """
     # 确保是回调查询
     if not update.callback_query:
-        _interface.logger.error("show_remove_alias_menu 被非回调查询调用")
         return
 
     query = update.callback_query
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
-    if not session_manager:
-        _interface.logger.error("无法获取会话管理器")
-        await query.answer("系统错误，请联系管理员")
-        return
 
     # 收集所有可删除的别名
     all_aliases = []
@@ -802,94 +642,40 @@ async def show_remove_alias_menu(update: Update,
                                       parse_mode="HTML")
         return
 
-    # 获取分页信息
-    page = await session_manager.get(user_id,
-                                     "alias_remove_page",
-                                     0,
-                                     chat_id=chat_id)
+    # 创建按钮列表
+    buttons = []
+    for cmd, alias in all_aliases:
+        # 确保回调数据不超过64字节
+        callback_data = f"{CALLBACK_PREFIX}remove_alias_{cmd}_{alias}"
+        if len(callback_data.encode('utf-8')) <= 64:
+            button_text = f"{cmd} → {alias}"
+            button_tuple = (button_text, callback_data)
+            buttons.append(button_tuple)
 
-    # 创建别名按钮生成函数
-    def create_alias_buttons(aliases_subset):
-        buttons = []
-        for cmd, alias in aliases_subset:
-            # 确保回调数据不超过64字节
-            callback_data = f"{CALLBACK_PREFIX}remove_alias_{cmd}_{alias}"
-            if len(callback_data.encode('utf-8')) <= 64:
-                # 使用更简洁的按钮文本
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"{cmd} → {alias}",  # 移除斜杠前缀和中文引号
-                        callback_data=callback_data)
-                ])
+    # 创建返回按钮
+    back_button = InlineKeyboardButton("⇠ Back",
+                                       callback_data=f"{CALLBACK_PREFIX}back")
 
-        # 添加返回按钮
-        buttons.append([
-            InlineKeyboardButton("⇠ Back",
-                                 callback_data=f"{CALLBACK_PREFIX}back")
-        ])
-
-        return buttons
-
-    # 创建分页助手
-    pagination = PaginationHelper(
-        items=all_aliases,
-        page_size=5,  # 每页10个别名
-        format_item=lambda item: f"{item[0]} → {item[1]}",  # 格式化为 "命令 → 别名"
-        title="删除别名",
-        callback_prefix=f"{CALLBACK_PREFIX}remove_page")
-
-    # 获取当前页码
-    page = max(0, min(page, pagination.total_pages - 1))
-
-    # 保存当前页码
-    await session_manager.set(user_id,
-                              "alias_remove_page",
-                              page,
-                              chat_id=chat_id)
-
-    # 创建自定义按钮布局
-    custom_buttons = create_alias_buttons(
-        all_aliases[page * pagination.page_size:min(
-            (page + 1) * pagination.page_size, len(all_aliases))])
-
-    # 在返回按钮前添加分页导航按钮
-    if pagination.total_pages > 1:
-        nav_row = []
-        if page > 0:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "◁ Prev",
-                    callback_data=f"{CALLBACK_PREFIX}prev_remove_page"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
-
-        nav_row.append(
-            InlineKeyboardButton(f"{page + 1}/{pagination.total_pages}",
-                                 callback_data="noop"))
-
-        if page < pagination.total_pages - 1:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "Next ▷",
-                    callback_data=f"{CALLBACK_PREFIX}next_remove_page"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
-
-        # 插入导航按钮到返回按钮前
-        custom_buttons.insert(len(custom_buttons) - 1, nav_row)
-
-    # 创建自定义键盘标记
-    custom_keyboard = InlineKeyboardMarkup(custom_buttons)
+    # 使用新的 paginate_buttons 方法创建分页按钮
+    try:
+        keyboard = PaginationHelper.paginate_buttons(
+            buttons=buttons,
+            page_index=page,
+            rows_per_page=5,  # 每页显示5行
+            buttons_per_row=1,  # 每行显示1个按钮
+            nav_callback_prefix=f"{CALLBACK_PREFIX}remove_page",
+            back_button=back_button)
+    except Exception:
+        # 创建一个简单的键盘作为后备
+        keyboard = InlineKeyboardMarkup([[back_button]])
 
     # 构建HTML格式的消息
     text = "<b>➖ 删除别名</b>\n\n"
-    text += "请选择要删除的别名：\n"
-    if pagination.total_pages > 1:
-        text += f"\n<i>第 {page + 1}/{pagination.total_pages} 页</i>"
+    text += "请选择要删除的别名："
 
     # 发送消息
     await query.edit_message_text(text,
-                                  reply_markup=custom_keyboard,
+                                  reply_markup=keyboard,
                                   parse_mode="HTML")
 
 
@@ -904,17 +690,16 @@ async def handle_alias_input(update: Update,
     chat_id = update.effective_chat.id
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         _interface.logger.error("无法获取会话管理器")
         return
 
     # 检查是否是 alias 模块的活跃会话
-    is_active = await session_manager.get(user_id,
-                                          "alias_active",
-                                          False,
-                                          chat_id=chat_id)
-    if not is_active:
+    is_owned = await session_manager.is_session_owned_by(user_id,
+                                                         MODULE_NAME,
+                                                         chat_id=chat_id)
+    if not is_owned:
         return
 
     # 获取会话状态
@@ -923,26 +708,9 @@ async def handle_alias_input(update: Update,
                                             None,
                                             chat_id=chat_id)
 
-    # 记录会话状态
-    _interface.logger.debug(
-        f"处理别名输入: user_id={user_id}, waiting_for={waiting_for}")
-
-    if waiting_for == "alias_input":
-        # 获取选择的命令
-        cmd = await session_manager.get(user_id,
-                                        "alias_selected_cmd",
-                                        None,
-                                        chat_id=chat_id)
-
-        if not cmd:
-            await message.reply_text("⚠️ 会话已过期，请重新开始")
-            await session_manager.delete(user_id,
-                                         "alias_waiting_for",
-                                         chat_id=chat_id)
-            await session_manager.delete(user_id,
-                                         "alias_selected_cmd",
-                                         chat_id=chat_id)
-            return
+    if waiting_for and waiting_for.startswith("alias_input:"):
+        # 从waiting_for中提取命令
+        cmd = waiting_for.split(":", 1)[1]
 
         # 获取用户输入的别名
         alias = message.text.strip()
@@ -959,13 +727,12 @@ async def handle_alias_input(update: Update,
         await session_manager.delete(user_id,
                                      "alias_waiting_for",
                                      chat_id=chat_id)
-        await session_manager.delete(user_id,
-                                     "alias_selected_cmd",
-                                     chat_id=chat_id)
-        await session_manager.delete(user_id, "alias_active",
-                                     chat_id=chat_id)  # 清除模块会话标记
+        # 释放会话所有权
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
-        # 显示结果 - 使用短英文文本
+        # 显示结果
         keyboard = [[
             InlineKeyboardButton("⇠ Back",
                                  callback_data=f"{CALLBACK_PREFIX}back")
@@ -1009,34 +776,22 @@ async def setup(interface):
                                               pattern=f"^{CALLBACK_PREFIX}",
                                               admin_level="super_admin")
 
-    # 注册文本输入处理器 - 使用较高优先级，确保在其他模块之前处理
+    # 注册消息处理器
+    message_handler = MessageHandler(filters.Regex(r'^/'), process_message)
+    await interface.register_handler(message_handler, group=1)
+    interface.logger.info("别名消息处理器已注册")
+
+    # 注册文本输入处理器
     text_input_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
                                         handle_alias_input)
-    await interface.register_handler(text_input_handler, group=1)
-
-    # 延迟注册处理器，确保所有命令已经注册
-    asyncio.create_task(delayed_register_handler())
+    await interface.register_handler(text_input_handler, group=2)
 
     interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
-
-
-async def delayed_register_handler():
-    """延迟注册消息处理器，确保所有命令都已注册"""
-    global _interface
-
-    # 等待 2s 让所有模块初始化
-    await asyncio.sleep(2)
-
-    # 注册消息处理器
-    await register_message_handler()
 
 
 async def cleanup(interface):
     """模块清理"""
     # 保存别名数据到文件和框架状态
     await _save_aliases()
-
-    # 保存状态到框架的状态管理中
-    interface.save_state(_state)
 
     interface.logger.info(f"模块 {MODULE_NAME} 已清理")

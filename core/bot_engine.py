@@ -107,11 +107,9 @@ class BotEngine:
         self.application.bot_data["command_manager"] = self.command_manager
 
         # 初始化模块管理器
-        self.module_manager = ModuleManager(self.application,
-                                            self.config_manager,
-                                            self.command_manager,
-                                            self.event_system,
-                                            self.state_manager)
+        self.module_manager = ModuleManager(
+            self.application, self.config_manager, self.command_manager,
+            self.event_system, self.state_manager, self.session_manager)
         self.application.bot_data["module_manager"] = self.module_manager
 
         # 注册群组成员变更处理器
