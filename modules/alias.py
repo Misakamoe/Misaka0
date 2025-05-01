@@ -434,7 +434,7 @@ async def handle_callback_query(update: Update,
     elif action == "help":
         # 显示帮助信息
         help_text = "<b>📚 命令别名帮助</b>\n\n"
-        help_text += "您可以为现有命令创建更易记的名称，比如中文名称。\n\n"
+        help_text += "您可以为现有命令创建更易记的名称，比如中文名称\n\n"
         help_text += "<b>示例：</b>\n"
         help_text += "添加别名 <code>帮助</code> 给命令 <code>/help</code>\n"
         help_text += "然后可以用 <code>/帮助</code> 代替 <code>/help</code>"
@@ -782,8 +782,9 @@ async def setup(interface):
     interface.logger.info("别名消息处理器已注册")
 
     # 注册文本输入处理器
-    text_input_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                        handle_alias_input)
+    text_input_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'),
+        handle_alias_input)
     await interface.register_handler(text_input_handler, group=2)
 
     interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")

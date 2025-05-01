@@ -41,8 +41,9 @@ async def setup(interface):
     )
 
     # 注册文本输入处理器（支持私聊和群聊）
-    text_input_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                        handle_echo_input)
+    text_input_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'),
+        handle_echo_input)
     await interface.register_handler(text_input_handler, group=3)
 
 
@@ -73,7 +74,7 @@ async def handle_callback_query(update: Update,
     action = callback_data[len(CALLBACK_PREFIX):]
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         await query.answer("系统错误，请联系管理员")
         return
@@ -106,7 +107,7 @@ async def handle_echo_input(update: Update,
     chat_id = update.effective_chat.id
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         return
 
@@ -150,7 +151,7 @@ async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _interface.session_manager
     if not session_manager:
         await message.reply_text("系统错误，请联系管理员")
         return

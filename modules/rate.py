@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
 MODULE_NAME = "rate"
-MODULE_VERSION = "3.1.0"
+MODULE_VERSION = "3.2.0"
 MODULE_DESCRIPTION = "汇率转换，支持法币/虚拟货币"
 MODULE_COMMANDS = ["rate", "setrate"]
 MODULE_CHAT_TYPES = ["private", "group"]
@@ -98,7 +98,7 @@ async def update_exchange_rates():
         return
 
     if _module_interface:
-        _module_interface.logger.info("正在更新汇率数据...")
+        _module_interface.logger.debug("正在更新汇率数据...")
 
     try:
         # 更新法币汇率
@@ -114,19 +114,11 @@ async def update_exchange_rates():
         if _state["fiat_rates"] and _state["crypto_rates"]:
             _state["data_loaded"] = True
             if _module_interface:
-                _module_interface.logger.info("汇率数据初始加载完成")
+                _module_interface.logger.debug("汇率数据初始加载完成")
 
         # 保存状态到框架的状态管理中
         if _module_interface:
-            serializable_state = {
-                "last_update": _state["last_update"],
-                "update_interval": _state["update_interval"],
-                "fiat_rates": _state["fiat_rates"],
-                "crypto_rates": _state["crypto_rates"],
-                "data_loaded": _state["data_loaded"]
-            }
-            _module_interface.save_state(serializable_state)
-            _module_interface.logger.info("汇率数据更新完成")
+            _module_interface.save_state(_state)
     except Exception as e:
         if _module_interface:
             _module_interface.logger.error(f"更新汇率数据失败: {e}")
@@ -138,7 +130,7 @@ async def update_fiat_rates():
         if _module_interface:
             _module_interface.logger.warning(
                 "未设置 ExchangeRate API 密钥，无法更新法币汇率")
-        return
+        raise ValueError("未设置 API 密钥")
 
     # 使用美元作为基准货币
     base_currency = "USD"
@@ -154,13 +146,16 @@ async def update_fiat_rates():
                         _module_interface.logger.debug(
                             f"已更新 {len(_state['fiat_rates'])} 种法币汇率")
                 else:
+                    error_type = data.get("error_type", "未知错误")
                     if _module_interface:
                         _module_interface.logger.error(
-                            f"获取法币汇率失败: {data.get('error_type')}")
+                            f"获取法币汇率失败: {error_type}")
+                    raise ValueError(f"错误: {error_type}")
             else:
                 if _module_interface:
                     _module_interface.logger.error(
                         f"获取法币汇率请求失败: {response.status}")
+                raise ValueError(f"状态码 {response.status}")
 
 
 async def update_crypto_rates():
@@ -376,13 +371,13 @@ async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 amount = float(context.args[2])
             except ValueError:
                 await message.reply_text(
-                    "无法识别的金额。请使用数字表示金额，例如: `/rate 100 美元 人民币`",
+                    "无法识别的金额。请使用数字表示金额\n例如: `/rate 100 美元 人民币`",
                     parse_mode="MARKDOWN")
                 return
 
     # 如果没有提供目标货币
     if not to_currency:
-        await message.reply_text("请同时提供源货币和目标货币，例如: `/rate 100 美元 人民币`",
+        await message.reply_text("请同时提供源货币和目标货币\n例如: `/rate 100 美元 人民币`",
                                  parse_mode="MARKDOWN")
         return
 
@@ -416,23 +411,12 @@ async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text(result_message, parse_mode="MARKDOWN")
 
 
-async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /setrate 命令，用于管理员设置汇率模块配置"""
-    # 获取消息对象（可能是新消息或编辑的消息）
-    message = update.message or update.edited_message
-    user_id = update.effective_user.id
+def get_config_ui():
+    """获取配置界面
 
-    # 检查是否是私聊
-    if update.effective_chat.type != "private":
-        await message.reply_text("⚠️ 出于安全考虑，汇率模块配置只能在私聊中进行")
-        return
-
-    # 检查权限 - 仅超级管理员可用
-    if not _module_interface.config_manager.is_admin(user_id):
-        await message.reply_text("⚠️ 您没有执行此操作的权限")
-        return
-
-    # 显示当前配置和按钮界面
+    Returns:
+        tuple: (配置文本, 按钮标记)
+    """
     config = load_config()
     api_key = config.get("api_key", "")
     # 隐藏部分 API 密钥以保护安全
@@ -454,6 +438,34 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    f"更新间隔: `{update_interval}秒`\n\n"
                    f"请选择要修改的设置：")
 
+    return config_text, reply_markup
+
+
+async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /setrate 命令，用于管理员设置汇率模块配置
+
+    Args:
+        update: 更新对象
+        context: 上下文对象（未使用，但 Telegram 库要求提供）
+    """
+    # 获取消息对象（可能是新消息或编辑的消息）
+    message = update.message or update.edited_message
+    user_id = update.effective_user.id
+
+    # 检查是否是私聊
+    if update.effective_chat.type != "private":
+        await message.reply_text("⚠️ 出于安全考虑只能在私聊中进行")
+        return
+
+    # 检查权限 - 仅超级管理员可用
+    if not _module_interface.config_manager.is_admin(user_id):
+        await message.reply_text("⚠️ 您没有执行此操作的权限")
+        return
+
+    # 获取配置界面
+    config_text, reply_markup = get_config_ui()
+
+    # 发送配置界面
     await message.reply_text(config_text,
                              reply_markup=reply_markup,
                              parse_mode="MARKDOWN")
@@ -471,21 +483,21 @@ async def periodic_update():
                     _module_interface.logger.error(f"定期更新汇率失败: {e}")
     except asyncio.CancelledError:
         if _module_interface:
-            _module_interface.logger.info("汇率更新任务已取消")
+            _module_interface.logger.debug("汇率更新任务已取消")
         raise
-
-
-# 状态管理函数已移除，使用框架的状态管理功能
 
 
 async def handle_callback_query(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
-    """处理按钮回调查询"""
+    """处理按钮回调查询
+
+    Args:
+        update: 更新对象
+        context: 上下文对象
+    """
     query = update.callback_query
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-
-    # 权限检查已在框架层面处理
 
     # 获取回调数据
     callback_data = query.data
@@ -497,23 +509,28 @@ async def handle_callback_query(update: Update,
     # 移除前缀
     action = callback_data[len(CALLBACK_PREFIX):]
 
+    # 获取会话管理器
+    session_manager = _module_interface.session_manager
+    if not session_manager:
+        await query.answer("系统错误，请联系管理员")
+        return
+
     # 处理不同的操作
     if action == "set_api_key":
-        # 获取会话管理器
-        session_manager = context.bot_data.get("session_manager")
-        if not session_manager:
-            await query.answer("系统错误，请联系管理员")
+
+        # 检查是否有其他模块的活跃会话
+        if await session_manager.has_other_module_session(user_id,
+                                                          MODULE_NAME,
+                                                          chat_id=chat_id):
+            await query.answer("⚠️ 请先完成或取消其他活跃会话")
             return
 
         # 设置会话状态，等待用户输入 API 密钥
         await session_manager.set(user_id,
                                   "rate_waiting_for",
                                   "api_key",
-                                  chat_id=chat_id)
-        await session_manager.set(user_id,
-                                  "rate_active",
-                                  True,
-                                  chat_id=chat_id)
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
 
         # 发送提示消息
         keyboard = [[
@@ -530,21 +547,20 @@ async def handle_callback_query(update: Update,
             disable_web_page_preview=True)
 
     elif action == "set_interval":
-        # 获取会话管理器
-        session_manager = context.bot_data.get("session_manager")
-        if not session_manager:
-            await query.answer("系统错误，请联系管理员")
+
+        # 检查是否有其他模块的活跃会话
+        if await session_manager.has_other_module_session(user_id,
+                                                          MODULE_NAME,
+                                                          chat_id=chat_id):
+            await query.answer("⚠️ 请先完成或取消其他活跃会话")
             return
 
         # 设置会话状态，等待用户输入更新间隔
         await session_manager.set(user_id,
                                   "rate_waiting_for",
                                   "interval",
-                                  chat_id=chat_id)
-        await session_manager.set(user_id,
-                                  "rate_active",
-                                  True,
-                                  chat_id=chat_id)
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
 
         # 发送提示消息
         keyboard = [[
@@ -559,41 +575,21 @@ async def handle_callback_query(update: Update,
             reply_markup=reply_markup)
 
     elif action == "cancel":
-        # 获取会话管理器
-        session_manager = context.bot_data.get("session_manager")
-        if session_manager:
-            # 清除会话状态
-            await session_manager.delete(user_id,
-                                         "rate_waiting_for",
-                                         chat_id=chat_id)
-            await session_manager.delete(user_id,
-                                         "rate_active",
-                                         chat_id=chat_id)
+        # 清除会话状态
+        await session_manager.delete(user_id,
+                                     "rate_waiting_for",
+                                     chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
-        # 显示当前配置
-        config = load_config()
-        api_key = config.get("api_key", "")
-        # 隐藏部分 API 密钥以保护安全
-        masked_key = "未设置" if not api_key else f"{api_key[:3]}*****{api_key[-3:]}" if len(
-            api_key) > 6 else "已设置"
-        update_interval = config.get("update_interval", 3600)
+        # 获取配置界面
+        config_text, reply_markup = get_config_ui()
 
-        # 构建按钮
-        keyboard = [[
-            InlineKeyboardButton(
-                "API Key", callback_data=f"{CALLBACK_PREFIX}set_api_key"),
-            InlineKeyboardButton(
-                "Interval", callback_data=f"{CALLBACK_PREFIX}set_interval")
-        ]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.edit_message_text(
-            f"🔧 *汇率模块配置*\n\n"
-            f"API 密钥: `{masked_key}`\n"
-            f"更新间隔: `{update_interval}秒`\n\n"
-            f"请选择要修改的设置：",
-            reply_markup=reply_markup,
-            parse_mode="MARKDOWN")
+        # 显示配置界面
+        await query.edit_message_text(config_text,
+                                      reply_markup=reply_markup,
+                                      parse_mode="MARKDOWN")
 
     # 确保回调查询得到响应
     await query.answer()
@@ -601,7 +597,12 @@ async def handle_callback_query(update: Update,
 
 async def handle_rate_input(update: Update,
                             context: ContextTypes.DEFAULT_TYPE):
-    """处理用户输入的汇率配置"""
+    """处理用户输入的汇率配置
+
+    Args:
+        update: 更新对象
+        context: 上下文对象
+    """
     # 只处理私聊消息
     if update.effective_chat.type != "private":
         return
@@ -618,16 +619,13 @@ async def handle_rate_input(update: Update,
         return
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _module_interface.session_manager
     if not session_manager:
         return
 
     # 检查是否是 rate 模块的活跃会话
-    is_active = await session_manager.get(user_id,
-                                          "rate_active",
-                                          False,
-                                          chat_id=chat_id)
-    if not is_active:
+    if not await session_manager.is_session_owned_by(
+            user_id, MODULE_NAME, chat_id=chat_id):
         return
 
     # 获取会话状态
@@ -644,7 +642,9 @@ async def handle_rate_input(update: Update,
         await session_manager.delete(user_id,
                                      "rate_waiting_for",
                                      chat_id=chat_id)
-        await session_manager.delete(user_id, "rate_active", chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 更新配置
         config = load_config()
@@ -657,12 +657,17 @@ async def handle_rate_input(update: Update,
 
             await message.reply_text("✅ API 密钥已更新")
 
-            # 立即尝试更新汇率数据以验证 API 密钥
+            # 临时保存法定货币汇率数据，以便在更新失败时恢复
+            old_fiat_rates = _state["fiat_rates"].copy()
+
             try:
-                await update_exchange_rates()
+                # 调用法定货币汇率更新函数
+                await update_fiat_rates()
                 await message.reply_text("✅ 汇率数据已更新，API 密钥有效")
             except Exception as e:
-                await message.reply_text(f"⚠️ 更新汇率数据失败，请检查 API 密钥: {str(e)}")
+                # 恢复法定货币汇率数据
+                _state["fiat_rates"] = old_fiat_rates
+                await message.reply_text(f"⚠️ API 密钥无效: {str(e)}")
         else:
             await message.reply_text("❌ 保存配置失败")
 
@@ -675,12 +680,12 @@ async def handle_rate_input(update: Update,
             await session_manager.delete(user_id,
                                          "rate_waiting_for",
                                          chat_id=chat_id)
-            await session_manager.delete(user_id,
-                                         "rate_active",
-                                         chat_id=chat_id)
+            await session_manager.release_session(user_id,
+                                                  MODULE_NAME,
+                                                  chat_id=chat_id)
 
             if interval < 600:  # 设置最小间隔，如10分钟
-                await message.reply_text("⚠️ 更新间隔不能小于 600 秒(10 分钟)")
+                await message.reply_text("⚠️ 更新间隔不能小于 600 秒（10 分钟）")
                 return
 
             config = load_config()
@@ -692,14 +697,7 @@ async def handle_rate_input(update: Update,
 
                 # 保存状态到框架的状态管理中
                 if _module_interface:
-                    serializable_state = {
-                        "last_update": _state["last_update"],
-                        "update_interval": _state["update_interval"],
-                        "fiat_rates": _state["fiat_rates"],
-                        "crypto_rates": _state["crypto_rates"],
-                        "data_loaded": _state["data_loaded"]
-                    }
-                    _module_interface.save_state(serializable_state)
+                    _module_interface.save_state(_state)
 
                 # 重启定期更新任务
                 global _update_task
@@ -718,9 +716,9 @@ async def handle_rate_input(update: Update,
             await session_manager.delete(user_id,
                                          "rate_waiting_for",
                                          chat_id=chat_id)
-            await session_manager.delete(user_id,
-                                         "rate_active",
-                                         chat_id=chat_id)
+            await session_manager.release_session(user_id,
+                                                  MODULE_NAME,
+                                                  chat_id=chat_id)
 
 
 async def setup(interface):
@@ -740,6 +738,7 @@ async def setup(interface):
     await interface.register_command(
         "rate",
         rate_command,
+        admin_level=False,
         description="查询汇率",
     )
     await interface.register_command(
@@ -758,9 +757,9 @@ async def setup(interface):
 
     # 注册文本输入处理器
     text_input_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-        handle_rate_input)
-    await interface.register_handler(text_input_handler, group=3)
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/')
+        & filters.ChatType.PRIVATE, handle_rate_input)
+    await interface.register_handler(text_input_handler, group=4)
 
     # 使用框架的状态管理加载状态
     saved_state = interface.load_state(
@@ -782,7 +781,9 @@ async def setup(interface):
     # 立即更新汇率数据
     asyncio.create_task(update_exchange_rates())
 
-    interface.logger.info(f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化")
+    interface.logger.info(
+        f"模块 {MODULE_NAME} v{MODULE_VERSION} 已初始化，更新间隔: {_state['update_interval']} 秒"
+    )
 
 
 async def cleanup(interface):
@@ -801,13 +802,6 @@ async def cleanup(interface):
             pass
 
     # 保存状态到框架的状态管理中
-    serializable_state = {
-        "last_update": _state["last_update"],
-        "update_interval": _state["update_interval"],
-        "fiat_rates": _state["fiat_rates"],
-        "crypto_rates": _state["crypto_rates"],
-        "data_loaded": _state["data_loaded"]
-    }
-    interface.save_state(serializable_state)
+    interface.save_state(_state)
 
     interface.logger.info(f"模块 {MODULE_NAME} 已清理")
