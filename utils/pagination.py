@@ -13,7 +13,9 @@ class PaginationHelper:
                  page_size=10,
                  format_item=None,
                  title="列表",
-                 callback_prefix="page"):
+                 callback_prefix="page",
+                 parse_mode="MARKDOWN",
+                 back_button=None):
         """初始化分页工具
 
         Args:
@@ -22,12 +24,16 @@ class PaginationHelper:
             format_item: 项目格式化函数 (item) -> str
             title: 页面标题
             callback_prefix: 回调数据前缀
+            parse_mode: 解析模式，可选 "MARKDOWN" 或 "HTML"
+            back_button: 返回按钮，如果提供，将添加到键盘底部
         """
         self.items = items
         self.page_size = page_size
         self.format_item = format_item or (lambda x: str(x))
         self.title = title
         self.callback_prefix = callback_prefix
+        self.parse_mode = parse_mode
+        self.back_button = back_button
 
         # 计算总页数
         self.total_pages = max(
@@ -51,7 +57,10 @@ class PaginationHelper:
         end_idx = min(start_idx + self.page_size, len(self.items))
 
         # 构建页面内容
-        content = f"*{TextFormatter.escape_markdown(self.title)}*\n\n"
+        if self.parse_mode == "HTML":
+            content = f"<b>{TextFormatter.escape_html(self.title)}</b>\n\n"
+        else:  # 默认使用 Markdown
+            content = f"*{TextFormatter.escape_markdown(self.title)}*\n\n"
 
         # 添加项目
         for item in self.items[start_idx:end_idx]:
@@ -77,33 +86,48 @@ class PaginationHelper:
         keyboard = []
         row = []
 
-        # 上一页按钮
-        if page_index > 0:
+        # 生成唯一标识符
+        obj_id = str(id(self))
+
+        # 只有当总页数大于1时，才显示导航按钮
+        if self.total_pages > 1:
+            # 上一页按钮
+            if page_index > 0:
+                row.append(
+                    InlineKeyboardButton(
+                        "◁ Prev",
+                        callback_data=
+                        f"{self.callback_prefix}:{page_index - 1}:{obj_id}"))
+            else:
+                row.append(InlineKeyboardButton(" ", callback_data="noop"))
+
+            # 页码指示 - 点击可以选择页码
             row.append(
                 InlineKeyboardButton(
-                    "◁ Prev",
-                    callback_data=
-                    f"{self.callback_prefix}:{page_index - 1}:{id(self)}"))
-        else:
-            row.append(InlineKeyboardButton(" ", callback_data="noop"))
+                    f"{page_index + 1}/{self.total_pages}",
+                    callback_data=f"{self.callback_prefix}:select:{obj_id}"))
 
-        # 页码指示 - 点击可以选择页码
-        row.append(
-            InlineKeyboardButton(
-                f"{page_index + 1}/{self.total_pages}",
-                callback_data=f"{self.callback_prefix}:select:{id(self)}"))
+            # 下一页按钮
+            if page_index < self.total_pages - 1:
+                row.append(
+                    InlineKeyboardButton(
+                        "Next ▷",
+                        callback_data=
+                        f"{self.callback_prefix}:{page_index + 1}:{obj_id}"))
+            else:
+                row.append(InlineKeyboardButton(" ", callback_data="noop"))
 
-        # 下一页按钮
-        if page_index < self.total_pages - 1:
-            row.append(
-                InlineKeyboardButton(
-                    "Next ▷",
-                    callback_data=
-                    f"{self.callback_prefix}:{page_index + 1}:{id(self)}"))
-        else:
-            row.append(InlineKeyboardButton(" ", callback_data="noop"))
+            keyboard.append(row)
 
-        keyboard.append(row)
+        # 添加返回按钮（如果有）
+        if self.back_button:
+            # 如果 back_button 是一个列表，直接添加
+            if isinstance(self.back_button, list):
+                keyboard.append(self.back_button)
+            else:
+                # 否则，将其包装在列表中
+                keyboard.append([self.back_button])
+
         return InlineKeyboardMarkup(keyboard)
 
     async def send_page(self, update, context, page_index):
@@ -128,12 +152,17 @@ class PaginationHelper:
         if update.callback_query:
             try:
                 await update.callback_query.edit_message_text(
-                    text=content, reply_markup=keyboard, parse_mode="MARKDOWN")
+                    text=content,
+                    reply_markup=keyboard,
+                    parse_mode=self.parse_mode)
                 await update.callback_query.answer()
                 return update.callback_query.message
-            except Exception:
-                # 如果 Markdown 解析失败，尝试纯文本
-                plain_content = TextFormatter.markdown_to_plain(content)
+            except Exception as e:
+                # 如果解析失败，尝试纯文本
+                if self.parse_mode == "HTML":
+                    plain_content = TextFormatter.html_to_plain(content)
+                else:
+                    plain_content = TextFormatter.markdown_to_plain(content)
                 await update.callback_query.edit_message_text(
                     text=plain_content, reply_markup=keyboard)
                 await update.callback_query.answer()
@@ -145,10 +174,13 @@ class PaginationHelper:
             try:
                 return await message.reply_text(text=content,
                                                 reply_markup=keyboard,
-                                                parse_mode="MARKDOWN")
+                                                parse_mode=self.parse_mode)
             except Exception:
-                # 如果 Markdown 解析失败，尝试纯文本
-                plain_content = TextFormatter.markdown_to_plain(content)
+                # 如果解析失败，尝试纯文本
+                if self.parse_mode == "HTML":
+                    plain_content = TextFormatter.html_to_plain(content)
+                else:
+                    plain_content = TextFormatter.markdown_to_plain(content)
                 return await message.reply_text(text=plain_content,
                                                 reply_markup=keyboard)
 
@@ -179,9 +211,14 @@ class PaginationHelper:
 
             # 处理页码选择
             if action == "select" and len(parts) >= 3:
+                # 获取页面标题和解析模式
+                title = context.user_data.get("pagination_title", "列表")
+                parse_mode = context.user_data.get("pagination_parse_mode",
+                                                   "MARKDOWN")
+
                 # 显示页码选择界面
                 await PaginationHelper.show_page_selector(
-                    update, context, prefix, parts[2])
+                    update, context, prefix, title, parse_mode)
                 return
             elif action.startswith("goto_") and len(parts) >= 3:
                 # 处理页码跳转
@@ -207,40 +244,51 @@ class PaginationHelper:
                 return
 
             # 常规页面导航
-            page_index = int(action)
+            if len(parts) >= 3:
+                try:
+                    page_index = int(action)
 
-            # 根据前缀确定要调用的命令处理器
-            if prefix == "mod_page":
-                context.user_data["page_index"] = page_index
-                await context.bot_data[
-                    "command_manager"]._list_modules_command(update, context)
-            elif prefix == "cmd_page":
-                context.user_data["page_index"] = page_index
-                await context.bot_data[
-                    "command_manager"]._list_commands_command(update, context)
-            else:
-                # 其他模块的回调处理器
-                context.user_data["page_index"] = page_index
-                await query.answer("处理中...")
+                    # 根据前缀确定要调用的命令处理器
+                    if prefix == "mod_page":
+                        context.user_data["page_index"] = page_index
+                        await context.bot_data["command_manager"
+                                               ]._list_modules_command(
+                                                   update, context)
+                    elif prefix == "cmd_page":
+                        context.user_data["page_index"] = page_index
+                        await context.bot_data["command_manager"
+                                               ]._list_commands_command(
+                                                   update, context)
+                    else:
+                        # 其他模块的回调处理器
+                        context.user_data["page_index"] = page_index
+                        await query.answer("处理中...")
+                except ValueError:
+                    await query.answer("无效的页码")
 
-        except Exception:
+        except Exception as e:
             # 处理错误
-            await query.answer("处理回调时出错")
+            await query.answer(f"处理回调时出错: {str(e)[:50]}")
 
     @staticmethod
-    async def show_page_selector(update, context, prefix, obj_id):
+    async def show_page_selector(update,
+                                 context,
+                                 prefix,
+                                 title="列表",
+                                 parse_mode="MARKDOWN"):
         """显示页码选择界面
 
         Args:
             update: 更新对象
             context: 上下文对象
             prefix: 回调前缀
-            obj_id: 分页对象ID
+            title: 页面标题
+            parse_mode: 解析模式，可选 "MARKDOWN" 或 "HTML"
         """
         query = update.callback_query
 
         # 从上下文中获取总页数
-        total_pages = context.user_data.get("total_pages", 10)  # 默认10页
+        total_pages = context.user_data.get("total_pages", 9)  # 默认 9 页
         current_page = context.user_data.get("page_index", 0) + 1  # 转为1-based
 
         # 创建页码选择键盘
@@ -251,6 +299,9 @@ class PaginationHelper:
 
         # 计算需要多少行
         rows_needed = (total_pages + buttons_per_row - 1) // buttons_per_row
+
+        # 生成唯一标识符
+        obj_id = str(id(update))
 
         # 生成页码按钮
         for row in range(rows_needed):
@@ -280,8 +331,26 @@ class PaginationHelper:
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # 构建页面标题
+        if parse_mode == "HTML":
+            content = f"<b>{TextFormatter.escape_html(title)}</b>\n\n请选择要跳转的页码："
+        else:  # 默认使用 Markdown
+            content = f"*{TextFormatter.escape_markdown(title)}*\n\n请选择要跳转的页码："
+
         # 更新消息
-        await query.edit_message_text("请选择要跳转的页码：", reply_markup=reply_markup)
+        try:
+            await query.edit_message_text(content,
+                                          reply_markup=reply_markup,
+                                          parse_mode=parse_mode)
+        except Exception:
+            # 如果解析失败，尝试纯文本
+            if parse_mode == "HTML":
+                plain_content = TextFormatter.html_to_plain(content)
+            else:
+                plain_content = TextFormatter.markdown_to_plain(content)
+            await query.edit_message_text(plain_content,
+                                          reply_markup=reply_markup)
+
         await query.answer()
 
     @staticmethod
@@ -381,6 +450,11 @@ class PaginationHelper:
 
         # 添加返回按钮
         if back_button:
-            keyboard.append([back_button])
+            # 如果 back_button 是一个列表，直接添加
+            if isinstance(back_button, list):
+                keyboard.append(back_button)
+            else:
+                # 否则，将其包装在列表中
+                keyboard.append([back_button])
 
         return InlineKeyboardMarkup(keyboard)

@@ -672,6 +672,10 @@ class CommandManager:
         # 创建分页助手并显示第一页
         pagination = self._create_module_pagination(module_list,
                                                     current_chat_type)
+
+        # 保存总页数到上下文
+        context.user_data["total_pages"] = pagination.total_pages
+
         await pagination.send_page(update, context, 0)
 
     def _format_module_item(self, item):
@@ -720,6 +724,10 @@ class CommandManager:
         # 创建分页助手并显示第一页
         pagination = self._create_command_pagination(command_list,
                                                      current_chat_type)
+
+        # 保存总页数到上下文
+        context.user_data["total_pages"] = pagination.total_pages
+
         await pagination.send_page(update, context, 0)
 
     def _build_module_list(self, context, current_chat_type):
@@ -913,56 +921,6 @@ class CommandManager:
         else:
             return f"{command_part} - {description} *[{module}]*"
 
-    async def _calculate_modules_total_pages(self, context):
-        """计算模块列表的总页数
-
-        Args:
-            context: 上下文对象
-
-        Returns:
-            tuple: (总页数, 页面大小)
-        """
-        # 获取当前聊天类型（这里不重要，因为我们只需要计算总数）
-        current_chat_type = "private"  # 默认值，实际上不影响计数
-
-        # 使用辅助方法构建模块列表
-        module_list = self._build_module_list(context, current_chat_type)
-
-        # 计算总页数
-        page_size = 8  # 与 _create_module_pagination 中的值保持一致
-        actual_total_pages = max(1, (len(module_list) + page_size - 1) //
-                                 page_size)
-
-        return actual_total_pages, page_size
-
-    async def _calculate_commands_total_pages(self, context, user_id, chat_id,
-                                              chat_type):
-        """计算命令列表的总页数
-
-        Args:
-            context: 上下文对象
-            user_id: 用户ID
-            chat_id: 聊天ID
-            chat_type: 聊天类型
-
-        Returns:
-            tuple: (总页数, 页面大小)
-        """
-        # 简化聊天类型
-        current_chat_type = "private" if chat_type == "private" else "group"
-
-        # 使用辅助方法构建命令列表
-        command_list = await self._build_command_list(context, user_id,
-                                                      chat_id, chat_type,
-                                                      current_chat_type)
-
-        # 计算总页数
-        page_size = 10  # 与 _create_command_pagination 中的值保持一致
-        actual_total_pages = max(1, (len(command_list) + page_size - 1) //
-                                 page_size)
-
-        return actual_total_pages, page_size
-
     async def _handle_command_page_callback(self, update, context):
         """处理命令分页回调
 
@@ -989,64 +947,27 @@ class CommandManager:
 
             # 处理页码选择
             if action == "select" and len(parts) >= 3:
-                # 重新计算实际的总页数
-                if prefix == "mod_page":
-                    # 模块列表分页
-                    actual_total_pages, _ = await self._calculate_modules_total_pages(
-                        context)
 
-                    # 保存到上下文
-                    context.user_data["total_pages"] = actual_total_pages
-
-                elif prefix == "cmd_page":
-                    # 命令列表分页
-                    user_id = update.effective_user.id
-                    chat_id = update.effective_chat.id
-                    chat_type = update.effective_chat.type
-
-                    actual_total_pages, _ = await self._calculate_commands_total_pages(
-                        context, user_id, chat_id, chat_type)
-
-                    # 保存到上下文
-                    context.user_data["total_pages"] = actual_total_pages
+                # 获取页面标题
+                title = "模块列表" if prefix == "mod_page" else "命令列表"
 
                 # 显示页码选择界面
                 await PaginationHelper.show_page_selector(
-                    update, context, prefix, parts[2])
+                    update,
+                    context,
+                    prefix,
+                    title=title,
+                    parse_mode="MARKDOWN")
                 return
             elif action.startswith("goto_") and len(parts) >= 3:
                 # 处理页码跳转
                 try:
                     page_index = int(action.replace("goto_", ""))
 
-                    # 重新计算实际的总页数
-                    if prefix == "mod_page":
-                        # 模块列表分页
-                        actual_total_pages, _ = await self._calculate_modules_total_pages(
-                            context)
+                    total_pages = context.user_data.get("total_pages", 1)
 
-                        # 确保页码在有效范围内
-                        page_index = max(
-                            0, min(page_index, actual_total_pages - 1))
-
-                        # 保存到上下文
-                        context.user_data["total_pages"] = actual_total_pages
-
-                    elif prefix == "cmd_page":
-                        # 命令列表分页
-                        user_id = update.effective_user.id
-                        chat_id = update.effective_chat.id
-                        chat_type = update.effective_chat.type
-
-                        actual_total_pages, _ = await self._calculate_commands_total_pages(
-                            context, user_id, chat_id, chat_type)
-
-                        # 确保页码在有效范围内
-                        page_index = max(
-                            0, min(page_index, actual_total_pages - 1))
-
-                        # 保存到上下文
-                        context.user_data["total_pages"] = actual_total_pages
+                    # 确保页码在有效范围内
+                    page_index = max(0, min(page_index, total_pages - 1))
 
                 except ValueError:
                     await query.answer("无效的页码")
@@ -1056,34 +977,10 @@ class CommandManager:
                 try:
                     page_index = int(action)
 
-                    # 重新计算实际的总页数
-                    if prefix == "mod_page":
-                        # 模块列表分页
-                        actual_total_pages, _ = await self._calculate_modules_total_pages(
-                            context)
+                    total_pages = context.user_data.get("total_pages", 1)
 
-                        # 确保页码在有效范围内
-                        page_index = max(
-                            0, min(page_index, actual_total_pages - 1))
-
-                        # 保存到上下文
-                        context.user_data["total_pages"] = actual_total_pages
-
-                    elif prefix == "cmd_page":
-                        # 命令列表分页
-                        user_id = update.effective_user.id
-                        chat_id = update.effective_chat.id
-                        chat_type = update.effective_chat.type
-
-                        actual_total_pages, _ = await self._calculate_commands_total_pages(
-                            context, user_id, chat_id, chat_type)
-
-                        # 确保页码在有效范围内
-                        page_index = max(
-                            0, min(page_index, actual_total_pages - 1))
-
-                        # 保存到上下文
-                        context.user_data["total_pages"] = actual_total_pages
+                    # 确保页码在有效范围内
+                    page_index = max(0, min(page_index, total_pages - 1))
 
                 except ValueError:
                     await query.answer("无效的页码")

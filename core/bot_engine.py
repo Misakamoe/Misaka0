@@ -427,15 +427,9 @@ class BotEngine:
         # 创建按钮列表
         keyboard = []
 
-        # 为所有群组添加编号
-        for i, (group_id, group_info) in enumerate(allowed_groups.items(), 1):
-            added_time = datetime.fromtimestamp(group_info.get(
-                "added_at", 0)).strftime("%Y-%m-%d")
-
-            # 获取存储的群组名称
+        # 定义获取群组信息的异步函数
+        async def get_group_info(group_id, group_info):
             stored_group_name = group_info.get("group_name", "")
-
-            # 尝试获取最新的群组信息
             group_name = stored_group_name
             try:
                 # 尝试从 Telegram 获取最新的群组信息
@@ -452,6 +446,29 @@ class BotEngine:
             except Exception as e:
                 self.logger.debug(f"获取群组 {group_id} 的最新信息失败: {e}")
                 # 如果获取失败，使用存储的名称或空字符串
+            return group_id, group_name
+
+        # 创建所有获取群组信息的任务
+        tasks = []
+        for group_id, group_info in allowed_groups.items():
+            tasks.append(get_group_info(group_id, group_info))
+
+        # 并行执行所有任务
+        group_results = await asyncio.gather(*tasks)
+
+        # 创建群组ID到名称的映射
+        group_names = {
+            str(group_id): group_name
+            for group_id, group_name in group_results
+        }
+
+        # 为所有群组添加编号
+        for i, (group_id, group_info) in enumerate(allowed_groups.items(), 1):
+            added_time = datetime.fromtimestamp(group_info.get(
+                "added_at", 0)).strftime("%Y-%m-%d")
+
+            # 获取群组名称（已更新）
+            group_name = group_names.get(group_id, "")
 
             groups_message += f"{i}. 群组 ID: {group_id}\n"
             if group_name:
