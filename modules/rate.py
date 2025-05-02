@@ -450,16 +450,10 @@ async def setrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
-    user_id = update.effective_user.id
 
     # 检查是否是私聊
     if update.effective_chat.type != "private":
         await message.reply_text("⚠️ 出于安全考虑只能在私聊中进行")
-        return
-
-    # 检查权限 - 仅超级管理员可用
-    if not _module_interface.config_manager.is_admin(user_id):
-        await message.reply_text("⚠️ 您没有执行此操作的权限")
         return
 
     # 获取配置界面
@@ -613,10 +607,6 @@ async def handle_rate_input(update: Update,
 
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-
-    # 检查权限 - 仅超级管理员可用
-    if not _module_interface.config_manager.is_admin(user_id):
-        return
 
     # 获取会话管理器
     session_manager = _module_interface.session_manager

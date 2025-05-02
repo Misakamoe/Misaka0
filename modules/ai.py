@@ -1365,7 +1365,6 @@ async def handle_specific_actions(update: Update,
         if has_other_session:
             # 如果有其他模块的活跃会话，提醒用户并返回模板选择界面
             await query.answer("⚠️ 请先完成或取消其他活跃会话")
-            await show_provider_templates(update, context)
             return
 
         # 提示输入新服务商 ID
@@ -1476,7 +1475,6 @@ async def handle_specific_actions(update: Update,
             if has_other_session:
                 # 如果有其他模块的活跃会话，提醒用户并返回白名单菜单
                 await query.answer("⚠️ 请先完成或取消其他活跃会话")
-                await show_whitelist_menu(update, context)
                 return
 
             # 构建提示文本和按钮
