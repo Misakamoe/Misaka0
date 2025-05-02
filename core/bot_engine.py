@@ -139,6 +139,12 @@ class BotEngine:
             self._handle_cancel_remove_group_callback,
             pattern=r"^cancel_remove_group$",
             admin_level="super_admin")
+        # 注册授权群组回调处理器
+        await self.command_manager.register_callback_handler(
+            "core",
+            self._handle_auth_group_callback,
+            pattern=r"^auth_group_-?\d+$",
+            admin_level="super_admin")
 
         # 注册错误处理器
         self.application.add_error_handler(self.handle_error)
@@ -328,11 +334,11 @@ class BotEngine:
                 and chat_member.new_chat_member.status
                 in ["member", "administrator"]):
 
+            # 获取群组名称
+            group_name = chat.title
+
             # 检查添加者是否是超级管理员
             if self.config_manager.is_admin(user.id):
-                # 获取群组名称
-                group_name = chat.title
-
                 # 添加到允许的群组
                 self.config_manager.add_allowed_group(chat.id, user.id,
                                                       group_name)
@@ -340,15 +346,46 @@ class BotEngine:
                     f"Bot 被超级管理员 {user.id} 添加到群组 {chat.id} ({group_name})")
                 await context.bot.send_message(chat_id=chat.id,
                                                text="✅ Bot 已被授权在此群组使用")
-            else:
-                self.logger.warning(f"Bot 被非超级管理员 {user.id} 添加到群组 {chat.id}")
+            # 检查群组是否已在白名单中
+            elif self.config_manager.is_allowed_group(chat.id):
+                self.logger.debug(
+                    f"Bot 被用户 {user.id} 添加到已授权群组 {chat.id} ({group_name})")
                 await context.bot.send_message(chat_id=chat.id,
-                                               text="⚠️ Bot 未被授权在此群组使用，将自动退出")
-                # 尝试离开群组
-                try:
-                    await context.bot.leave_chat(chat.id)
-                except Exception as e:
-                    self.logger.error(f"离开群组 {chat.id} 失败: {e}")
+                                               text="✅ Bot 已被授权在此群组使用")
+            else:
+                self.logger.info(
+                    f"Bot 被用户 {user.id} 添加到未授权群组 {chat.id} ({group_name})")
+
+                # 通知所有超级管理员
+                admin_ids = self.config_manager.get_valid_admin_ids()
+                for admin_id in admin_ids:
+                    try:
+                        # 创建授权按钮
+                        keyboard = [[
+                            telegram.InlineKeyboardButton(
+                                "◯ Authorize Group",
+                                callback_data=f"auth_group_{chat.id}")
+                        ]]
+                        reply_markup = telegram.InlineKeyboardMarkup(keyboard)
+
+                        await context.bot.send_message(
+                            chat_id=admin_id,
+                            text=f"⚠️ Bot 被用户 {user.id} 添加到未授权群组:\n"
+                            f"群组 ID: {chat.id}\n"
+                            f"群组名称: {group_name}\n\n"
+                            f"您可以点击下方按钮授权或使用命令:\n"
+                            f"/addgroup {chat.id}",
+                            reply_markup=reply_markup)
+                    except Exception as e:
+                        self.logger.error(f"向管理员 {admin_id} 发送通知失败: {e}")
+
+                # 通知群组
+                await context.bot.send_message(
+                    chat_id=chat.id, text="⚠️ 已通知管理员授权此群组\n\n10 秒内未获授权将自动退出")
+
+                # 创建延时退出任务
+                asyncio.create_task(
+                    self._delayed_leave_chat(context.bot, chat.id, 10))
 
         # 处理 Bot 被踢出群组的情况
         elif (chat_member.old_chat_member.status
@@ -356,7 +393,7 @@ class BotEngine:
               and chat_member.new_chat_member.status in ["left", "kicked"]):
             # 从白名单移除该群组
             self.config_manager.remove_allowed_group(chat.id)
-            self.logger.info(f"Bot 已从群组 {chat.id} 移除，已从白名单删除")
+            self.logger.debug(f"Bot 已从群组 {chat.id} 移除，已从白名单删除")
 
     async def _list_allowed_groups_command(self, update, context):
         """列出所有允许的群组"""
@@ -395,8 +432,26 @@ class BotEngine:
             added_time = datetime.fromtimestamp(group_info.get(
                 "added_at", 0)).strftime("%Y-%m-%d")
 
-            # 尝试获取群组名称
-            group_name = group_info.get("group_name", "")
+            # 获取存储的群组名称
+            stored_group_name = group_info.get("group_name", "")
+
+            # 尝试获取最新的群组信息
+            group_name = stored_group_name
+            try:
+                # 尝试从 Telegram 获取最新的群组信息
+                chat = await context.bot.get_chat(int(group_id))
+                if chat and chat.title:
+                    group_name = chat.title
+                    # 如果群组名称已更改，更新配置
+                    if stored_group_name != group_name:
+                        self.logger.debug(
+                            f"更新群组 {group_id} 的名称: {stored_group_name} -> {group_name}"
+                        )
+                        self.config_manager.update_group_name(
+                            int(group_id), group_name)
+            except Exception as e:
+                self.logger.debug(f"获取群组 {group_id} 的最新信息失败: {e}")
+                # 如果获取失败，使用存储的名称或空字符串
 
             groups_message += f"{i}. 群组 ID: {group_id}\n"
             if group_name:
@@ -527,7 +582,7 @@ class BotEngine:
         # 尝试退出群组
         try:
             await context.bot.leave_chat(group_id)
-            self.logger.info(f"Bot 已成功退出群组 {group_id}")
+            self.logger.debug(f"Bot 已成功退出群组 {group_id}")
         except Exception as e:
             self.logger.error(f"退出群组 {group_id} 失败: {e}")
 
@@ -553,6 +608,73 @@ class BotEngine:
         except Exception:
             await query.edit_message_text("返回群组列表失败，请重新执行 /listgroups")
 
+    async def _delayed_leave_chat(self, bot, chat_id, delay_seconds):
+        """延时检查并离开未授权的群组"""
+        try:
+            # 等待指定的时间
+            await asyncio.sleep(delay_seconds)
+
+            # 检查群组是否已被授权
+            if not self.config_manager.is_allowed_group(chat_id):
+                self.logger.debug(
+                    f"群组 {chat_id} 在 {delay_seconds} 秒内未获得授权，Bot 将自动退出")
+
+                # 尝试离开群组
+                try:
+                    await bot.leave_chat(chat_id)
+                    self.logger.debug(f"Bot 已成功退出未授权群组 {chat_id}")
+                except Exception as e:
+                    self.logger.error(f"离开群组 {chat_id} 失败: {e}")
+            else:
+                self.logger.debug(f"群组 {chat_id} 已获得授权，Bot 将继续留在群组中")
+        except Exception as e:
+            self.logger.error(f"延时退出任务出错: {e}")
+
+    async def _handle_auth_group_callback(self, update, context):
+        """处理授权群组的回调查询"""
+        query = update.callback_query
+        user_id = update.effective_user.id
+
+        # 解析回调数据
+        try:
+            # 从 "auth_group_123456" 格式中提取群组 ID
+            prefix = "auth_group_"
+            if query.data.startswith(prefix):
+                group_id = int(query.data[len(prefix):])
+            else:
+                await query.answer("❌ 无效的回调数据格式")
+                return
+        except (ValueError, IndexError):
+            await query.answer("❌ 无效的回调数据")
+            return
+
+        # 检查群组是否已在白名单中
+        if self.config_manager.is_allowed_group(group_id):
+            await query.answer("✅ 此群组已在授权列表中")
+            return
+
+        # 尝试获取群组信息
+        try:
+            chat = await context.bot.get_chat(group_id)
+            group_name = chat.title
+        except Exception as e:
+            self.logger.error(f"获取群组 {group_id} 信息失败: {e}")
+            group_name = str(group_id)  # 如果无法获取名称，使用ID作为名称
+
+        # 添加到白名单
+        if self.config_manager.add_allowed_group(group_id, user_id,
+                                                 group_name):
+            self.logger.debug(f"管理员 {user_id} 已授权群组 {group_id} ({group_name})")
+
+            # 回应回调查询
+            await query.answer("✅ 已成功授权群组")
+            await query.edit_message_text(f"✅ 已成功授权群组:\n"
+                                          f"群组 ID: {group_id}\n"
+                                          f"群组名称: {group_name}")
+        else:
+            await query.answer("❌ 授权群组失败")
+            self.logger.error(f"授权群组 {group_id} 失败")
+
     async def _handle_select_remove_group_callback(self, update, context):
         """处理选择移除群组的回调查询"""
         query = update.callback_query
@@ -572,7 +694,7 @@ class BotEngine:
 
         # 为所有群组添加编号和按钮
         for i, (group_id, group_info) in enumerate(allowed_groups.items(), 1):
-            # 尝试获取群组名称
+            # 获取存储的群组名称
             group_name = group_info.get("group_name", "")
 
             # 按钮文本
@@ -623,7 +745,7 @@ class BotEngine:
                 if self.config_manager.add_allowed_group(
                         chat.id, user_id, group_name):
                     await message_obj.reply_text(f"✅ 已将当前群组 {chat.id} 添加到白名单")
-                    self.logger.info(f"成功添加群组 {chat.id} ({group_name}) 到白名单")
+                    self.logger.debug(f"成功添加群组 {chat.id} ({group_name}) 到白名单")
                 else:
                     await message_obj.reply_text(f"❌ 添加当前群组到白名单失败")
                     self.logger.error(f"添加群组 {chat.id} 到白名单失败")
@@ -640,7 +762,7 @@ class BotEngine:
             # 添加到白名单
             if self.config_manager.add_allowed_group(group_id, user_id):
                 await message_obj.reply_text(f"✅ 已将群组 {group_id} 添加到白名单")
-                self.logger.info(f"成功添加群组 {group_id} 到白名单")
+                self.logger.debug(f"成功添加群组 {group_id} 到白名单")
             else:
                 await message_obj.reply_text(f"❌ 添加群组到白名单失败")
                 self.logger.error(f"添加群组 {group_id} 到白名单失败")

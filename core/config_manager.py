@@ -282,3 +282,26 @@ class ConfigManager:
             dict: 群组信息
         """
         return self.main_config.get("allowed_groups", {})
+
+    def update_group_name(self, group_id, group_name):
+        """更新群组名称
+
+        Args:
+            group_id: 群组 ID
+            group_name: 新的群组名称
+
+        Returns:
+            bool: 是否成功更新
+        """
+        if "allowed_groups" not in self.main_config:
+            self.main_config["allowed_groups"] = {}
+
+        group_id_str = str(group_id)
+        if group_id_str in self.main_config["allowed_groups"]:
+            self.main_config["allowed_groups"][group_id_str][
+                "group_name"] = group_name
+            success = self.save_main_config()
+            if success:
+                self.logger.debug(f"群组 {group_id} 的名称已更新为 {group_name}")
+            return success
+        return False
