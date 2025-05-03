@@ -6,16 +6,16 @@ import feedparser
 import os
 import json
 import re
-import random
 import time
 from datetime import datetime
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes, filters, MessageHandler
 from utils.formatter import TextFormatter
+from utils.pagination import PaginationHelper
 
 # 模块元数据
 MODULE_NAME = "rss"
-MODULE_VERSION = "3.0.1"
+MODULE_VERSION = "3.1.0"
 MODULE_DESCRIPTION = "RSS 订阅，智能间隔和健康监控"
 MODULE_COMMANDS = ["rss"]
 MODULE_CHAT_TYPES = ["private", "group"]  # 支持私聊和群组
@@ -55,7 +55,7 @@ DEFAULT_CONFIG = {
         "private": {},  # 用户 ID -> [订阅列表]
         "group": {}  # 群组 ID -> [订阅列表]
     },
-    "sources": {}  # URL -> {title, description, ...}
+    "sources": {}  # URL -> {title, last_updated, ...}
 }
 
 # 全局变量
@@ -109,38 +109,14 @@ async def rss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 在群组中检查用户是否为管理员
     if update.effective_chat.type != "private":
-        user_id = update.effective_user.id
-        chat_id = update.effective_chat.id
-
-        try:
-            # 检查是否是超级管理员
-            if context.bot_data.get("config_manager").is_admin(user_id):
-                pass  # 超级管理员可以使用
-            else:
-                # 检查是否是群组管理员
-                chat_member = await context.bot.get_chat_member(
-                    chat_id, user_id)
-                is_admin = chat_member.status in ["creator", "administrator"]
-
-                if not is_admin:
-                    if hasattr(update,
-                               'callback_query') and update.callback_query:
-                        await update.callback_query.answer(
-                            "⚠️ 只有管理员可以管理 RSS 订阅")
-                        return
-                    else:
-                        await message.reply_text("⚠️ 只有管理员可以管理 RSS 订阅")
-                        return
-        except Exception as e:
-            # 使用全局模块接口记录日志
-            if _module_interface:
-                _module_interface.logger.error(f"检查群组权限时出错: {e}")
+        # 使用 _check_permission 方法检查权限
+        command_manager = _module_interface.command_manager
+        if not await command_manager._check_permission("group_admin", update,
+                                                       context):
+            # 权限检查失败 - 回调查询发送错误消息
             if hasattr(update, 'callback_query') and update.callback_query:
-                await update.callback_query.answer("⚠️ 检查权限时出错，请稍后再试")
-                return
-            else:
-                await message.reply_text("⚠️ 检查权限时出错，请稍后再试")
-                return
+                await update.callback_query.answer("⚠️ 只有管理员可以管理 RSS 订阅")
+            return
 
     # 显示主菜单
     list_callback = f"{CALLBACK_PREFIX}list"
@@ -165,13 +141,6 @@ async def rss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                  "请选择要执行的操作：",
                                  reply_markup=reply_markup,
                                  parse_mode="HTML")
-
-
-# 不再需要单独的帮助函数，因为主菜单已经包含了所有功能
-# 保留此函数仅用于兼容性，直接调用 rss_command
-async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示帮助信息（现在直接显示主菜单）"""
-    await rss_command(update, context)
 
 
 async def list_subscriptions(update: Update,
@@ -212,120 +181,71 @@ async def list_subscriptions(update: Update,
                                      reply_markup=reply_markup)
         return
 
-    # 获取页码参数（优先从上下文获取，其次从回调数据获取）
-    page = context.user_data.get("rss_page_index", 0)  # 默认从上下文获取，使用模块特定的键
+    # 获取页码参数（从上下文获取）
+    page_index = context.user_data.get("rss_page_index", 0)
 
-    # 如果是分页回调，则从回调数据获取
-    if callback_query and ":" in callback_query.data:
-        parts = callback_query.data.split(":")
-        if len(parts) >= 2 and parts[0] == f"{CALLBACK_PREFIX}page":
-            try:
-                page = int(parts[1])
-                # 更新上下文中的页码，使用模块特定的键
-                context.user_data["rss_page_index"] = page
-            except ValueError:
-                pass  # 保持原有页码
-
-    # 设置每页显示的订阅数量
-    page_size = 5
-    total_pages = max(1, (len(subscriptions) + page_size - 1) // page_size)
-
-    # 保存总页数到上下文，用于页码选择功能，使用模块特定的键
-    context.user_data["rss_total_pages"] = total_pages
-
-    # 确保页码在有效范围内
-    page = max(0, min(page, total_pages - 1))
-
-    # 保存当前页码到上下文，使用模块特定的键
-    context.user_data["rss_page_index"] = page
-
-    # 计算当前页的订阅范围
-    start_idx = page * page_size
-    end_idx = min(start_idx + page_size, len(subscriptions))
-
-    text = "<b>📋 RSS 订阅列表</b>\n\n"
-
-    # 显示当前页的订阅列表
-    for i, url in enumerate(subscriptions[start_idx:end_idx], start_idx + 1):
+    # 创建订阅项目列表
+    subscription_items = []
+    for i, url in enumerate(subscriptions, 1):
         source_info = _config["sources"].get(url, {})
         title = source_info.get("title", url)
-        # 使用 HTML 格式，避免转义问题
-        safe_title = TextFormatter.escape_html(title)
-        safe_url = TextFormatter.escape_html(url)
-        text += f"{i}. <b>{safe_title}</b>\n"
-        text += f"   <code>{safe_url}</code>\n\n"
+        subscription_items.append({"index": i, "url": url, "title": title})
 
-    # 添加页码信息
-    if total_pages > 1:
-        text += f"第 {page + 1}/{total_pages} 页\n"
+    # 创建格式化函数
+    def format_subscription(item):
+        safe_title = TextFormatter.escape_html(item["title"])
+        safe_url = TextFormatter.escape_html(item["url"])
+        return f"{item['index']}. <b>{safe_title}</b>\n   <code>{safe_url}</code>\n"
 
-    # 创建分页和操作按钮
-    keyboard = []
+    # 创建返回按钮
+    back_button = InlineKeyboardButton("⇠ Back",
+                                       callback_data=f"{CALLBACK_PREFIX}main")
 
-    # 添加分页按钮（如果有多页）
-    if total_pages > 1:
-        nav_row = []
-
-        # 上一页按钮
-        if page > 0:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "◁ Prev",
-                    callback_data=f"{CALLBACK_PREFIX}page:{page - 1}"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
-
-        # 页码指示 - 点击可以选择页码
-        nav_row.append(
-            InlineKeyboardButton(
-                f"{page + 1}/{total_pages}",
-                callback_data=f"{CALLBACK_PREFIX}page_select:{page}"))
-
-        # 下一页按钮
-        if page < total_pages - 1:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "Next ▷",
-                    callback_data=f"{CALLBACK_PREFIX}page:{page + 1}"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
-
-        keyboard.append(nav_row)
-
-    # 添加操作按钮
-    keyboard.append([
+    # 创建操作按钮行
+    operation_row = [
         InlineKeyboardButton("Remove",
                              callback_data=f"{CALLBACK_PREFIX}remove"),
-        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
-    ])
+        back_button
+    ]
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # 创建分页助手
+    pagination = PaginationHelper(
+        items=subscription_items,
+        page_size=5,
+        format_item=format_subscription,
+        title="📋 RSS 订阅列表",
+        callback_prefix=f"{CALLBACK_PREFIX}list_page",
+        parse_mode="HTML",
+        back_button=operation_row)
 
+    # 获取分页内容
+    content, keyboard = pagination.get_page_content(page_index)
+
+    # 保存分页信息到上下文，用于页码选择功能
+    context.user_data["pagination_title"] = "📋 RSS 订阅列表"
+    context.user_data["pagination_parse_mode"] = "HTML"
+    context.user_data["total_pages"] = pagination.total_pages
+
+    # 保存页码到上下文
+    context.user_data["rss_page_index"] = page_index
+
+    # 发送或更新消息
     if callback_query:
-        await callback_query.edit_message_text(text,
-                                               reply_markup=reply_markup,
+        await callback_query.edit_message_text(text=content,
+                                               reply_markup=keyboard,
                                                parse_mode="HTML")
+        await callback_query.answer()
     else:
-        await message.reply_text(text,
-                                 reply_markup=reply_markup,
+        await message.reply_text(text=content,
+                                 reply_markup=keyboard,
                                  parse_mode="HTML")
 
 
 async def rss_health_command(update: Update,
                              context: ContextTypes.DEFAULT_TYPE):
     """查询 RSS 源健康状态"""
-    # 检查是否是回调查询
-    callback_query = None
-    if hasattr(update, 'callback_query') and update.callback_query:
-        callback_query = update.callback_query
-        message = callback_query.message
-    else:
-        message = update.message or update.edited_message
-
-    # 确保消息对象不为空
-    if not message:
-        _module_interface.logger.error("无法获取消息对象")
-        return
+    # 获取回调查询
+    callback_query = update.callback_query
 
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
@@ -340,53 +260,18 @@ async def rss_health_command(update: Update,
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if not subscriptions:
-        if callback_query:
-            await callback_query.edit_message_text("⚠️ 当前没有 RSS 订阅",
-                                                   reply_markup=reply_markup)
-        else:
-            await message.reply_text("⚠️ 当前没有 RSS 订阅",
-                                     reply_markup=reply_markup)
+        await callback_query.edit_message_text("⚠️ 当前没有 RSS 订阅",
+                                               reply_markup=reply_markup)
         return
 
-    # 获取页码参数（优先从上下文获取，其次从回调数据获取）
-    page = context.user_data.get("rss_health_page_index",
-                                 0)  # 默认从上下文获取，使用模块特定的键
+    # 获取页码参数（从上下文获取）
+    page_index = context.user_data.get("rss_health_page_index", 0)
 
-    # 如果是分页回调，则从回调数据获取
-    if callback_query and ":" in callback_query.data:
-        parts = callback_query.data.split(":")
-        if len(parts) >= 2 and parts[0] == f"{CALLBACK_PREFIX}health_page":
-            try:
-                page = int(parts[1])
-                # 更新上下文中的页码，使用模块特定的键
-                context.user_data["rss_health_page_index"] = page
-            except ValueError:
-                pass  # 保持原有页码
-
-    # 设置每页显示的订阅数量
-    page_size = 4  # 每页显示4个健康状态
-    total_pages = max(1, (len(subscriptions) + page_size - 1) // page_size)
-
-    # 保存总页数到上下文，用于页码选择功能，使用模块特定的键
-    context.user_data["rss_health_total_pages"] = total_pages
-
-    # 确保页码在有效范围内
-    page = max(0, min(page, total_pages - 1))
-
-    # 保存当前页码到上下文，使用模块特定的键
-    context.user_data["rss_health_page_index"] = page
-
-    # 计算当前页的订阅范围
-    start_idx = page * page_size
-    end_idx = min(start_idx + page_size, len(subscriptions))
-
-    text = "<b>📊 RSS 源健康状态</b>\n\n"
-
-    # 显示当前页的健康状态
-    for i, url in enumerate(subscriptions[start_idx:end_idx], start_idx + 1):
+    # 创建健康状态项目列表
+    health_items = []
+    for i, url in enumerate(subscriptions, 1):
         source_info = _config["sources"].get(url, {})
         source_title = source_info.get('title', url)
-        safe_title = TextFormatter.escape_html(source_title)
 
         health_info = _state["source_health"].get(
             url, {
@@ -410,105 +295,91 @@ async def rss_health_command(update: Update,
                 health_info["last_success"])
             last_success = last_success_time.strftime("%Y-%m-%d %H:%M:%S")
 
-        # 健康状态图标
-        status_icon = "✅" if health_info["is_healthy"] else "⚠️"
-
         # 检查间隔
         interval = _state["check_intervals"].get(url, DEFAULT_INTERVAL)
 
-        text += (f"{status_icon} <b>{safe_title}</b>\n"
-                 f"  • 状态: {'正常' if health_info['is_healthy'] else '异常'}\n"
-                 f"  • 成功率: {success_rate}\n"
-                 f"  • 最后成功: {last_success}\n"
-                 f"  • 检查间隔: {interval:.0f} 秒\n\n")
+        health_items.append({
+            "index": i,
+            "title": source_title,
+            "is_healthy": health_info["is_healthy"],
+            "success_rate": success_rate,
+            "last_success": last_success,
+            "interval": interval
+        })
 
-    # 添加页码信息
-    if total_pages > 1:
-        text += f"第 {page + 1}/{total_pages} 页\n"
+    # 创建格式化函数
+    def format_health_item(item):
+        safe_title = TextFormatter.escape_html(item["title"])
+        status_icon = "✅" if item["is_healthy"] else "⚠️"
 
-    # 创建分页和操作按钮
-    keyboard = []
+        return (f"{status_icon} <b>{safe_title}</b>\n"
+                f"  • 状态: {'正常' if item['is_healthy'] else '异常'}\n"
+                f"  • 成功率: {item['success_rate']}\n"
+                f"  • 最后成功: {item['last_success']}\n"
+                f"  • 检查间隔: {item['interval']:.0f} 秒\n")
 
-    # 添加分页按钮（如果有多页）
-    if total_pages > 1:
-        nav_row = []
+    # 创建返回按钮
+    back_button = InlineKeyboardButton("⇠ Back",
+                                       callback_data=f"{CALLBACK_PREFIX}main")
 
-        # 上一页按钮
-        if page > 0:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "◁ Prev",
-                    callback_data=f"{CALLBACK_PREFIX}health_page:{page - 1}"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+    # 创建返回按钮行
+    back_row = [back_button]
 
-        # 页码指示 - 点击可以选择页码
-        nav_row.append(
-            InlineKeyboardButton(
-                f"{page + 1}/{total_pages}",
-                callback_data=f"{CALLBACK_PREFIX}health_page_select:{page}"))
+    # 创建分页助手
+    pagination = PaginationHelper(
+        items=health_items,
+        page_size=4,  # 每页显示4个健康状态
+        format_item=format_health_item,
+        title="📊 RSS 源健康状态",
+        callback_prefix=f"{CALLBACK_PREFIX}health_page",
+        parse_mode="HTML",
+        back_button=back_row)
 
-        # 下一页按钮
-        if page < total_pages - 1:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "Next ▷",
-                    callback_data=f"{CALLBACK_PREFIX}health_page:{page + 1}"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="noop"))
+    # 获取分页内容
+    content, keyboard = pagination.get_page_content(page_index)
 
-        keyboard.append(nav_row)
+    # 保存分页信息到上下文，用于页码选择功能
+    context.user_data["pagination_title"] = "📊 RSS 源健康状态"
+    context.user_data["pagination_parse_mode"] = "HTML"
+    context.user_data["total_pages"] = pagination.total_pages
 
-    # 添加返回按钮
-    keyboard.append([
-        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
-    ])
+    # 保存页码到上下文
+    context.user_data["rss_health_page_index"] = page_index
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if callback_query:
-        await callback_query.edit_message_text(text,
-                                               reply_markup=reply_markup,
-                                               parse_mode="HTML")
-    else:
-        await message.reply_text(text,
-                                 reply_markup=reply_markup,
-                                 parse_mode="HTML")
+    # 更新消息
+    await callback_query.edit_message_text(text=content,
+                                           reply_markup=keyboard,
+                                           parse_mode="HTML")
+    await callback_query.answer()
 
 
 async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """添加订阅 - 启动会话流程"""
-    # 检查是否是回调查询
-    callback_query = None
-    if hasattr(update, 'callback_query') and update.callback_query:
-        callback_query = update.callback_query
-        message = callback_query.message
-    else:
-        message = update.message or update.edited_message
-
-    # 确保消息对象不为空
-    if not message:
-        _module_interface.logger.error("无法获取消息对象")
-        return
+    # 获取回调查询
+    callback_query = update.callback_query
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _module_interface.session_manager
     if not session_manager:
-        if callback_query:
-            await callback_query.answer("系统错误，请联系管理员")
-        else:
-            await message.reply_text("系统错误，请联系管理员")
+        await callback_query.answer("系统错误，请联系管理员")
         return
 
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
+    # 检查是否有其他模块的活跃会话
+    if await session_manager.has_other_module_session(user_id,
+                                                      MODULE_NAME,
+                                                      chat_id=chat_id):
+        await callback_query.answer("⚠️ 请先完成或取消其他活跃会话")
+        return
+
     # 设置会话状态，等待用户输入 URL
-    await session_manager.set(user_id, "rss_active", True, chat_id=chat_id)
     await session_manager.set(user_id,
                               "rss_step",
                               SESSION_ADD_URL,
-                              chat_id=chat_id)
+                              chat_id=chat_id,
+                              module_name=MODULE_NAME)
 
     # 创建返回按钮
     keyboard = [[
@@ -517,27 +388,20 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if callback_query:
-        await callback_query.edit_message_text("请输入要订阅的 RSS 源 URL：",
-                                               reply_markup=reply_markup)
-    else:
-        await message.reply_text("请输入要订阅的 RSS 源 URL：",
-                                 reply_markup=reply_markup)
+    # 更新消息
+    await callback_query.edit_message_text("请输入要订阅的 RSS 源 URL：",
+                                           reply_markup=reply_markup)
 
 
-async def handle_add_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                         url: str):
+async def handle_add_url(update: Update,
+                         context: ContextTypes.DEFAULT_TYPE,
+                         url: str,
+                         session_manager=None):
     """处理用户输入的 RSS URL"""
     message = update.message
     user_id = update.effective_user.id
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
-
-    # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
-    if not session_manager:
-        await message.reply_text("系统错误，请联系管理员")
-        return
 
     # 获取当前聊天的订阅
     if chat_id not in _config["subscriptions"][chat_type]:
@@ -557,8 +421,10 @@ async def handle_add_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await message.reply_text("⚠️ 已经订阅了该 RSS 源", reply_markup=reply_markup)
 
         # 清除会话状态
-        await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
         await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              module_name=MODULE_NAME,
+                                              chat_id=chat_id)
         return
 
     # 验证并获取 RSS 源信息
@@ -580,25 +446,31 @@ async def handle_add_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                            reply_markup=reply_markup)
 
             # 清除会话状态
-            await session_manager.delete(user_id,
-                                         "rss_active",
-                                         chat_id=chat_id)
             await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
+            await session_manager.release_session(user_id,
+                                                  module_name=MODULE_NAME,
+                                                  chat_id=chat_id)
             return
 
         # 获取源标题
         feed_title = feed.get('feed', {}).get('title', url)
 
         # 保存 URL 并进入下一步（输入自定义标题）
-        await session_manager.set(user_id, "rss_url", url, chat_id=chat_id)
+        await session_manager.set(user_id,
+                                  "rss_url",
+                                  url,
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
         await session_manager.set(user_id,
                                   "rss_feed_title",
                                   feed_title,
-                                  chat_id=chat_id)
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
         await session_manager.set(user_id,
                                   "rss_step",
                                   SESSION_ADD_TITLE,
-                                  chat_id=chat_id)
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
 
         # 创建按钮（使用默认标题或返回）
         keyboard = [[
@@ -631,13 +503,20 @@ async def handle_add_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                  reply_markup=reply_markup)
 
         # 清除会话状态
-        await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
+        await session_manager.delete(user_id, "rss_url", chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "rss_feed_title",
+                                     chat_id=chat_id)
         await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              module_name=MODULE_NAME,
+                                              chat_id=chat_id)
 
 
 async def handle_add_title(update: Update,
                            context: ContextTypes.DEFAULT_TYPE,
-                           title: str = None):
+                           title: str = None,
+                           session_manager=None):
     """处理用户输入的自定义标题或使用默认标题"""
     # 检查是否是回调查询
     callback_query = None
@@ -656,15 +535,6 @@ async def handle_add_title(update: Update,
     chat_id = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
 
-    # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
-    if not session_manager:
-        if callback_query:
-            await callback_query.answer("系统错误，请联系管理员")
-        elif message:
-            await message.reply_text("系统错误，请联系管理员")
-        return
-
     # 获取保存的 URL 和默认标题
     url = await session_manager.get(user_id, "rss_url", None, chat_id=chat_id)
     feed_title = await session_manager.get(user_id,
@@ -673,11 +543,23 @@ async def handle_add_title(update: Update,
                                            chat_id=chat_id)
 
     if not url:
+        # 清理会话状态
+        await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
+        await session_manager.delete(user_id, "rss_url", chat_id=chat_id)
+        await session_manager.delete(user_id,
+                                     "rss_feed_title",
+                                     chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              module_name=MODULE_NAME,
+                                              chat_id=chat_id)
+
         if callback_query:
-            await callback_query.answer("会话已过期，请重新开始")
-            await callback_query.edit_message_text("⚠️ 会话已过期，请重新开始")
+            await callback_query.answer("⚠️ 会话已过期，请重新开始")
+            # 显示主菜单
+            await rss_command(update, context)
         elif message:
             await message.reply_text("⚠️ 会话已过期，请重新开始")
+            await rss_command(update, context)
         return
 
     # 如果没有提供标题，则使用默认标题
@@ -692,7 +574,6 @@ async def handle_add_title(update: Update,
     # 添加源信息
     _config["sources"][url] = {
         "title": custom_title,
-        "description": "",  # 可以从 feed 中获取，但这里简化处理
         "last_updated": datetime.now().isoformat()
     }
 
@@ -712,10 +593,12 @@ async def handle_add_title(update: Update,
     save_config()
 
     # 清除会话状态
-    await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
-    await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
     await session_manager.delete(user_id, "rss_url", chat_id=chat_id)
     await session_manager.delete(user_id, "rss_feed_title", chat_id=chat_id)
+    await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
+    await session_manager.release_session(user_id,
+                                          module_name=MODULE_NAME,
+                                          chat_id=chat_id)
 
     # 创建返回按钮
     keyboard = [[
@@ -753,26 +636,9 @@ async def initialize_feed_entries(url, interface):
                 entry.get('id', '') or entry.get('link', '')
                 for entry in feed.get('entries')
             ][:MAX_ENTRY_IDS]
-            interface.logger.info(f"已初始化 RSS 源 {url} 的条目 ID")
+            interface.logger.debug(f"已初始化 RSS 源 {url} 的条目 ID")
     except Exception as e:
         interface.logger.error(f"初始化 RSS 源 {url} 的条目 ID 失败: {e}")
-
-
-async def remove_subscription(update: Update,
-                              context: ContextTypes.DEFAULT_TYPE):
-    """删除订阅（通过命令）- 现在主要通过会话处理"""
-    # 如果是直接命令，则处理命令参数
-    message = update.message or update.edited_message
-
-    # 创建返回主菜单的按钮
-    keyboard = [[
-        InlineKeyboardButton("⇠ Back", callback_data=f"{CALLBACK_PREFIX}main")
-    ]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # 提示用户使用新的界面
-    await message.reply_text("请使用 /rss 命令进入 RSS 管理界面，然后点击 Remove 按钮删除订阅",
-                             reply_markup=reply_markup)
 
 
 async def fetch_feed(url):
@@ -796,9 +662,7 @@ async def notify_source_unhealthy(url, source_info, subscribed_chats,
     source_title = source_info.get('title', url)
     safe_title = TextFormatter.escape_html(source_title)
     message = (f"⚠️ <b>RSS 源可能不可用</b>\n\n"
-               f"RSS 源 <b>{safe_title}</b> 连续 {HEALTH_CHECK_THRESHOLD} 次检查失败\n"
-               f"这可能是临时问题，也可能是源已经不再更新或地址变更\n\n"
-               f"如果问题持续存在，建议使用 <code>/rss remove</code> 命令取消订阅")
+               f"RSS 源 <b>{safe_title}</b> 连续 {HEALTH_CHECK_THRESHOLD} 次检查失败")
 
     # 发送通知给所有订阅者
     for chat_id, _ in subscribed_chats:
@@ -839,7 +703,7 @@ async def initialize_entry_ids(module_interface):
                     entry.get('id', '') or entry.get('link', '')
                     for entry in feed.get('entries')
                 ]
-                module_interface.logger.info(
+                module_interface.logger.debug(
                     f"已初始化源 '{source_info.get('title', url)}' 的 {len(_state['last_entry_ids'][url])} 个条目 ID"
                 )
         except Exception as e:
@@ -1000,7 +864,7 @@ async def check_feed(url, source_info, module_interface):
 
             # 调整检查间隔
             if len(_state["update_timestamps"][url]) >= 2:
-                # 计算平均更新间隔
+                # 计算间隔
                 timestamps = _state["update_timestamps"][url]
                 intervals = [
                     timestamps[i] - timestamps[i - 1]
@@ -1008,13 +872,45 @@ async def check_feed(url, source_info, module_interface):
                 ]
                 avg_interval = sum(intervals) / len(intervals)
 
-                # 将检查间隔设为平均更新间隔的一半，但有上下限
-                new_interval = max(DEFAULT_MIN_INTERVAL,
-                                   min(DEFAULT_MAX_INTERVAL, avg_interval / 2))
+                # 计算变异系数（如果可能）
+                if len(intervals) > 1:
+                    # 计算标准差
+                    variance = sum((x - avg_interval)**2
+                                   for x in intervals) / len(intervals)
+                    std_dev = variance**0.5
+                    cv = std_dev / avg_interval if avg_interval > 0 else 0
+
+                    # 根据变异系数调整因子
+                    if cv > 0.5:  # 高变异（更新不规律）
+                        factor = 4  # 更频繁检查
+                    elif cv > 0.3:  # 中等变异
+                        factor = 3
+                    else:  # 低变异（更新规律）
+                        factor = 2
+                else:
+                    cv = 0
+                    factor = 3  # 默认使用较保守的因子
+
+                # 计算新间隔
+                new_interval = max(
+                    DEFAULT_MIN_INTERVAL,
+                    min(DEFAULT_MAX_INTERVAL, avg_interval / factor))
+
+                # 渐进式调整（最多一次变化30%）
+                current_interval = _state["check_intervals"].get(
+                    url, DEFAULT_INTERVAL)
+                max_change = current_interval * 0.3
+                if new_interval < current_interval:
+                    new_interval = max(new_interval,
+                                       current_interval - max_change)
+                else:
+                    new_interval = min(new_interval,
+                                       current_interval + max_change)
+
                 _state["check_intervals"][url] = new_interval
 
-                module_interface.logger.info(
-                    f"源 '{source_info.get('title', url)}' 的检查间隔已调整为 {new_interval:.0f} 秒"
+                module_interface.logger.debug(
+                    f"源 '{source_info.get('title', url)}' 的检查间隔已调整为 {new_interval:.0f} 秒 (变异系数: {cv:.2f}, 因子: {factor})"
                 )
 
         # 推送新条目（最多推送 5 条，防止刷屏）
@@ -1107,26 +1003,30 @@ async def send_entry(entry, source_info, url, subscribed_chats,
         keyboard = None
         if link:
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔗 查看原文", url=link)]])
+                [[InlineKeyboardButton("View Original", url=link)]])
 
         # 发送到所有订阅的聊天
         current_time = time.time()
 
-        for chat_id, chat_type in subscribed_chats:
-            # 再次检查聊天是否在白名单中（可能在处理过程中被移除）
-            if not (module_interface.config_manager.is_allowed_group(chat_id)
-                    or chat_type == "private"):
-                continue
-
+        for chat_id, _ in subscribed_chats:
             # 检查是否需要添加延迟
             if str(chat_id) in _state.get("last_sent_time", {}):
                 time_since_last = current_time - _state["last_sent_time"][str(
                     chat_id)]
-                if time_since_last < 5:  # 如果距离上次发送不到 5 秒
-                    # 添加 5-10 秒的随机延迟
-                    delay = 5 + random.random() * 5
+
+                # 使用固定延迟，提供更一致的用户体验
+                if time_since_last < 1:  # 如果距离上次发送不到1秒
+                    # 短消息快速发送
+                    delay = 3
                     module_interface.logger.debug(
-                        f"为聊天 {chat_id} 添加 {delay:.2f} 秒延迟")
+                        f"为聊天 {chat_id} 添加 {delay} 秒延迟")
+                    await asyncio.sleep(delay)
+                    current_time = time.time()  # 更新当前时间
+                elif time_since_last < 5:  # 如果距离上次发送不到5秒
+                    # 中等延迟
+                    delay = 2
+                    module_interface.logger.debug(
+                        f"为聊天 {chat_id} 添加 {delay} 秒延迟")
                     await asyncio.sleep(delay)
                     current_time = time.time()  # 更新当前时间
 
@@ -1171,133 +1071,6 @@ async def send_entry(entry, source_info, url, subscribed_chats,
         module_interface.logger.error(f"发送 RSS 条目时出错: {e}")
 
 
-# 状态管理函数已移除，直接使用框架的状态管理功能
-
-
-async def show_page_selector(update: Update,
-                             context: ContextTypes.DEFAULT_TYPE):
-    """显示订阅列表页码选择界面"""
-    query = update.callback_query
-
-    # 从上下文中获取总页数和当前页码，使用模块特定的键
-    total_pages = context.user_data.get("rss_total_pages", 10)  # 默认10页
-    current_page = context.user_data.get("rss_page_index", 0)  # 0-based
-
-    _module_interface.logger.info(
-        f"显示页码选择界面: 当前页={current_page}, 总页数={total_pages}")
-
-    # 创建页码选择键盘
-    keyboard = []
-
-    # 每行最多3个按钮
-    buttons_per_row = 3
-
-    # 计算需要多少行
-    rows_needed = (total_pages + buttons_per_row - 1) // buttons_per_row
-
-    # 生成页码按钮
-    for row in range(rows_needed):
-        button_row = []
-        for i in range(1, buttons_per_row + 1):
-            page_num = row * buttons_per_row + i
-            if page_num <= total_pages:
-                # 当前页使用不同样式
-                if page_num == current_page + 1:  # 转为1-based显示
-                    button_text = f"▷ {page_num}"
-                else:
-                    button_text = str(page_num)
-
-                # 页码是0-based，但显示是1-based
-                page_index = page_num - 1
-
-                button_row.append(
-                    InlineKeyboardButton(
-                        button_text,
-                        callback_data=
-                        f"{CALLBACK_PREFIX}goto_page:{page_index}"  # 保存为0-based
-                    ))
-        if button_row:  # 只添加非空行
-            keyboard.append(button_row)
-
-    # 添加返回按钮
-    keyboard.append([
-        InlineKeyboardButton(
-            "⇠ Back",
-            callback_data=f"{CALLBACK_PREFIX}page:{current_page}"  # 返回当前页
-        )
-    ])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # 更新消息
-    await query.edit_message_text("<b>📋 RSS 订阅列表</b>\n\n请选择要跳转的页码：",
-                                  reply_markup=reply_markup,
-                                  parse_mode="HTML")
-    await query.answer()
-
-
-async def show_health_page_selector(update: Update,
-                                    context: ContextTypes.DEFAULT_TYPE):
-    """显示健康状态页码选择界面"""
-    query = update.callback_query
-
-    # 从上下文中获取总页数和当前页码，使用模块特定的键
-    total_pages = context.user_data.get("rss_health_total_pages", 10)  # 默认10页
-    current_page = context.user_data.get("rss_health_page_index", 0)  # 0-based
-
-    _module_interface.logger.info(
-        f"显示健康状态页码选择界面: 当前页={current_page}, 总页数={total_pages}")
-
-    # 创建页码选择键盘
-    keyboard = []
-
-    # 每行最多3个按钮
-    buttons_per_row = 3
-
-    # 计算需要多少行
-    rows_needed = (total_pages + buttons_per_row - 1) // buttons_per_row
-
-    # 生成页码按钮
-    for row in range(rows_needed):
-        button_row = []
-        for i in range(1, buttons_per_row + 1):
-            page_num = row * buttons_per_row + i
-            if page_num <= total_pages:
-                # 当前页使用不同样式
-                if page_num == current_page + 1:  # 转为1-based显示
-                    button_text = f"▷ {page_num}"
-                else:
-                    button_text = str(page_num)
-
-                # 页码是0-based，但显示是1-based
-                page_index = page_num - 1
-
-                button_row.append(
-                    InlineKeyboardButton(
-                        button_text,
-                        callback_data=
-                        f"{CALLBACK_PREFIX}health_goto_page:{page_index}"  # 保存为0-based
-                    ))
-        if button_row:  # 只添加非空行
-            keyboard.append(button_row)
-
-    # 添加返回按钮
-    keyboard.append([
-        InlineKeyboardButton(
-            "⇠ Back",
-            callback_data=f"{CALLBACK_PREFIX}health_page:{current_page}"  # 返回当前页
-        )
-    ])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # 更新消息
-    await query.edit_message_text("<b>📊 RSS 源健康状态</b>\n\n请选择要跳转的页码：",
-                                  reply_markup=reply_markup,
-                                  parse_mode="HTML")
-    await query.answer()
-
-
 async def handle_callback_query(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """处理按钮回调查询"""
@@ -1306,182 +1079,89 @@ async def handle_callback_query(update: Update,
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    # 在群组中检查用户是否为管理员
-    if update.effective_chat.type != "private":
-        try:
-            # 检查是否是超级管理员
-            if context.bot_data.get("config_manager").is_admin(user_id):
-                pass  # 超级管理员可以使用
-            else:
-                # 检查是否是群组管理员
-                chat_member = await context.bot.get_chat_member(
-                    chat_id, user_id)
-                is_admin = chat_member.status in ["creator", "administrator"]
-
-                if not is_admin:
-                    await callback_query.answer("⚠️ 只有管理员可以管理 RSS 订阅")
-                    return
-        except Exception as e:
-            # 使用全局模块接口记录日志
-            if _module_interface:
-                _module_interface.logger.error(f"检查群组权限时出错: {e}")
-            await callback_query.answer("⚠️ 检查权限时出错，请稍后再试")
-            return
-
     # 检查是否是 RSS 模块的回调
     if not data.startswith(CALLBACK_PREFIX):
         return
 
-    # 处理特殊情况：订阅列表分页回调
-    if data.startswith(f"{CALLBACK_PREFIX}page:"):
-        # 分页回调直接调用列表函数
-        await list_subscriptions(update, context)
-        return
+    # 在群组中检查用户是否为管理员
+    if update.effective_chat.type != "private":
+        # 使用 _check_permission 方法检查权限
+        command_manager = _module_interface.command_manager
+        if not await command_manager._check_permission("group_admin", update,
+                                                       context):
+            await callback_query.answer("⚠️ 只有管理员可以管理 RSS 订阅")
+            return
 
-    # 处理特殊情况：健康状态分页回调
-    if data.startswith(f"{CALLBACK_PREFIX}health_page:"):
-        # 健康状态分页回调直接调用健康状态函数
-        await rss_health_command(update, context)
-        return
-
-    # 处理特殊情况：订阅列表页码选择回调
-    if data.startswith(f"{CALLBACK_PREFIX}page_select:"):
-        # 从回调数据中提取当前页码
+    # 处理 PaginationHelper 的回调
+    if data.startswith(f"{CALLBACK_PREFIX}list_page:") or data.startswith(
+            f"{CALLBACK_PREFIX}health_page:"):
         try:
-            current_page = int(data.split(":")[-1])
+            # 解析回调数据
+            parts = data.split(":")
+            if len(parts) >= 2:
+                prefix = parts[0]
+                action = parts[1]
 
-            # 获取当前聊天的订阅列表，计算实际总页数
-            chat_id_str = str(update.effective_chat.id)
-            chat_type = "private" if update.effective_chat.type == "private" else "group"
-            subscriptions = _config["subscriptions"][chat_type].get(
-                chat_id_str, [])
+                # 处理页码选择
+                if action == "select":
+                    # 获取页面标题和解析模式
+                    page_title = context.user_data.get("pagination_title",
+                                                       "列表")
+                    parse_mode = context.user_data.get("pagination_parse_mode",
+                                                       "MARKDOWN")
 
-            # 设置每页显示的订阅数量
-            page_size = 5
-            actual_total_pages = max(1, (len(subscriptions) + page_size - 1) //
-                                     page_size)
+                    # 显示页码选择界面
+                    await PaginationHelper.show_page_selector(
+                        update,
+                        context,
+                        prefix,
+                        title=page_title,
+                        parse_mode=parse_mode)
+                    return
+                elif action.startswith("goto_"):
+                    # 处理页码跳转
+                    try:
+                        page_index = int(action.replace("goto_", ""))
 
-            # 保存到上下文，使用模块特定的键
-            context.user_data["rss_page_index"] = current_page
-            context.user_data["rss_total_pages"] = actual_total_pages
+                        if prefix == f"{CALLBACK_PREFIX}list_page":
+                            # 更新上下文中的页码
+                            context.user_data["rss_page_index"] = page_index
+                            # 调用列表函数
+                            await list_subscriptions(update, context)
+                        elif prefix == f"{CALLBACK_PREFIX}health_page":
+                            # 更新上下文中的页码
+                            context.user_data[
+                                "rss_health_page_index"] = page_index
+                            # 调用健康状态函数
+                            await rss_health_command(update, context)
+                        return
+                    except ValueError:
+                        await callback_query.answer("无效的页码")
+                        return
+                else:
+                    # 常规页面导航
+                    try:
+                        page_index = int(action)
 
-            _module_interface.logger.info(
-                f"页码选择: 当前页={current_page}, 实际总页数={actual_total_pages}")
-
-            # 显示页码选择界面
-            await show_page_selector(update, context)
+                        if prefix == f"{CALLBACK_PREFIX}list_page":
+                            # 更新上下文中的页码
+                            context.user_data["rss_page_index"] = page_index
+                            # 调用列表函数
+                            await list_subscriptions(update, context)
+                        elif prefix == f"{CALLBACK_PREFIX}health_page":
+                            # 更新上下文中的页码
+                            context.user_data[
+                                "rss_health_page_index"] = page_index
+                            # 调用健康状态函数
+                            await rss_health_command(update, context)
+                        return
+                    except ValueError:
+                        await callback_query.answer("无效的页码")
+                        return
+        except Exception as e:
+            _module_interface.logger.error(f"处理分页回调时出错: {e}")
+            await callback_query.answer("处理分页请求时出错")
             return
-        except (ValueError, IndexError) as e:
-            _module_interface.logger.error(f"页码选择错误: {e}")
-            await callback_query.answer("无效的页码数据")
-            return
-
-    # 处理特殊情况：健康状态页码选择回调
-    if data.startswith(f"{CALLBACK_PREFIX}health_page_select:"):
-        # 从回调数据中提取当前页码
-        try:
-            current_page = int(data.split(":")[-1])
-
-            # 获取当前聊天的订阅列表，计算实际总页数
-            chat_id_str = str(update.effective_chat.id)
-            chat_type = "private" if update.effective_chat.type == "private" else "group"
-            subscriptions = _config["subscriptions"][chat_type].get(
-                chat_id_str, [])
-
-            # 设置每页显示的订阅数量
-            page_size = 4  # 健康状态每页显示4个
-            actual_total_pages = max(1, (len(subscriptions) + page_size - 1) //
-                                     page_size)
-
-            # 保存到上下文，使用模块特定的键
-            context.user_data["rss_health_page_index"] = current_page
-            context.user_data["rss_health_total_pages"] = actual_total_pages
-
-            _module_interface.logger.info(
-                f"健康状态页码选择: 当前页={current_page}, 实际总页数={actual_total_pages}")
-
-            # 显示健康状态页码选择界面
-            await show_health_page_selector(update, context)
-            return
-        except (ValueError, IndexError) as e:
-            _module_interface.logger.error(f"健康状态页码选择错误: {e}")
-            await callback_query.answer("无效的页码数据")
-            return
-
-    # 处理特殊情况：订阅列表页码跳转回调
-    if data.startswith(f"{CALLBACK_PREFIX}goto_page:"):
-        # 从回调数据中提取目标页码
-        try:
-            target_page = int(data.split(":")[-1])
-
-            # 获取当前聊天的订阅列表，计算实际总页数
-            chat_id_str = str(update.effective_chat.id)
-            chat_type = "private" if update.effective_chat.type == "private" else "group"
-            subscriptions = _config["subscriptions"][chat_type].get(
-                chat_id_str, [])
-
-            # 设置每页显示的订阅数量
-            page_size = 5
-            actual_total_pages = max(1, (len(subscriptions) + page_size - 1) //
-                                     page_size)
-
-            # 确保目标页码在有效范围内
-            target_page = max(0, min(target_page, actual_total_pages - 1))
-
-            # 保存到上下文，使用模块特定的键
-            context.user_data["rss_page_index"] = target_page
-            context.user_data["rss_total_pages"] = actual_total_pages
-
-            _module_interface.logger.info(
-                f"跳转到页面: {target_page}, 实际总页数={actual_total_pages}")
-
-            # 调用列表函数
-            await list_subscriptions(update, context)
-            return
-        except (ValueError, IndexError) as e:
-            _module_interface.logger.error(f"页码跳转错误: {e}")
-            await callback_query.answer("无效的页码数据")
-            return
-
-    # 处理特殊情况：健康状态页码跳转回调
-    if data.startswith(f"{CALLBACK_PREFIX}health_goto_page:"):
-        # 从回调数据中提取目标页码
-        try:
-            target_page = int(data.split(":")[-1])
-
-            # 获取当前聊天的订阅列表，计算实际总页数
-            chat_id_str = str(update.effective_chat.id)
-            chat_type = "private" if update.effective_chat.type == "private" else "group"
-            subscriptions = _config["subscriptions"][chat_type].get(
-                chat_id_str, [])
-
-            # 设置每页显示的订阅数量
-            page_size = 4  # 健康状态每页显示4个
-            actual_total_pages = max(1, (len(subscriptions) + page_size - 1) //
-                                     page_size)
-
-            # 确保目标页码在有效范围内
-            target_page = max(0, min(target_page, actual_total_pages - 1))
-
-            # 保存到上下文，使用模块特定的键
-            context.user_data["rss_health_page_index"] = target_page
-            context.user_data["rss_health_total_pages"] = actual_total_pages
-
-            _module_interface.logger.info(
-                f"跳转到健康状态页面: {target_page}, 实际总页数={actual_total_pages}")
-
-            # 调用健康状态函数
-            await rss_health_command(update, context)
-            return
-        except (ValueError, IndexError) as e:
-            _module_interface.logger.error(f"健康状态页码跳转错误: {e}")
-            await callback_query.answer("无效的页码数据")
-            return
-
-    # 处理特殊情况：noop 回调
-    if data == "noop":
-        await callback_query.answer()
-        return
 
     # 提取操作
     parts = data.split('_')
@@ -1498,12 +1178,8 @@ async def handle_callback_query(update: Update,
     # 处理不同的操作
 
     try:
-        # 先回应回调查询，避免用户界面卡住
-        await callback_query.answer()
-
         if action == "main":
             # 返回主菜单
-            # 编辑当前消息而不是发送新消息
             list_callback = f"{CALLBACK_PREFIX}list"
             add_callback = f"{CALLBACK_PREFIX}add"
             health_callback = f"{CALLBACK_PREFIX}health"
@@ -1530,7 +1206,7 @@ async def handle_callback_query(update: Update,
             await rss_health_command(update, context)
         elif action == "cancel":
             # 取消当前操作
-            session_manager = context.bot_data.get("session_manager")
+            session_manager = _module_interface.session_manager
 
             if session_manager:
                 # 获取当前步骤
@@ -1539,10 +1215,7 @@ async def handle_callback_query(update: Update,
                                                  None,
                                                  chat_id=chat_id)
 
-                # 清除会话状态
-                await session_manager.delete(user_id,
-                                             "rss_active",
-                                             chat_id=chat_id)
+                # 删除特定的会话键
                 await session_manager.delete(user_id,
                                              "rss_step",
                                              chat_id=chat_id)
@@ -1556,6 +1229,11 @@ async def handle_callback_query(update: Update,
                                              "rss_subscriptions",
                                              chat_id=chat_id)
 
+                # 释放会话
+                await session_manager.release_session(user_id,
+                                                      module_name=MODULE_NAME,
+                                                      chat_id=chat_id)
+
                 # 根据当前步骤决定返回到哪个页面
                 if step == SESSION_REMOVE:
                     # 如果是从删除页面取消，返回列表页面
@@ -1568,24 +1246,27 @@ async def handle_callback_query(update: Update,
                 await rss_command(update, context)
         elif action == "use_default_title":
             # 使用默认标题
-            await handle_add_title(update, context)
+            session_manager = _module_interface.session_manager
+            await handle_add_title(update,
+                                   context,
+                                   session_manager=session_manager)
         elif action == "remove":
             # 启动删除订阅会话
-            session_manager = context.bot_data.get("session_manager")
+            session_manager = _module_interface.session_manager
 
-            if not session_manager:
-                await callback_query.answer("系统错误，请联系管理员")
+            # 检查是否有其他模块的活跃会话
+            if await session_manager.has_other_module_session(user_id,
+                                                              MODULE_NAME,
+                                                              chat_id=chat_id):
+                await callback_query.answer("⚠️ 请先完成或取消其他活跃会话")
                 return
 
             # 设置会话状态，等待用户输入要删除的序号
             await session_manager.set(user_id,
-                                      "rss_active",
-                                      True,
-                                      chat_id=chat_id)
-            await session_manager.set(user_id,
                                       "rss_step",
                                       SESSION_REMOVE,
-                                      chat_id=chat_id)
+                                      chat_id=chat_id,
+                                      module_name=MODULE_NAME)
 
             # 获取当前聊天的订阅列表
             chat_id_str = str(update.effective_chat.id)
@@ -1597,9 +1278,10 @@ async def handle_callback_query(update: Update,
             await session_manager.set(user_id,
                                       "rss_subscriptions",
                                       subscriptions,
-                                      chat_id=chat_id)
+                                      chat_id=chat_id,
+                                      module_name=MODULE_NAME)
 
-            # 创建返回按钮（使用cancel操作以清理会话状态）
+            # 创建返回按钮
             keyboard = [[
                 InlineKeyboardButton("⇠ Back",
                                      callback_data=f"{CALLBACK_PREFIX}cancel")
@@ -1633,7 +1315,8 @@ async def handle_callback_query(update: Update,
 
 async def handle_remove_input(update: Update,
                               context: ContextTypes.DEFAULT_TYPE,
-                              input_text: str):
+                              input_text: str,
+                              session_manager=None):
     """处理用户输入的删除序号"""
     message = update.message
     user_id = update.effective_user.id
@@ -1641,26 +1324,22 @@ async def handle_remove_input(update: Update,
     chat_id_str = str(update.effective_chat.id)
     chat_type = "private" if update.effective_chat.type == "private" else "group"
 
-    # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
-    if not session_manager:
-        await message.reply_text("系统错误，请联系管理员")
-        return
-
     # 获取保存的订阅列表
     subscriptions = await session_manager.get(user_id,
                                               "rss_subscriptions",
                                               None,
                                               chat_id=chat_id)
     if not subscriptions:
-        await message.reply_text("⚠️ 会话已过期或没有订阅，请重新开始")
+        await message.reply_text("⚠️ 会话已过期或没有订阅")
 
         # 清除会话状态
-        await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
         await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
         await session_manager.delete(user_id,
                                      "rss_subscriptions",
                                      chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              module_name=MODULE_NAME,
+                                              chat_id=chat_id)
         return
 
     # 解析输入的序号
@@ -1730,9 +1409,11 @@ async def handle_remove_input(update: Update,
     save_config()
 
     # 清除会话状态
-    await session_manager.delete(user_id, "rss_active", chat_id=chat_id)
     await session_manager.delete(user_id, "rss_step", chat_id=chat_id)
     await session_manager.delete(user_id, "rss_subscriptions", chat_id=chat_id)
+    await session_manager.release_session(user_id,
+                                          module_name=MODULE_NAME,
+                                          chat_id=chat_id)
 
     # 创建返回按钮
     keyboard = [[
@@ -1754,50 +1435,18 @@ async def handle_remove_input(update: Update,
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户消息（用于会话流程）"""
-    # 检查是否有活动会话
+
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _module_interface.session_manager
 
     if not session_manager:
         return
 
     # 检查是否是 RSS 模块的活动会话
-    is_active = await session_manager.get(user_id,
-                                          "rss_active",
-                                          False,
-                                          chat_id=chat_id)
-    if not is_active:
+    if not await session_manager.is_session_owned_by(
+            user_id, MODULE_NAME, chat_id=chat_id):
         return
-
-    # 在群组中检查用户是否为管理员
-    if update.effective_chat.type != "private":
-        try:
-            # 检查是否是超级管理员
-            if context.bot_data.get("config_manager").is_admin(user_id):
-                pass  # 超级管理员可以使用
-            else:
-                # 检查是否是群组管理员
-                chat_member = await context.bot.get_chat_member(
-                    chat_id, user_id)
-                is_admin = chat_member.status in ["creator", "administrator"]
-
-                if not is_admin:
-                    await update.message.reply_text("⚠️ 只有管理员可以管理 RSS 订阅")
-                    # 清除会话状态
-                    await session_manager.delete(user_id,
-                                                 "rss_active",
-                                                 chat_id=chat_id)
-                    await session_manager.delete(user_id,
-                                                 "rss_step",
-                                                 chat_id=chat_id)
-                    return
-        except Exception as e:
-            # 使用全局模块接口记录日志
-            if _module_interface:
-                _module_interface.logger.error(f"检查群组权限时出错: {e}")
-            await update.message.reply_text("⚠️ 检查权限时出错，请稍后再试")
-            return
 
     # 获取当前步骤
     step = await session_manager.get(user_id,
@@ -1809,15 +1458,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == SESSION_ADD_URL:
         # 处理 URL 输入
         url = update.message.text.strip()
-        await handle_add_url(update, context, url)
+        await handle_add_url(update, context, url, session_manager)
     elif step == SESSION_ADD_TITLE:
         # 处理标题输入
         title = update.message.text.strip()
-        await handle_add_title(update, context, title)
+        await handle_add_title(update, context, title, session_manager)
     elif step == SESSION_REMOVE:
         # 处理删除序号输入
         input_text = update.message.text.strip()
-        await handle_remove_input(update, context, input_text)
+        await handle_remove_input(update, context, input_text, session_manager)
 
 
 async def setup(interface):
@@ -1855,13 +1504,13 @@ async def setup(interface):
     await interface.register_callback_handler(handle_callback_query,
                                               pattern=f"^{CALLBACK_PREFIX}",
                                               admin_level=False)
-    interface.logger.info("已注册回调查询处理器")
+    interface.logger.debug("已注册回调查询处理器")
 
     # 注册消息处理器（用于会话流程）
-    # 使用 group=5 确保不会干扰其他模块的会话处理
-    message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND,
-                                     handle_message)
-    await interface.register_handler(message_handler, group=5)
+    message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^/'),
+        handle_message)
+    await interface.register_handler(message_handler, group=6)
 
     # 创建启动任务，先初始化再启动检查
     await initialize_entry_ids(interface)
@@ -1873,8 +1522,6 @@ async def setup(interface):
 async def cleanup(interface):
     """模块清理"""
     global _check_task
-
-    interface.logger.info(f"正在清理模块 {MODULE_NAME}")
 
     # 取消检查任务
     if _check_task and not _check_task.done():
