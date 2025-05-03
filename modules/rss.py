@@ -195,7 +195,7 @@ async def list_subscriptions(update: Update,
     def format_subscription(item):
         safe_title = TextFormatter.escape_html(item["title"])
         safe_url = TextFormatter.escape_html(item["url"])
-        return f"{item['index']}. <b>{safe_title}</b>\n   <code>{safe_url}</code>\n"
+        return f"{item['index']}. <b>{safe_title}</b>\n   <code>{safe_url}</code>"
 
     # 创建返回按钮
     back_button = InlineKeyboardButton("⇠ Back",
@@ -316,7 +316,7 @@ async def rss_health_command(update: Update,
                 f"  • 状态: {'正常' if item['is_healthy'] else '异常'}\n"
                 f"  • 成功率: {item['success_rate']}\n"
                 f"  • 最后成功: {item['last_success']}\n"
-                f"  • 检查间隔: {item['interval']:.0f} 秒\n")
+                f"  • 检查间隔: {item['interval']:.0f} 秒")
 
     # 创建返回按钮
     back_button = InlineKeyboardButton("⇠ Back",
