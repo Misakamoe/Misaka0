@@ -49,8 +49,7 @@ def load_config():
                 EXCHANGERATE_API_KEY = config.get("api_key", "")
                 return config
         except Exception as e:
-            if _module_interface:
-                _module_interface.logger.error(f"加载配置文件失败: {e}")
+            _module_interface.logger.error(f"加载配置文件失败: {e}")
 
     # 创建默认配置
     default_config = {"api_key": "", "update_interval": 3600}
@@ -61,8 +60,7 @@ def load_config():
         with open(_config_file, 'w', encoding='utf-8') as f:
             json.dump(default_config, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        if _module_interface:
-            _module_interface.logger.error(f"保存默认配置失败: {e}")
+        _module_interface.logger.error(f"保存默认配置失败: {e}")
 
     return default_config
 
@@ -82,8 +80,7 @@ def save_config(config):
             json.dump(config, f, indent=2, ensure_ascii=False)
         return True
     except Exception as e:
-        if _module_interface:
-            _module_interface.logger.error(f"保存配置失败: {e}")
+        _module_interface.logger.error(f"保存配置失败: {e}")
         return False
 
 
@@ -97,8 +94,7 @@ async def update_exchange_rates():
             "update_interval"] and _state["data_loaded"]:
         return
 
-    if _module_interface:
-        _module_interface.logger.debug("正在更新汇率数据...")
+    _module_interface.logger.debug("正在更新汇率数据...")
 
     try:
         # 更新法币汇率
@@ -113,23 +109,18 @@ async def update_exchange_rates():
         # 如果两种汇率数据都有内容，标记为已加载
         if _state["fiat_rates"] and _state["crypto_rates"]:
             _state["data_loaded"] = True
-            if _module_interface:
-                _module_interface.logger.debug("汇率数据初始加载完成")
+            _module_interface.logger.debug("汇率数据初始加载完成")
 
         # 保存状态到框架的状态管理中
-        if _module_interface:
-            _module_interface.save_state(_state)
+        _module_interface.save_state(_state)
     except Exception as e:
-        if _module_interface:
-            _module_interface.logger.error(f"更新汇率数据失败: {e}")
+        _module_interface.logger.error(f"更新汇率数据失败: {e}")
 
 
 async def update_fiat_rates():
     """更新法币汇率"""
     if not EXCHANGERATE_API_KEY:
-        if _module_interface:
-            _module_interface.logger.warning(
-                "未设置 ExchangeRate API 密钥，无法更新法币汇率")
+        _module_interface.logger.warning("未设置 ExchangeRate API 密钥，无法更新法币汇率")
         raise ValueError("未设置 API 密钥")
 
     # 使用美元作为基准货币
@@ -142,19 +133,15 @@ async def update_fiat_rates():
                 data = await response.json()
                 if data.get("result") == "success":
                     _state["fiat_rates"] = data.get("conversion_rates", {})
-                    if _module_interface:
-                        _module_interface.logger.debug(
-                            f"已更新 {len(_state['fiat_rates'])} 种法币汇率")
+                    _module_interface.logger.debug(
+                        f"已更新 {len(_state['fiat_rates'])} 种法币汇率")
                 else:
                     error_type = data.get("error_type", "未知错误")
-                    if _module_interface:
-                        _module_interface.logger.error(
-                            f"获取法币汇率失败: {error_type}")
+                    _module_interface.logger.error(f"获取法币汇率失败: {error_type}")
                     raise ValueError(f"错误: {error_type}")
             else:
-                if _module_interface:
-                    _module_interface.logger.error(
-                        f"获取法币汇率请求失败: {response.status}")
+                _module_interface.logger.error(
+                    f"获取法币汇率请求失败: {response.status}")
                 raise ValueError(f"状态码 {response.status}")
 
 
@@ -175,12 +162,10 @@ async def update_crypto_rates():
             if response.status == 200:
                 data = await response.json()
                 _state["crypto_rates"] = data
-                if _module_interface:
-                    _module_interface.logger.debug(f"已更新 {len(data)} 种虚拟货币汇率")
+                _module_interface.logger.debug(f"已更新 {len(data)} 种虚拟货币汇率")
             else:
-                if _module_interface:
-                    _module_interface.logger.error(
-                        f"获取虚拟货币汇率请求失败: {response.status}")
+                _module_interface.logger.error(
+                    f"获取虚拟货币汇率请求失败: {response.status}")
 
 
 async def convert_currency(amount, from_currency, to_currency):
@@ -473,11 +458,9 @@ async def periodic_update():
             try:
                 await update_exchange_rates()
             except Exception as e:
-                if _module_interface:
-                    _module_interface.logger.error(f"定期更新汇率失败: {e}")
+                _module_interface.logger.error(f"定期更新汇率失败: {e}")
     except asyncio.CancelledError:
-        if _module_interface:
-            _module_interface.logger.debug("汇率更新任务已取消")
+        _module_interface.logger.debug("汇率更新任务已取消")
         raise
 
 
@@ -686,8 +669,7 @@ async def handle_rate_input(update: Update,
                 _state["update_interval"] = interval
 
                 # 保存状态到框架的状态管理中
-                if _module_interface:
-                    _module_interface.save_state(_state)
+                _module_interface.save_state(_state)
 
                 # 重启定期更新任务
                 global _update_task

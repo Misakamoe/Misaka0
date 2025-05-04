@@ -112,8 +112,7 @@ def _load_aliases() -> Dict[str, Any]:
                 data["permissions"] = {"alias": "super_admin"}
             return data
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"加载别名数据失败: {e}")
+        _interface.logger.error(f"加载别名数据失败: {e}")
         return _state  # 返回默认状态
 
 
@@ -137,11 +136,9 @@ async def _save_aliases():
                 json.dump(save_state, f, ensure_ascii=False, indent=2)
 
             # 同时保存到框架的状态管理中
-            if _interface:
-                _interface.save_state(_state)
+            _interface.save_state(_state)
         except Exception as e:
-            if _interface:
-                _interface.logger.error(f"保存别名数据失败: {e}")
+            _interface.logger.error(f"保存别名数据失败: {e}")
 
 
 def _check_alias_cycle(cmd: str,

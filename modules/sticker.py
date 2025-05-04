@@ -58,8 +58,7 @@ def _store_sticker_id(file_id):
     _id_map_modified = True
 
     # 创建保存配置的异步任务
-    if _interface:
-        asyncio.create_task(_save_config())
+    asyncio.create_task(_save_config())
     return short_id
 
 
@@ -120,7 +119,7 @@ async def cleanup(interface):
     _interface = None
 
     # 记录模块卸载信息
-    interface.logger.debug(f"模块 {MODULE_NAME} 已清理完成")
+    interface.logger.info(f"模块 {MODULE_NAME} 已清理完成")
 
 
 # 配置管理函数
@@ -138,11 +137,9 @@ def _load_config():
             user_sticker_sets = data.get("sticker_sets", {})
             _sticker_id_map = data.get("sticker_id_map", {})
 
-        if _interface:
-            _interface.logger.debug(f"贴纸配置已从 {CONFIG_FILE} 加载")
+        _interface.logger.debug(f"贴纸配置已从 {CONFIG_FILE} 加载")
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"加载贴纸配置失败: {str(e)}")
+        _interface.logger.error(f"加载贴纸配置失败: {str(e)}")
 
 
 async def _save_config():
@@ -172,14 +169,12 @@ async def _save_config():
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
             # 同时保存到框架的状态管理中
-            if _interface:
-                _interface.save_state({
-                    "configs": user_configs,
-                    "sticker_sets": user_sticker_sets
-                })
+            _interface.save_state({
+                "configs": user_configs,
+                "sticker_sets": user_sticker_sets
+            })
         except Exception as e:
-            if _interface:
-                _interface.logger.error(f"保存贴纸配置失败: {str(e)}")
+            _interface.logger.error(f"保存贴纸配置失败: {str(e)}")
 
 
 # 设置菜单函数
@@ -261,8 +256,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      parse_mode="MARKDOWN",
                                      reply_markup=reply_markup)
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"显示主菜单时出错: {str(e)}")
+        _interface.logger.error(f"显示主菜单时出错: {str(e)}")
 
 
 async def show_format_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,8 +301,7 @@ async def show_format_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       parse_mode="MARKDOWN",
                                       reply_markup=reply_markup)
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"显示格式菜单时出错: {str(e)}")
+        _interface.logger.error(f"显示格式菜单时出错: {str(e)}")
 
 
 async def show_quality_menu(update: Update,
@@ -360,8 +353,7 @@ async def show_quality_menu(update: Update,
                                       parse_mode="MARKDOWN",
                                       reply_markup=reply_markup)
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"显示质量菜单时出错: {str(e)}")
+        _interface.logger.error(f"显示质量菜单时出错: {str(e)}")
 
 
 # 贴纸处理和转换函数
@@ -437,8 +429,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      reply_markup=reply_markup)
     except Exception as e:
         # 错误处理
-        if _interface:
-            _interface.logger.error(f"处理贴纸时出错: {str(e)}")
+        _interface.logger.error(f"处理贴纸时出错: {str(e)}")
 
         # 如果显示按钮失败但自动下载模式开启，则直接下载
         if config["auto_download"]:
@@ -513,8 +504,7 @@ async def download_and_send_sticker_to_chat(bot, chat_id, sticker, config):
 
         return True
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"下载和发送贴纸失败: {str(e)}")
+        _interface.logger.error(f"下载和发送贴纸失败: {str(e)}")
         return False
     finally:
         # 清理临时文件
@@ -525,8 +515,7 @@ async def download_and_send_sticker_to_chat(bot, chat_id, sticker, config):
                     output_path) and output_path != tmp_path:
                 os.unlink(output_path)
         except Exception as e:
-            if _interface:
-                _interface.logger.debug(f"清理临时文件失败: {str(e)}")
+            _interface.logger.debug(f"清理临时文件失败: {str(e)}")
 
 
 async def convert_tgs_to_gif(tgs_path, quality="high"):
@@ -611,8 +600,7 @@ async def convert_webp_to_format(webp_path, format_str="PNG"):
         img.close()  # 确保关闭图像
         return output_path
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"转换图像失败: {str(e)}")
+        _interface.logger.error(f"转换图像失败: {str(e)}")
         return None
 
 
@@ -674,8 +662,7 @@ async def create_user_sticker_set(update, context):
 
                     photo_path = png_path  # 更新路径
                 except Exception as e:
-                    if _interface:
-                        _interface.logger.error(f"处理用户头像失败: {str(e)}")
+                    _interface.logger.error(f"处理用户头像失败: {str(e)}")
             else:
                 # 没有用户头像，创建默认图片
                 try:
@@ -705,8 +692,7 @@ async def create_user_sticker_set(update, context):
                     img.save(photo_path)
                     img.close()
                 except Exception as e:
-                    if _interface:
-                        _interface.logger.error(f"创建默认贴纸图片失败: {str(e)}")
+                    _interface.logger.error(f"创建默认贴纸图片失败: {str(e)}")
                     return False, None
 
             # 确保图片文件存在
@@ -744,12 +730,10 @@ async def create_user_sticker_set(update, context):
                         png_path):
                     os.unlink(png_path)
             except Exception as e:
-                if _interface:
-                    _interface.logger.debug(f"清理临时文件失败: {str(e)}")
+                _interface.logger.debug(f"清理临时文件失败: {str(e)}")
 
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"创建贴纸包失败: {str(e)}")
+        _interface.logger.error(f"创建贴纸包失败: {str(e)}")
         return False, None
 
 
@@ -902,8 +886,7 @@ async def handle_callback_query(update, context):
         await query.answer()
 
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"处理回调查询时出错: {str(e)}")
+        _interface.logger.error(f"处理回调查询时出错: {str(e)}")
         try:
             await query.message.edit_text("❌ 处理操作时出错，请重试")
         except Exception:
@@ -1013,8 +996,7 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
                     try:
                         os.unlink(sticker_path)
                     except Exception as e:
-                        if _interface:
-                            _interface.logger.warning(f"清理临时文件失败: {str(e)}")
+                        _interface.logger.warning(f"清理临时文件失败: {str(e)}")
 
         else:
             try:
@@ -1057,10 +1039,8 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
                     try:
                         os.unlink(sticker_path)
                     except Exception as e:
-                        if _interface:
-                            _interface.logger.warning(f"清理临时文件失败: {str(e)}")
+                        _interface.logger.warning(f"清理临时文件失败: {str(e)}")
 
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"添加贴纸到贴纸包失败: {str(e)}")
+        _interface.logger.error(f"添加贴纸到贴纸包失败: {str(e)}")
         return False, f"❌ 添加贴纸时出错: {str(e)}"

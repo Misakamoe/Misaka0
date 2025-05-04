@@ -1369,4 +1369,4 @@ async def cleanup(interface):
     """模块清理，在卸载模块前调用"""
     # 保存状态到框架
     interface.save_state(_state)
-    interface.logger.debug(f"模块 {MODULE_NAME} 状态已保存")
+    interface.logger.info(f"模块 {MODULE_NAME} 已清理")

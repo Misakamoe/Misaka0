@@ -3194,8 +3194,7 @@ def save_config() -> None:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config_to_save, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"保存 AI 配置失败: {e}")
+        _interface.logger.error(f"保存 AI 配置失败: {e}")
 
 
 def load_config() -> None:
@@ -3251,23 +3250,18 @@ def load_config() -> None:
             if "conversation_timeout" in config:
                 _state["conversation_timeout"] = config["conversation_timeout"]
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"加载 AI 配置失败: {e}")
+        _interface.logger.error(f"加载 AI 配置失败: {e}")
 
 
 def save_contexts() -> None:
     """保存所有用户的对话上下文"""
     try:
-        # 使用框架的状态管理保存对话上下文
-        if _interface:
-            # 保存对话上下文到状态
-            _interface.save_state({"conversations": _state["conversations"]})
+        _interface.save_state({"conversations": _state["conversations"]})
 
         # 更新保存时间
         _state["last_save_time"] = time.time()
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"保存对话上下文失败: {e}")
+        _interface.logger.error(f"保存对话上下文失败: {e}")
 
 
 def load_contexts() -> None:
@@ -3275,14 +3269,10 @@ def load_contexts() -> None:
     global _state
 
     try:
-        # 使用框架的状态管理加载对话上下文
-        if _interface:
-            # 加载对话上下文
-            state = _interface.load_state(default={"conversations": {}})
-            _state["conversations"] = state.get("conversations", {})
+        state = _interface.load_state(default={"conversations": {}})
+        _state["conversations"] = state.get("conversations", {})
     except Exception as e:
-        if _interface:
-            _interface.logger.error(f"加载对话上下文失败: {e}")
+        _interface.logger.error(f"加载对话上下文失败: {e}")
 
 
 # 模块状态管理函数
