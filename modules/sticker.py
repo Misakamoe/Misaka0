@@ -120,7 +120,7 @@ async def cleanup(interface):
     _interface = None
 
     # 记录模块卸载信息
-    interface.logger.info(f"模块 {MODULE_NAME} 已清理完成")
+    interface.logger.debug(f"模块 {MODULE_NAME} 已清理完成")
 
 
 # 配置管理函数
@@ -139,7 +139,7 @@ def _load_config():
             _sticker_id_map = data.get("sticker_id_map", {})
 
         if _interface:
-            _interface.logger.info(f"贴纸配置已从 {CONFIG_FILE} 加载")
+            _interface.logger.debug(f"贴纸配置已从 {CONFIG_FILE} 加载")
     except Exception as e:
         if _interface:
             _interface.logger.error(f"加载贴纸配置失败: {str(e)}")
@@ -526,7 +526,7 @@ async def download_and_send_sticker_to_chat(bot, chat_id, sticker, config):
                 os.unlink(output_path)
         except Exception as e:
             if _interface:
-                _interface.logger.warning(f"清理临时文件失败: {str(e)}")
+                _interface.logger.debug(f"清理临时文件失败: {str(e)}")
 
 
 async def convert_tgs_to_gif(tgs_path, quality="high"):
@@ -745,7 +745,7 @@ async def create_user_sticker_set(update, context):
                     os.unlink(png_path)
             except Exception as e:
                 if _interface:
-                    _interface.logger.warning(f"清理临时文件失败: {str(e)}")
+                    _interface.logger.debug(f"清理临时文件失败: {str(e)}")
 
     except Exception as e:
         if _interface:

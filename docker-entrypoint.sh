@@ -40,7 +40,7 @@ if admin_ids and admin_ids != '123456789':
 
 # 写回配置文件
 with open('config/config.json', 'w') as f:
-    json.dump(config, f, indent=4)
+    json.dump(config, f, indent=2)
 "
 fi
 

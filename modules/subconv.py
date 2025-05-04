@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes, MessageHandler, filters
 
 # 模块元数据
 MODULE_NAME = "subconv"
-MODULE_VERSION = "1.0.0"
+MODULE_VERSION = "1.1.0"
 MODULE_DESCRIPTION = "基于 subconverter 的订阅转换"
 MODULE_COMMANDS = ["subconv"]
 MODULE_CHAT_TYPES = ["private"]
@@ -21,8 +21,7 @@ CONFIG_FILE = "config/subconv.json"
 # 按钮回调前缀
 CALLBACK_PREFIX = "subconv_"
 
-# 会话状态常量 - 使用模块名前缀避免与其他模块冲突
-SESSION_ACTIVE = "subconv_active"  # 标记会话活跃状态
+# 会话状态常量
 SESSION_WAITING_BACKEND = "subconv_waiting_backend"
 SESSION_WAITING_CONFIG = "subconv_waiting_config"
 SESSION_WAITING_EXCLUDE = "subconv_waiting_exclude"
@@ -32,7 +31,7 @@ SESSION_WAITING_GENERATE_URL = "subconv_waiting_generate_url"  # 等待生成链
 
 # 默认配置
 DEFAULT_CONFIG = {
-    "default_backend_url": "https://suburl.kaze.icu",
+    "default_backend_url": "http://127.0.0.1:25500",
     "default_config_url":
     "https://gist.githubusercontent.com/Misakamoe/f9eb77a91fd1a582cedf13e362123cf6/raw/Basic.ini",
     "default_target": "clash",
@@ -120,7 +119,7 @@ def load_config():
                     if key not in loaded_config:
                         loaded_config[key] = DEFAULT_CONFIG[key]
                 _config = loaded_config
-                _module_interface.logger.info(f"已加载配置文件: {CONFIG_FILE}")
+                _module_interface.logger.debug(f"已加载配置文件: {CONFIG_FILE}")
         else:
             # 配置文件不存在，创建默认配置
             save_config()
@@ -135,8 +134,7 @@ def save_config():
         # 确保配置目录存在
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(_config, f, ensure_ascii=False, indent=4)
-        _module_interface.logger.debug(f"已保存配置文件: {CONFIG_FILE}")
+            json.dump(_config, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
         _module_interface.logger.error(f"保存配置文件失败: {e}")
@@ -238,7 +236,6 @@ def generate_subscription_link(backend_url,
     if filename:
         params["filename"] = filename
 
-    # 添加新增的参数
     if tfo is not None:
         params["tfo"] = "true" if tfo else "false"
 
@@ -275,17 +272,6 @@ async def subconv_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """订阅转换命令处理函数"""
     # 获取消息对象（可能是新消息或编辑的消息）
     message = update.message or update.edited_message
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
-    if not session_manager:
-        await message.reply_text("系统错误，请联系管理员")
-        return
-
-    # 获取用户配置
-    user_config = get_user_config(user_id)
 
     # 创建主菜单按钮
     keyboard = [[
@@ -298,10 +284,11 @@ async def subconv_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 发送欢迎消息
     await message.reply_text(
-        "欢迎使用订阅转换工具\n\n"
-        "此工具基于 subconverter 项目，可以将各种格式的代理订阅链接转换为其他格式\n\n"
+        "🔗 欢迎使用订阅转换工具\n\n"
+        "此工具基于 [subconverter](https://github.com/tindy2013/subconverter) 项目，可以将各种格式的代理订阅链接转换为其他格式\n\n"
         "请选择操作：",
         reply_markup=reply_markup,
+        parse_mode="Markdown",
         disable_web_page_preview=True)
 
 
@@ -315,16 +302,13 @@ async def handle_callback_query(update: Update,
     chat_id = update.effective_chat.id
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _module_interface.session_manager
     if not session_manager:
         await query.answer("系统错误，请联系管理员")
         return
 
     # 获取用户配置
     user_config = get_user_config(user_id)
-
-    # 确认回调查询
-    await query.answer()
 
     # 处理不同的回调数据
     if data == f"{CALLBACK_PREFIX}generate":
@@ -475,16 +459,12 @@ async def handle_callback_query(update: Update,
                                                        list=list,
                                                        new_name=new_name)
 
-        # 通知用户正在下载
-        await query.answer("正在下载配置文件...")
-
         # 发送一条新的下载中消息，保留原始消息
         loading_message = await context.bot.send_message(
             chat_id=chat_id, text="⏳ 正在下载配置文件，请稍候...")
 
         try:
             # 使用curl下载配置文件，这样可以避免一些服务器的限制
-            _module_interface.logger.debug("正在请求订阅转换")
 
             # 使用subprocess运行curl命令
             curl_command = [
@@ -528,23 +508,10 @@ async def handle_callback_query(update: Update,
                         ]]))
                     return
 
-                # 检查是否包含错误信息
-                if "<title>403 Forbidden</title>" in config_content:
-                    _module_interface.logger.error("下载配置文件失败: 403 Forbidden")
-                    await loading_message.edit_text(
-                        "❌ 下载配置文件失败: 403 Forbidden\n\n"
-                        "请检查订阅链接是否有效",
-                        reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton(
-                                "⇠ Back",
-                                callback_data=
-                                f"{CALLBACK_PREFIX}back_to_generate")
-                        ]]))
-                    return
-
             except subprocess.CalledProcessError as e:
                 # 记录错误但不包含敏感信息
-                _module_interface.logger.error(f"下载配置文件失败: {type(e).__name__}")
+                _module_interface.logger.error(
+                    f"下载文件失败: curl命令执行错误 - {type(e).__name__}")
                 await loading_message.edit_text(
                     f"❌ 下载配置文件失败: curl 命令执行错误\n\n"
                     "请检查订阅链接是否有效",
@@ -569,17 +536,17 @@ async def handle_callback_query(update: Update,
             else:
                 file_name = f"config.{file_ext}"
 
-            # 编辑下载中消息并发送文件
-            await loading_message.delete()  # 删除加载消息
-
-            # 发送文件，不带按钮
+            # 发送文件并删除加载消息
             await context.bot.send_document(
                 chat_id=chat_id,
                 document=InputFile(BytesIO(config_content.encode('utf-8')),
                                    filename=file_name))
+            await loading_message.delete()
+
         except Exception as e:
             # 处理错误，不记录敏感信息
-            _module_interface.logger.error(f"下载配置文件失败: {type(e).__name__}")
+            _module_interface.logger.error(
+                f"下载文件失败: 处理文件时出错 - {type(e).__name__}")
             try:
                 await loading_message.edit_text(
                     "❌ 下载配置文件失败\n\n"
@@ -602,116 +569,130 @@ async def handle_callback_query(update: Update,
                     ]]))
 
     elif data == f"{CALLBACK_PREFIX}set_backend":
+        # 检查是否有其他模块的活跃会话
+        if await session_manager.has_other_module_session(user_id,
+                                                          MODULE_NAME,
+                                                          chat_id=chat_id):
+            await query.answer("⚠️ 请先完成或取消其他活跃会话")
+            return
+
         # 设置后端地址
         await query.edit_message_text(
             "请发送 subconverter 后端地址：\n\n"
-            "例如：http://127.0.0.1:25500\n\n"
-            "发送 /cancel 取消操作",
+            "例如：http://127.0.0.1:25500",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
-        # 设置会话活跃状态和步骤
-        await session_manager.set(user_id,
-                                  SESSION_ACTIVE,
-                                  True,
-                                  chat_id=chat_id)
+        # 设置会话步骤
         await session_manager.set(user_id,
                                   "subconv_step",
                                   SESSION_WAITING_BACKEND,
-                                  chat_id=chat_id)
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
 
     elif data == f"{CALLBACK_PREFIX}set_config":
+        # 检查是否有其他模块的活跃会话
+        if await session_manager.has_other_module_session(user_id,
+                                                          MODULE_NAME,
+                                                          chat_id=chat_id):
+            await query.answer("⚠️ 请先完成或取消其他活跃会话")
+            return
+
         # 设置配置文件链接
         await query.edit_message_text(
             "请发送配置文件链接：\n\n"
-            "例如：https://example.com/config.ini\n\n"
-            "发送 /cancel 取消操作",
+            "例如：https://example.com/config.ini",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
-        # 设置会话活跃状态和步骤
-        await session_manager.set(user_id,
-                                  SESSION_ACTIVE,
-                                  True,
-                                  chat_id=chat_id)
+        # 设置会话步骤
         await session_manager.set(user_id,
                                   "subconv_step",
                                   SESSION_WAITING_CONFIG,
-                                  chat_id=chat_id)
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
 
     elif data == f"{CALLBACK_PREFIX}set_exclude":
+        # 检查是否有其他模块的活跃会话
+        if await session_manager.has_other_module_session(user_id,
+                                                          MODULE_NAME,
+                                                          chat_id=chat_id):
+            await query.answer("⚠️ 请先完成或取消其他活跃会话")
+            return
+
         # 设置排除节点
         await query.edit_message_text(
             "请发送要排除的节点关键词：\n\n"
             "支持正则表达式，多个关键词用 | 分隔\n"
-            "例如：香港|台湾|美国\n\n"
-            "发送 /cancel 取消操作",
+            "例如：香港|台湾|美国",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
-        # 设置会话活跃状态和步骤
-        await session_manager.set(user_id,
-                                  SESSION_ACTIVE,
-                                  True,
-                                  chat_id=chat_id)
+        # 设置会话步骤
         await session_manager.set(user_id,
                                   "subconv_step",
                                   SESSION_WAITING_EXCLUDE,
-                                  chat_id=chat_id)
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
 
     elif data == f"{CALLBACK_PREFIX}set_include":
+        # 检查是否有其他模块的活跃会话
+        if await session_manager.has_other_module_session(user_id,
+                                                          MODULE_NAME,
+                                                          chat_id=chat_id):
+            await query.answer("⚠️ 请先完成或取消其他活跃会话")
+            return
+
         # 设置包含节点
         await query.edit_message_text(
             "请发送要包含的节点关键词：\n\n"
             "支持正则表达式，多个关键词用 | 分隔\n"
-            "例如：香港|台湾|美国\n\n"
-            "发送 /cancel 取消操作",
+            "例如：香港|台湾|美国",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
-        # 设置会话活跃状态和步骤
-        await session_manager.set(user_id,
-                                  SESSION_ACTIVE,
-                                  True,
-                                  chat_id=chat_id)
+        # 设置会话步骤
         await session_manager.set(user_id,
                                   "subconv_step",
                                   SESSION_WAITING_INCLUDE,
-                                  chat_id=chat_id)
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
 
     elif data == f"{CALLBACK_PREFIX}set_filename":
+        # 检查是否有其他模块的活跃会话
+        if await session_manager.has_other_module_session(user_id,
+                                                          MODULE_NAME,
+                                                          chat_id=chat_id):
+            await query.answer("⚠️ 请先完成或取消其他活跃会话")
+            return
+
         # 设置文件名
         await query.edit_message_text(
             "请发送订阅文件名：\n\n"
-            "例如：my_subscription\n\n"
-            "发送 /cancel 取消操作",
+            "例如：my_subscription",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
-        # 设置会话活跃状态和步骤
-        await session_manager.set(user_id,
-                                  SESSION_ACTIVE,
-                                  True,
-                                  chat_id=chat_id)
+        # 设置会话步骤
         await session_manager.set(user_id,
                                   "subconv_step",
                                   SESSION_WAITING_FILENAME,
-                                  chat_id=chat_id)
+                                  chat_id=chat_id,
+                                  module_name=MODULE_NAME)
 
     elif data == f"{CALLBACK_PREFIX}back_to_generate":
         # 返回生成菜单，清除会话状态
         await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
 
         # 清除所有临时URL会话状态
         try:
@@ -726,14 +707,20 @@ async def handle_callback_query(update: Update,
             for key in temp_url_keys:
                 await session_manager.delete(user_id, key, chat_id=chat_id)
         except Exception as e:
-            _module_interface.logger.error(f"清除临时URL会话状态失败: {e}")
+            _module_interface.logger.warning(f"清除临时URL会话状态失败: {e}")
+
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         await show_generate_menu(update, context, user_config)
 
     elif data == f"{CALLBACK_PREFIX}back_to_settings":
         # 返回设置菜单，清除会话状态
         await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
         await show_settings_menu(update, context, user_config)
 
     elif data == f"{CALLBACK_PREFIX}reset_settings":
@@ -752,24 +739,19 @@ async def handle_callback_query(update: Update,
         # 生成订阅链接
         await generate_link(update, context, user_config)
 
+    # 确认回调查询
+    await query.answer()
+
 
 async def show_generate_menu(update: Update,
                              context: ContextTypes.DEFAULT_TYPE, user_config):
     """显示生成订阅的界面"""
-    # context 参数由框架提供，虽然此处未使用但必须保留
     query = update.callback_query
 
     # 获取当前设置
     target = user_config.get("target", _config["default_target"])
     emoji = user_config.get("emoji", _config["default_emoji"])
-    tfo = user_config.get("tfo", _config["default_tfo"])
-    udp = user_config.get("udp", _config["default_udp"])
-    scv = user_config.get("scv", _config["default_scv"])
-    append_type = user_config.get("append_type",
-                                  _config["default_append_type"])
-    sort = user_config.get("sort", _config["default_sort"])
     expand = user_config.get("expand", _config["default_expand"])
-    list = user_config.get("list", _config["default_list"])
 
     # 获取目标格式的显示名称
     target_name = next(
@@ -787,7 +769,7 @@ async def show_generate_menu(update: Update,
 
     # 生成链接按钮
     keyboard.append([
-        InlineKeyboardButton("Generate Link",
+        InlineKeyboardButton("▷ Generate Link",
                              callback_data=f"{CALLBACK_PREFIX}generate_link")
     ])
 
@@ -831,7 +813,6 @@ async def show_generate_menu(update: Update,
 async def show_settings_menu(update: Update,
                              context: ContextTypes.DEFAULT_TYPE, user_config):
     """显示设置界面"""
-    # context 参数由框架提供，虽然此处未使用但必须保留
     query = update.callback_query
 
     # 获取当前设置
@@ -904,7 +885,8 @@ async def show_settings_menu(update: Update,
         f"*文件名*: {filename if filename else '未设置'}\n\n"
         "请选择要修改的设置项：",
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown")
+        parse_mode="Markdown",
+        disable_web_page_preview=True)
 
 
 async def back_to_main_menu(update: Update,
@@ -915,11 +897,13 @@ async def back_to_main_menu(update: Update,
     chat_id = update.effective_chat.id
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _module_interface.session_manager
     if session_manager:
         # 清除会话状态
         await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
     # 创建主菜单按钮
     keyboard = [[
@@ -931,45 +915,49 @@ async def back_to_main_menu(update: Update,
 
     # 更新消息
     await query.edit_message_text(
-        "欢迎使用订阅转换工具\n\n"
-        "此工具基于 subconverter 项目，可以将各种格式的代理订阅链接转换为其他格式\n\n"
+        "🔗 欢迎使用订阅转换工具\n\n"
+        "此工具基于 [subconverter](https://github.com/tindy2013/subconverter) 项目，可以将各种格式的代理订阅链接转换为其他格式\n\n"
         "请选择操作：",
         reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True,
-        parse_mode="Markdown")
+        parse_mode="Markdown",
+        disable_web_page_preview=True)
 
 
 async def generate_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         user_config):
     """生成订阅链接"""
-    # context 参数由框架提供，虽然此处未使用但必须保留
     query = update.callback_query
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _module_interface.session_manager
     if not session_manager:
         await query.answer("系统错误，请联系管理员")
+        return
+    # 检查是否有其他模块的活跃会话
+    if await session_manager.has_other_module_session(user_id,
+                                                      MODULE_NAME,
+                                                      chat_id=chat_id):
+        await query.answer("⚠️ 请先完成或取消其他活跃会话")
         return
 
     # 提示用户输入订阅链接
     await query.edit_message_text(
         "请发送原始订阅链接：\n\n"
         "支持多个链接，请用 | 分隔\n"
-        "例如：https://example.com/sub1|https://example.com/sub2\n\n"
-        "发送 /cancel 取消操作",
+        "例如：https://example.com/sub1|https://example.com/sub2",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton(
                 "⇠ Back", callback_data=f"{CALLBACK_PREFIX}back_to_generate")
         ]]))
 
-    # 设置会话活跃状态和步骤
-    await session_manager.set(user_id, SESSION_ACTIVE, True, chat_id=chat_id)
+    # 设置会话步骤
     await session_manager.set(user_id,
                               "subconv_step",
                               SESSION_WAITING_GENERATE_URL,
-                              chat_id=chat_id)
+                              chat_id=chat_id,
+                              module_name=MODULE_NAME)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -980,22 +968,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     # 获取会话管理器
-    session_manager = context.bot_data.get("session_manager")
+    session_manager = _module_interface.session_manager
     if not session_manager:
         return
 
-    # 检查是否是本模块的活跃会话
-    if not await session_manager.has_key(user_id, SESSION_ACTIVE, chat_id=chat_id) or \
-       not await session_manager.has_key(user_id, "subconv_step", chat_id=chat_id):
-        # 不是本模块的活跃会话，不处理
-        return
-
-    # 检查会话是否活跃
-    is_active = await session_manager.get(user_id,
-                                          SESSION_ACTIVE,
-                                          chat_id=chat_id)
-    if not is_active:
-        # 会话不活跃，不处理
+    # 检查是否是 subconv 模块的活跃会话
+    if not await session_manager.is_session_owned_by(
+            user_id, MODULE_NAME, chat_id=chat_id):
         return
 
     # 获取会话状态
@@ -1004,19 +983,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 获取用户配置
     user_config = get_user_config(user_id)
 
-    # 处理取消命令
-    if message.text == "/cancel":
-        await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
-        await message.reply_text(
-            "操作已取消",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "Back to Main",
-                    callback_data=f"{CALLBACK_PREFIX}back_to_main")
-            ]]))
-        return
-
     # 根据不同的会话状态处理输入
     if step == SESSION_WAITING_BACKEND:
         # 处理后端地址输入
@@ -1024,8 +990,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 简单验证 URL 格式
         if not backend_url.startswith(("http://", "https://")):
-            await message.reply_text(
-                "❌ 错误：后端地址必须以 http:// 或 https:// 开头！请重新输入或发送 /cancel 取消")
+            await message.reply_text("❌ 错误：后端地址必须以 http:// 或 https:// 开头，请重新输入"
+                                     )
             return
 
         # 保存后端地址
@@ -1034,14 +1000,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 清除会话状态
         await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 发送成功消息
         await message.reply_text(
             "✅ 后端地址已设置",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
-                    "Back to Settings",
+                    "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
 
@@ -1049,29 +1017,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 处理配置文件链接输入
         config_url = message.text.strip()
 
-        # 配置文件链接可以为空，表示使用默认配置
-        if not config_url:
-            user_config["config_url"] = ""
-            save_user_config(user_id, user_config)
-            await session_manager.delete(user_id,
-                                         "subconv_step",
-                                         chat_id=chat_id)
-            await session_manager.delete(user_id,
-                                         SESSION_ACTIVE,
-                                         chat_id=chat_id)
-            await message.reply_text(
-                "✅ 配置文件链接已清除，将使用默认配置",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "Back to Settings",
-                        callback_data=f"{CALLBACK_PREFIX}back_to_settings")
-                ]]))
-            return
-
         # 简单验证 URL 格式
         if not config_url.startswith(("http://", "https://")):
             await message.reply_text(
-                "❌ 错误：配置文件链接必须以 http:// 或 https:// 开头！请重新输入或发送 /cancel 取消")
+                "❌ 错误：配置文件链接必须以 http:// 或 https:// 开头，请重新输入")
             return
 
         # 保存配置文件链接
@@ -1080,14 +1029,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 清除会话状态
         await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 发送成功消息
         await message.reply_text(
             "✅ 配置文件链接已设置",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
-                    "Back to Settings",
+                    "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
 
@@ -1101,14 +1052,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 清除会话状态
         await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 发送成功消息
         await message.reply_text(
             "✅ 排除节点规则已设置",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
-                    "Back to Settings",
+                    "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
 
@@ -1122,14 +1075,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 清除会话状态
         await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 发送成功消息
         await message.reply_text(
             "✅ 包含节点规则已设置",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
-                    "Back to Settings",
+                    "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
 
@@ -1143,14 +1098,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 清除会话状态
         await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 发送成功消息
         await message.reply_text(
             "✅ 文件名已设置",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
-                    "Back to Settings",
+                    "⇠ Back",
                     callback_data=f"{CALLBACK_PREFIX}back_to_settings")
             ]]))
 
@@ -1206,27 +1163,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 清除会话状态
         await session_manager.delete(user_id, "subconv_step", chat_id=chat_id)
-        await session_manager.delete(user_id, SESSION_ACTIVE, chat_id=chat_id)
+        await session_manager.release_session(user_id,
+                                              MODULE_NAME,
+                                              chat_id=chat_id)
 
         # 构建按钮
         keyboard = []
 
-        # 下载配置文件按钮 (仅对Clash等格式有效)
-        if target in ["clash", "clashr", "surfboard", "loon"]:
-            # 生成URL的哈希值作为临时标识符
-            url_hash = str(hash(url) % 10000000)  # 取模确保不会太长
-            # 存储URL到会话中，以便后续使用，5秒后自动过期
-            await session_manager.set(user_id,
-                                      f"subconv_temp_url_{url_hash}",
-                                      url,
-                                      chat_id=chat_id,
-                                      expire_after=5)  # 5秒后自动过期
-            keyboard.append([
-                InlineKeyboardButton(
-                    "Download Config",
-                    callback_data=f"{CALLBACK_PREFIX}download_config:{url_hash}"
-                )
-            ])
+        # 生成URL的哈希值作为临时标识符
+        url_hash = str(hash(url) % 10000000)  # 取模确保不会太长
+        # 存储URL到会话中，以便后续使用
+        await session_manager.set(user_id,
+                                  f"subconv_temp_url_{url_hash}",
+                                  url,
+                                  chat_id=chat_id,
+                                  expire_after=5)  # 5秒后自动过期
+        keyboard.append([
+            InlineKeyboardButton(
+                "Download Config",
+                callback_data=f"{CALLBACK_PREFIX}download_config:{url_hash}")
+        ])
 
         # 返回按钮
         keyboard.append([
@@ -1247,7 +1203,6 @@ async def show_more_options_menu(update: Update,
                                  context: ContextTypes.DEFAULT_TYPE,
                                  user_config):
     """显示更多选项菜单"""
-    # context 参数由框架提供，虽然此处未使用但必须保留
     query = update.callback_query
 
     # 获取当前设置
@@ -1257,7 +1212,6 @@ async def show_more_options_menu(update: Update,
     append_type = user_config.get("append_type",
                                   _config["default_append_type"])
     sort = user_config.get("sort", _config["default_sort"])
-    expand = user_config.get("expand", _config["default_expand"])
     list = user_config.get("list", _config["default_list"])
 
     # 构建按钮
@@ -1329,7 +1283,8 @@ async def show_more_options_menu(update: Update,
 async def show_target_selection(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     """显示目标格式选择菜单"""
-    # context 参数由框架提供，虽然此处未使用但必须保留
+    from utils.pagination import PaginationHelper
+
     query = update.callback_query
     user_id = update.effective_user.id
 
@@ -1339,73 +1294,38 @@ async def show_target_selection(update: Update,
 
     # 获取页码
     page_index = context.user_data.get("target_page_index", 0)
-    page_size = 5
-
-    # 计算总页数
-    total_pages = (len(TARGET_FORMATS) + page_size - 1) // page_size
-
-    # 确保页码在有效范围内
-    page_index = max(0, min(page_index, total_pages - 1))
 
     # 创建按钮列表
-    keyboard = []
-
-    # 添加选择按钮
-    page_start = page_index * page_size
-    page_end = min(page_start + page_size, len(TARGET_FORMATS))
-
-    for i in range(page_start, page_end):
-        item = TARGET_FORMATS[i]
-        keyboard.append([
+    buttons = []
+    for item in TARGET_FORMATS:
+        # 为当前选中的目标格式添加指示符
+        prefix = "▷ " if item["value"] == current_target else "  "
+        buttons.append(
             InlineKeyboardButton(
-                f"{'▷ ' if item['value'] == current_target else '  '}{item['name']}",
-                callback_data=f"{CALLBACK_PREFIX}set_target:{item['value']}")
-        ])
+                f"{prefix}{item['name']}",
+                callback_data=f"{CALLBACK_PREFIX}set_target:{item['value']}"))
 
-    # 添加分页导航按钮
-    nav_buttons = []
+    # 创建返回按钮
+    back_button = InlineKeyboardButton(
+        "⇠ Back", callback_data=f"{CALLBACK_PREFIX}back_to_generate")
 
-    # 上一页按钮
-    if page_index > 0:
-        nav_buttons.append(
-            InlineKeyboardButton(
-                "◁ Prev",
-                callback_data=f"{CALLBACK_PREFIX}target_page:{page_index - 1}")
-        )
-    else:
-        nav_buttons.append(InlineKeyboardButton(" ", callback_data="noop"))
-
-    # 页码指示 - 使用noop避免点击时报错
-    nav_buttons.append(
-        InlineKeyboardButton(f"{page_index + 1}/{total_pages}",
-                             callback_data="noop"))
-
-    # 下一页按钮
-    if page_index < total_pages - 1:
-        nav_buttons.append(
-            InlineKeyboardButton(
-                "Next ▷",
-                callback_data=f"{CALLBACK_PREFIX}target_page:{page_index + 1}")
-        )
-    else:
-        nav_buttons.append(InlineKeyboardButton(" ", callback_data="noop"))
-
-    keyboard.append(nav_buttons)
-
-    # 添加返回按钮
-    keyboard.append([
-        InlineKeyboardButton(
-            "⇠ Back", callback_data=f"{CALLBACK_PREFIX}back_to_generate")
-    ])
+    # 使用分页工具生成键盘
+    keyboard = PaginationHelper.paginate_buttons(
+        buttons=buttons,
+        page_index=page_index,
+        rows_per_page=5,  # 每页5行
+        buttons_per_row=1,  # 每行1个按钮
+        nav_callback_prefix=f"{CALLBACK_PREFIX}target_page",
+        show_nav_buttons=True,
+        back_button=back_button)
 
     # 创建消息内容
     content = f"*目标格式选择*\n\n"
-    content += f"当前格式: {next((item['name'] for item in TARGET_FORMATS if item['value'] == current_target), '未知')}\n\n"
-    content += f"第 {page_index + 1}/{total_pages} 页"
+    content += f"当前格式: {next((item['name'] for item in TARGET_FORMATS if item['value'] == current_target), '未知')}"
 
     # 更新消息
     await query.edit_message_text(content,
-                                  reply_markup=InlineKeyboardMarkup(keyboard),
+                                  reply_markup=keyboard,
                                   parse_mode="MARKDOWN")
 
 
@@ -1421,7 +1341,6 @@ async def setup(interface):
     saved_state = interface.load_state(default={"user_configs": {}})
     if saved_state:
         _state.update(saved_state)
-        interface.logger.debug("已从框架加载用户配置状态")
 
     # 注册命令
     await interface.register_command(
@@ -1450,4 +1369,4 @@ async def cleanup(interface):
     """模块清理，在卸载模块前调用"""
     # 保存状态到框架
     interface.save_state(_state)
-    interface.logger.info(f"模块 {MODULE_NAME} 状态已保存")
+    interface.logger.debug(f"模块 {MODULE_NAME} 状态已保存")
