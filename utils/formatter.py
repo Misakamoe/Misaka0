@@ -9,27 +9,27 @@ class TextFormatter:
     @staticmethod
     def escape_markdown(text):
         """转义 Markdown 特殊字符
-        
+
         Args:
             text: 原始文本
-            
+
         Returns:
             str: 转义后的文本
         """
         if not text:
             return ""
 
-        # 只转义真正需要的特殊字符: _ * [ ] ( ) ~ `
+        # 只转义部分特殊字符: _ * [ ] ( ) ~ `
         # 不转义: - = | { } . ! > # + \
         return re.sub(r'([_*\[\]()~`])', r'\\\1', text)
 
     @staticmethod
     def escape_html(text):
         """转义 HTML 特殊字符
-        
+
         Args:
             text: 原始文本
-            
+
         Returns:
             str: 转义后的文本
         """
@@ -42,10 +42,10 @@ class TextFormatter:
     @staticmethod
     def markdown_to_plain(text):
         """将 Markdown 格式转换为纯文本
-        
+
         Args:
             text: Markdown 文本
-            
+
         Returns:
             str: 纯文本
         """
@@ -74,12 +74,12 @@ class TextFormatter:
     @staticmethod
     def smart_split_text(text, max_length=4000, mode="markdown"):
         """智能分割文本，确保不会在格式标记中间切断
-        
+
         Args:
             text: 要分割的文本
             max_length: 每段最大长度
             mode: 文本格式模式 ("markdown", "html", "plain")
-            
+
         Returns:
             list: 分割后的文本段落
         """
@@ -155,12 +155,34 @@ class TextFormatter:
         return re.sub(r'<[^>]+>', '', text)
 
     @staticmethod
+    def html_to_plain(text):
+        """将 HTML 格式转换为纯文本
+
+        Args:
+            text: HTML 文本
+
+        Returns:
+            str: 纯文本
+        """
+        if not text:
+            return ""
+
+        # 移除 HTML 标签
+        text = TextFormatter.strip_html(text)
+
+        # 解码 HTML 实体
+        text = text.replace("&amp;", "&").replace("&lt;", "<").replace(
+            "&gt;", ">").replace("&quot;", '"').replace("&#39;", "'")
+
+        return text
+
+    @staticmethod
     def normalize_whitespace(text):
         """规范化文本中的空白字符
-        
+
         Args:
             text: 原始文本
-            
+
         Returns:
             str: 规范化后的文本
         """
@@ -177,7 +199,7 @@ class TextFormatter:
         
         Args:
             markdown_text: Markdown 格式的文本
-            
+
         Returns:
             str: HTML 格式的文本
         """
@@ -222,11 +244,11 @@ class TextFormatter:
     @staticmethod
     def smart_split_html(html_text, max_length=4000):
         """智能分割 HTML 文本，确保标签完整性
-        
+
         Args:
             html_text: HTML 文本
             max_length: 每段最大长度
-            
+
         Returns:
             list: 分段后的 HTML 文本列表
         """
