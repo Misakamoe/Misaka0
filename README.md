@@ -1,34 +1,31 @@
 # 模块化 Telegram Bot
 
-一个高度可扩展、模块化的 Telegram Bot 框架，支持事件系统和状态管理。
+一个高度可扩展、模块化的 Telegram Bot 框架
 
 ## 特性
 
-- 🧩 **模块化架构**：清晰的模块组织，支持私聊和群组模块区分
-- 🔄 **配置管理**：灵活的配置系统
-- 🛡️ **多级权限管理**：支持超级管理员、群组管理员和普通用户
-- 🔒 **群组白名单**：只允许授权的群组使用机器人
-- 📊 **状态管理**：模块状态持久化和自动备份
-- 📡 **事件系统**：模块间松耦合通信和事件流控制
-- 🔤 **文本格式化**：智能处理 Markdown 和 HTML，自动降级
-- 📋 **完善的日志系统**：支持日志轮转和自动清理
-- 📱 **会话管理**：持久化的用户会话支持，支持自动过期
+- 🧩 **模块架构**：功能模块化，易于扩展和维护
+- 🛡️ **权限管理**：超管、群管和普通用户权限控制
+- 🔒 **群白名单**：只有授权的群组可以使用
+- 📱 **会话管理**：模块间会话控制，互不干扰
 - 📄 **分页显示**：标准化的分页导航系统，支持页码跳转
-- 🐳 **Docker 支持**：轻松部署和维护
+- 🐳 **容器支持**：轻松部署和维护
 
-## AI 生成项目声明
+## 项目声明
 
-> 本项目由 AI 生成。作为维护者，我缺乏专业知识以及开源项目经验。
+> 本项目 99% 由 AI 生成
 >
-> 因此，针对本项目的 Issue 或 Pull request 不一定会被处理。
+> 作为维护者，我缺乏专业知识以及开源项目经验
 >
-> 欢迎按照 MIT 许可证自由复制和修改此项目以供您自己使用。
+> 因此，针对本项目的 Issue 或 Pull request 不一定会被处理
+>
+> ⭐ 欢迎按照 MIT 许可证自由复制和修改此项目以供您自己使用
 
 ## 快速开始
 
 ### 配置
 
-在部署前，您必须准备配置文件或环境变量。
+在部署前，您必须准备配置文件或环境变量
 
 1. 复制示例配置文件：
 
@@ -56,11 +53,11 @@
 3. 如果使用环境变量配置，需要设置以下变量：
 
 - `TELEGRAM_BOT_TOKEN`：您的 Telegram Bot Token
-- `ADMIN_IDS`：超级管理员 ID，多个 ID 用逗号分隔
+- `ADMIN_IDS`：超级管理员 ID，用逗号分隔
 
-使用 Docker 部署时，配置的优先级为：环境变量 > 配置文件
+使用 Docker 部署时，应用的优先级为：环境变量 > 配置文件
 
-首次运行时，如果没有提供有效的 Token 和 ID，机器人将无法启动
+首次运行时，如果没有提供有效的 Token 和 ID 将无法启动
 
 ### 部署方式
 
@@ -157,6 +154,7 @@ sudo systemctl status telegram-bot
 - `/id` - 显示用户和聊天 ID
 - `/modules` - 列出所有已加载模块
 - `/commands` - 列出所有可用命令
+- `/cancel` - 取消当前操作
 
 **管理员命令**
 
@@ -164,22 +162,11 @@ sudo systemctl status telegram-bot
 - `/listgroups` - 列出授权的群组（超级管理员）
 - `/addgroup [群组 ID]` - 添加群组到白名单（超级管理员）
 
-### 开发模块
+## 开发模块
 
-我们提供了详细的模块开发文档，请参阅 `modules/README.md` 了解如何开发新模块。该文档涵盖：
+请参阅 `modules/README.md` 了解如何开发新模块
 
-- 模块基本结构和元数据
-- ModuleInterface 接口使用
-- 命令注册和权限管理
-- 按钮权限控制
-- 事件系统使用方法
-- 状态管理和持久化
-- 会话管理
-- 文本处理和格式化
-- 标准化分页列表实现
-- 最佳实践和示例模块
-
-### 项目结构
+## 项目结构
 
 ```
 .
@@ -206,17 +193,12 @@ sudo systemctl status telegram-bot
     └── states/               # 模块状态存储
 ```
 
-## 稳定性和可靠性
+## Star History
 
-本框架经过精心设计，以提供高度的稳定性和可靠性：
-
-- 简化的架构设计，易于理解和维护
-- 优雅的错误处理和异常恢复
-- 模块隔离，防止单个模块崩溃影响系统
-- 定期资源清理，防止内存泄漏
-- 自动状态备份和恢复
-- 聊天类型过滤机制，确保模块在适当的聊天环境中运行
-
-## 许可证
-
-本项目采用 MIT 许可证，详见 LICENSE 文件。
+<a href="https://www.star-history.com/#Misakamoe/Misaka0&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Misakamoe/Misaka0&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Misakamoe/Misaka0&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Misakamoe/Misaka0&type=Date" />
+ </picture>
+</a>
