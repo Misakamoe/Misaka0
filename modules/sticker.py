@@ -5,16 +5,11 @@ import json
 import uuid
 import asyncio
 import tempfile
-import subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputSticker
 from telegram.ext import ContextTypes, MessageHandler, filters
 
-# 可选库导入处理
-try:
-    from PIL import Image
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
+# 导入图像处理库
+from PIL import Image
 
 try:
     from lottie.parsers.tgs import parse_tgs
@@ -24,7 +19,7 @@ except ImportError:
     LOTTIE_AVAILABLE = False
 
 MODULE_NAME = "sticker"
-MODULE_VERSION = "2.0.0"
+MODULE_VERSION = "2.1.0"
 MODULE_DESCRIPTION = "下载贴纸，支持自建贴纸包"
 MODULE_COMMANDS = ["sticker"]
 MODULE_CHAT_TYPES = ["private"]  # 仅限私聊使用
@@ -96,15 +91,15 @@ async def setup(interface):
 
     # 注册命令
     await interface.register_command("sticker",
-                                     sticker_command,
+                                     show_main_menu,
                                      admin_level=False,
                                      description="管理贴纸转换和贴纸包")
 
-    # 注册处理器 - 使用默认组 0 避免并发修改问题
+    # 注册处理器
     _sticker_handler = MessageHandler(filters.Sticker.ALL, handle_sticker)
-    await interface.register_handler(_sticker_handler)
+    await interface.register_handler(_sticker_handler, group=1)
 
-    # 注册回调处理器，使用框架的权限验证系统
+    # 注册回调处理器
     await interface.register_callback_handler(
         handle_callback_query,
         pattern=f"^{CALLBACK_PREFIX}",
@@ -121,20 +116,11 @@ async def cleanup(interface):
     # 保存配置和状态
     await _save_config()
 
-    # 保存状态到框架的状态管理中
-    interface.save_state({
-        "configs": user_configs,
-        "sticker_sets": user_sticker_sets
-    })
-
     # 清理全局引用
     _interface = None
 
     # 记录模块卸载信息
     interface.logger.info(f"模块 {MODULE_NAME} 已清理完成")
-
-
-# 状态管理函数已移除，使用框架的状态管理功能
 
 
 # 配置管理函数
@@ -194,13 +180,6 @@ async def _save_config():
         except Exception as e:
             if _interface:
                 _interface.logger.error(f"保存贴纸配置失败: {str(e)}")
-
-
-# 命令处理函数
-async def sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /sticker 命令"""
-    # 显示当前配置和选项
-    await show_main_menu(update, context)
 
 
 # 设置菜单函数
@@ -396,6 +375,17 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = str(update.effective_user.id)
+    chat_id = update.effective_chat.id
+
+    # 获取会话管理器
+    session_manager = _interface.session_manager
+    if session_manager:
+        # 检查是否有其他模块的活跃会话
+        if await session_manager.has_other_module_session(user_id,
+                                                          MODULE_NAME,
+                                                          chat_id=chat_id):
+            return  # 其他模块有活跃会话，不处理此消息
+
     sticker = message.sticker
     config = user_configs.get(user_id, DEFAULT_CONFIG.copy())
 
@@ -558,12 +548,22 @@ async def convert_tgs_to_gif(tgs_path, quality="high"):
                 framerate = 24
 
             # 导出 GIF
-            export_gif(animation, gif_path, framerate=framerate)
+            export_gif(animation, gif_path, fps=framerate)
             return gif_path
         else:
             # 尝试使用命令行工具
             try:
-                cmd = ["lottie_convert.py", tgs_path, gif_path]
+                import subprocess
+                # 设置帧率
+                fps_arg = "30"
+                if quality == "low":
+                    fps_arg = "15"
+                elif quality == "medium":
+                    fps_arg = "24"
+
+                cmd = [
+                    "lottie_convert.py", tgs_path, gif_path, "--fps", fps_arg
+                ]
                 subprocess.run(cmd,
                                check=True,
                                stdout=subprocess.PIPE,
@@ -578,50 +578,42 @@ async def convert_tgs_to_gif(tgs_path, quality="high"):
 async def convert_webp_to_format(webp_path, format_str="PNG"):
     """将 WEBP 贴纸转换为指定格式"""
     try:
-        if PIL_AVAILABLE:
-            # 设置输出路径
-            # 统一使用小写扩展名
-            ext = format_str.lower()
-            # 将 jpg 转换为 jpeg 作为格式标识符
-            format_str = "JPEG" if format_str.upper(
-            ) == "JPG" else format_str.upper()
-            output_path = webp_path.replace(".webp", f".{ext}")
+        # 设置输出路径
+        # 统一使用小写扩展名
+        ext = format_str.lower()
+        # 将 jpg 转换为 jpeg 作为格式标识符
+        format_str = "JPEG" if format_str.upper(
+        ) == "JPG" else format_str.upper()
+        output_path = webp_path.replace(".webp", f".{ext}")
 
-            # 打开并转换图片
-            img = Image.open(webp_path)
+        # 打开并转换图片
+        img = Image.open(webp_path)
 
-            if format_str == "PNG":
-                # 确保保留透明度
-                if img.mode != 'RGBA' and 'transparency' in img.info:
-                    img = img.convert('RGBA')
-                img.save(output_path, format=format_str)
-            elif format_str == "WEBP":
-                img.save(output_path,
-                         format=format_str,
-                         lossless=True,
-                         quality=100)
-            elif format_str == "JPEG":
-                # JPG 不支持透明度，添加白色背景
-                bg = Image.new("RGB", img.size, (255, 255, 255))
-                if img.mode == 'RGBA':
-                    bg.paste(img, mask=img.split()[3])  # 使用透明通道作为遮罩
-                else:
-                    bg.paste(img)
-                bg.save(output_path, format=format_str, quality=95)
+        if format_str == "PNG":
+            # 确保保留透明度
+            if img.mode != 'RGBA' and 'transparency' in img.info:
+                img = img.convert('RGBA')
+            img.save(output_path, format=format_str)
+        elif format_str == "WEBP":
+            img.save(output_path,
+                     format=format_str,
+                     lossless=True,
+                     quality=100)
+        elif format_str == "JPEG":
+            # JPG 不支持透明度，添加白色背景
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == 'RGBA':
+                bg.paste(img, mask=img.split()[3])  # 使用透明通道作为遮罩
+            else:
+                bg.paste(img)
+            bg.save(output_path, format=format_str, quality=95)
 
-            img.close()  # 确保关闭图像
-            return output_path
-        else:
-            return None
+        img.close()  # 确保关闭图像
+        return output_path
     except Exception as e:
         if _interface:
             _interface.logger.error(f"转换图像失败: {str(e)}")
         return None
-
-
-# 贴纸包管理函数已移除，因为用户可以直接通过 Telegram 客户端管理贴纸包
-
-# 已移除查看贴纸包中的贴纸并提供删除选项的功能，因为 Telegram 客户端可以直接编辑自己的贴纸包
 
 
 async def create_user_sticker_set(update, context):
@@ -668,57 +660,53 @@ async def create_user_sticker_set(update, context):
                 await photo_file.download_to_drive(custom_path=photo_path)
 
                 # 处理图片
-                if PIL_AVAILABLE:
-                    try:
-                        img = Image.open(photo_path)
-                        img = img.resize((512, 512), Image.LANCZOS)
-                        png_path = photo_path.replace(".jpg", ".png")
-                        img.save(png_path)
-                        img.close()
+                try:
+                    img = Image.open(photo_path)
+                    img = img.resize((512, 512), Image.LANCZOS)
+                    png_path = photo_path.replace(".jpg", ".png")
+                    img.save(png_path)
+                    img.close()
 
-                        # 关闭原文件并删除
-                        if os.path.exists(photo_path):
-                            os.unlink(photo_path)
-                            photo_path = None
+                    # 关闭原文件并删除
+                    if os.path.exists(photo_path):
+                        os.unlink(photo_path)
+                        photo_path = None
 
-                        photo_path = png_path  # 更新路径
-                    except Exception as e:
-                        if _interface:
-                            _interface.logger.error(f"处理用户头像失败: {str(e)}")
+                    photo_path = png_path  # 更新路径
+                except Exception as e:
+                    if _interface:
+                        _interface.logger.error(f"处理用户头像失败: {str(e)}")
             else:
                 # 没有用户头像，创建默认图片
-                if PIL_AVAILABLE:
+                try:
+                    from PIL import ImageDraw, ImageFont
+                    img = Image.new("RGBA", (512, 512), (255, 255, 255, 0))
+                    draw = ImageDraw.Draw(img)
+
+                    # 尝试加载字体
                     try:
-                        from PIL import ImageDraw, ImageFont
-                        img = Image.new("RGBA", (512, 512), (255, 255, 255, 0))
-                        draw = ImageDraw.Draw(img)
+                        font = ImageFont.truetype("arial.ttf", 40)
+                    except:
+                        font = ImageFont.load_default()
 
-                        # 尝试加载字体
-                        try:
-                            font = ImageFont.truetype("arial.ttf", 40)
-                        except:
-                            font = ImageFont.load_default()
+                    # 添加文本
+                    text = user.username or user.first_name or str(user.id)
+                    try:
+                        textwidth, textheight = draw.textsize(text, font)
+                        x = (512 - textwidth) / 2
+                        y = (512 - textheight) / 2
+                    except:
+                        x, y = 150, 200
 
-                        # 添加文本
-                        text = user.username or user.first_name or str(user.id)
-                        try:
-                            textwidth, textheight = draw.textsize(text, font)
-                            x = (512 - textwidth) / 2
-                            y = (512 - textheight) / 2
-                        except:
-                            x, y = 150, 200
+                    draw.text((x, y), text, fill=(0, 0, 0, 255), font=font)
 
-                        draw.text((x, y), text, fill=(0, 0, 0, 255), font=font)
-
-                        # 保存为临时文件
-                        photo_path = tempfile.mktemp(suffix=".png")
-                        img.save(photo_path)
-                        img.close()
-                    except Exception as e:
-                        if _interface:
-                            _interface.logger.error(f"创建默认贴纸图片失败: {str(e)}")
-                        return False, None
-                else:
+                    # 保存为临时文件
+                    photo_path = tempfile.mktemp(suffix=".png")
+                    img.save(photo_path)
+                    img.close()
+                except Exception as e:
+                    if _interface:
+                        _interface.logger.error(f"创建默认贴纸图片失败: {str(e)}")
                     return False, None
 
             # 确保图片文件存在
@@ -803,8 +791,6 @@ async def handle_callback_query(update, context):
         else:
             action = parts[0]
 
-        await query.answer()
-
         # 处理不同的操作
         if action == "dl" and len(parts) > 1:
             # 下载贴纸
@@ -846,26 +832,6 @@ async def handle_callback_query(update, context):
             else:
                 await query.message.edit_text("❌ 贴纸信息已过期，请重新发送")
 
-        elif action == "manage":
-            # 显示贴纸包信息
-            user_id = str(update.effective_user.id)
-            if user_id in user_sticker_sets and "set_name" in user_sticker_sets[
-                    user_id]:
-                set_name = user_sticker_sets[user_id]["set_name"]
-                share_link = f"https://t.me/addstickers/{set_name}"
-                await query.message.edit_text(
-                    f"点击下方按钮查看贴纸包",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("View", url=share_link)]]))
-            else:
-                await query.message.edit_text(
-                    "你还没有贴纸包，是否创建新的贴纸包？",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(
-                            "+ Create",
-                            callback_data=f"{CALLBACK_PREFIX}create")
-                    ]]))
-
         elif action == "create":
             # 创建新贴纸包
             await query.message.edit_text("⏳ 正在创建贴纸包，请稍候...")
@@ -873,7 +839,7 @@ async def handle_callback_query(update, context):
 
             if success:
                 share_link = f"https://t.me/addstickers/{set_name}"
-                message = f"✅ 贴纸包创建成功\n[点击查看贴纸包]({share_link})"
+                message = f"✅ 贴纸包[创建成功]({share_link})"
                 await query.message.edit_text(message, parse_mode="MARKDOWN")
             else:
                 await query.message.edit_text("❌ 创建贴纸包失败，请稍后重试")
@@ -931,6 +897,9 @@ async def handle_callback_query(update, context):
 
                 # 返回主菜单
                 await show_main_menu(update, context)
+
+        # 确保回调查询得到响应
+        await query.answer()
 
     except Exception as e:
         if _interface:
@@ -1027,15 +996,15 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
                         error_str = str(e).lower()
                         # 检查是否是贴纸包已满错误
                         if "too many" in error_str or "maximum" in error_str or "limit" in error_str:
-                            # 贴纸包已满，提示用户使用 Telegram 客户端创建新贴纸包
-                            return False, "❌ 贴纸包已满\n\n请使用 Telegram 客户端创建新贴纸包，或删除一些现有贴纸"
+                            # 贴纸包已满
+                            return False, "❌ 贴纸包已满，请删除一些现有贴纸"
                         else:
                             # 其他错误
                             raise e
 
                 if success:
                     share_link = f"https://t.me/addstickers/{set_name}"
-                    return True, f"✅ 贴纸已添加到贴纸包\n[查看贴纸包]({share_link})"
+                    return True, f"✅ 已添加到[贴纸包]({share_link})"
                 else:
                     return False, "❌ 添加贴纸失败，请稍后重试"
             finally:
@@ -1071,15 +1040,15 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
                         error_str = str(e).lower()
                         # 检查是否是贴纸包已满错误
                         if "too many" in error_str or "maximum" in error_str or "limit" in error_str:
-                            # 贴纸包已满，提示用户使用 Telegram 客户端创建新贴纸包
-                            return False, "❌ 贴纸包已满\n\n请使用 Telegram 客户端创建新贴纸包，或删除一些现有贴纸"
+                            # 贴纸包已满
+                            return False, "❌ 贴纸包已满，请删除一些现有贴纸"
                         else:
                             # 其他错误
                             raise e
 
                 if success:
                     share_link = f"https://t.me/addstickers/{set_name}"
-                    return True, f"✅ 贴纸已添加到贴纸包\n[查看贴纸包]({share_link})"
+                    return True, f"✅ 已添加到[贴纸包]({share_link})"
                 else:
                     return False, "❌ 添加贴纸失败，请稍后重试"
             finally:
@@ -1095,6 +1064,3 @@ async def add_sticker_to_set(update, context, set_name, sticker_id):
         if _interface:
             _interface.logger.error(f"添加贴纸到贴纸包失败: {str(e)}")
         return False, f"❌ 添加贴纸时出错: {str(e)}"
-
-
-# 已移除编辑和删除贴纸相关的函数，因为 Telegram 客户端可以直接编辑自己的贴纸包
