@@ -374,18 +374,20 @@ class BotEngine:
                             f"群组 ID: {chat.id}\n"
                             f"群组名称: {group_name}\n\n"
                             f"您可以点击下方按钮授权或使用命令:\n"
-                            f"/addgroup {chat.id}",
-                            reply_markup=reply_markup)
+                            f"`/addgroup {chat.id}`",
+                            reply_markup=reply_markup,
+                            parse_mode="MARKDOWN")
                     except Exception as e:
                         self.logger.error(f"向管理员 {admin_id} 发送通知失败: {e}")
 
-                # 通知群组
-                await context.bot.send_message(
-                    chat_id=chat.id, text="⚠️ 已通知管理员授权此群组\n\n10 秒内未获授权将自动退出")
+                # 通知群组并保存消息ID
+                warning_msg = await context.bot.send_message(
+                    chat_id=chat.id, text="⚠️ 已通知管理员授权此群组")
 
                 # 创建延时退出任务
                 asyncio.create_task(
-                    self._delayed_leave_chat(context.bot, chat.id, 10))
+                    self._delayed_leave_chat(context.bot, chat.id, 30,
+                                             warning_msg.message_id))
 
         # 处理 Bot 被踢出群组的情况
         elif (chat_member.old_chat_member.status
@@ -625,7 +627,11 @@ class BotEngine:
         except Exception:
             await query.edit_message_text("返回群组列表失败，请重新执行 /listgroups")
 
-    async def _delayed_leave_chat(self, bot, chat_id, delay_seconds):
+    async def _delayed_leave_chat(self,
+                                  bot,
+                                  chat_id,
+                                  delay_seconds,
+                                  warning_msg_id=None):
         """延时检查并离开未授权的群组"""
         try:
             # 等待指定的时间
@@ -636,6 +642,15 @@ class BotEngine:
                 self.logger.debug(
                     f"群组 {chat_id} 在 {delay_seconds} 秒内未获得授权，Bot 将自动退出")
 
+                # 尝试更新为授权失败消息
+                if warning_msg_id:
+                    try:
+                        await bot.edit_message_text(chat_id=chat_id,
+                                                    message_id=warning_msg_id,
+                                                    text="❌ 未获得授权，Bot 将自动退出")
+                    except Exception as e:
+                        self.logger.error(f"更新授权失败消息失败: {e}")
+
                 # 尝试离开群组
                 try:
                     await bot.leave_chat(chat_id)
@@ -644,6 +659,15 @@ class BotEngine:
                     self.logger.error(f"离开群组 {chat_id} 失败: {e}")
             else:
                 self.logger.debug(f"群组 {chat_id} 已获得授权，Bot 将继续留在群组中")
+
+                # 尝试更新为授权成功消息
+                if warning_msg_id:
+                    try:
+                        await bot.edit_message_text(chat_id=chat_id,
+                                                    message_id=warning_msg_id,
+                                                    text="✅ Bot 已被授权在此群组使用")
+                    except Exception as e:
+                        self.logger.error(f"更新授权成功消息失败: {e}")
         except Exception as e:
             self.logger.error(f"延时退出任务出错: {e}")
 
