@@ -49,7 +49,7 @@ WEATHER_SOURCES = {
         "forecast_url": "https://devapi.qweather.com/v7/weather/7d",
         "website": "https://dev.qweather.com",
         "params": lambda location, api_key: {
-            "location": location,  # 和风天气 API 接受 "lng,lat" 格式的坐标
+            "location": location,  # 和风天气 API 接受 "经度,纬度" 格式的坐标，最多支持小数点后两位
             "key": api_key,
             "lang": "zh"
         }
@@ -62,6 +62,7 @@ WEATHER_SOURCES = {
         "website": "https://caiyunapp.com/api/weather_intro.html",
         "params": lambda location, api_key: {
             # 这里不使用参数，因为已经在 URL 中包含了
+            # 彩云天气 API 使用 "经度,纬度" 格式的坐标
             "dummy": "placeholder"
         }
     }
@@ -725,7 +726,8 @@ async def _fetch_data(source,
             # 尝试解析坐标
             parts = location.split(",")
             if len(parts) == 2:
-                lat, lon = float(parts[0].strip()), float(parts[1].strip())
+                lat, lon = float(parts[0].strip()), float(
+                    parts[1].strip())  # 假设是 "纬度,经度" 格式
                 is_coords = True
                 interface.logger.debug(f"使用坐标: lat={lat}, lon={lon}")
         except ValueError:
@@ -742,8 +744,14 @@ async def _fetch_data(source,
                 f"将位置名称 '{original_location}' 转换为坐标: {lat},{lon}")
 
             # 根据不同天气源的需求格式化坐标
-            if source == "caiyunapp":
-                location = f"{lon},{lat}"  # 彩云天气使用经度,纬度格式
+            if source == "qweather":
+                # 和风天气使用经度,纬度格式，最多支持小数点后两位
+                lon_formatted = round(lon, 2)
+                lat_formatted = round(lat, 2)
+                location = f"{lon_formatted},{lat_formatted}"
+            elif source == "caiyunapp":
+                # 彩云天气使用经度,纬度格式
+                location = f"{lon},{lat}"
             else:
                 location = f"{lat},{lon}"  # 其他使用纬度,经度格式
         else:
@@ -807,8 +815,9 @@ async def get_coordinates(location, module_interface=None):
         try:
             parts = location.split(",")
             if len(parts) == 2:
-                lat, lon = parts[0].strip(), parts[1].strip()
-                return float(lat), float(lon)
+                # 尝试解析坐标，假设是 "纬度,经度" 格式
+                lat, lon = float(parts[0].strip()), float(parts[1].strip())
+                return lat, lon
         except ValueError:
             interface.logger.debug(f"无法解析坐标格式: {location}")
 
