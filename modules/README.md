@@ -249,11 +249,10 @@ async def handle_message(update, context):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    # 检查是否有其他模块的活跃会话
-    if await session_manager.has_other_module_session(user_id,
-                                                      MODULE_NAME,
-                                                      chat_id=chat_id):
-        return  # 其他模块有活跃会话，不处理此消息
+    # 检查是否是本模块的活跃会话
+    if not await session_manager.is_session_owned_by(
+            user_id, MODULE_NAME, chat_id=chat_id):
+        return
 
     # 处理消息
     text = message.text

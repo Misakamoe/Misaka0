@@ -105,7 +105,6 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # 记住用户的位置
         _state["user_locations"][user_id] = location
-        _module_interface.logger.info(f"用户 {user_id} 设置了默认位置: {location}")
 
     # 获取活跃的天气源
     source = _state["active_source"]

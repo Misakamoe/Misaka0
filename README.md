@@ -1,6 +1,13 @@
-# 模块化 Telegram Bot
+<div align="center">
+<h1>Misaka0</h1>
+<p>一个高度可扩展、模块化的 Telegram Bot 框架</p>
 
-一个高度可扩展、模块化的 Telegram Bot 框架
+[![Release](https://img.shields.io/github/v/release/Misakamoe/Misaka0?include_prereleases&label=Release&style=flat&logo=git&color=F05032)](https://github.com/Misakamoe/Misaka0/releases)
+[![Demo](https://img.shields.io/badge/Demo-御坂ゼロ-26A5E4?style=flat&logo=telegram)](https://t.me/Misaka0_bot)
+
+[![dockeri.co](https://dockerico.blankenship.io/image/misakamoe/misaka0)](https://hub.docker.com/r/misakamoe/misaka0)
+
+</div>
 
 ## 特性
 
@@ -13,11 +20,11 @@
 
 ## 项目声明
 
-> 本项目 99% 由 AI 生成
+> 本项目由 AI 生成，每个文件都经过手动校对
 >
 > 作为维护者，我缺乏专业知识以及开源项目经验
 >
-> 因此，针对本项目的 Issue 或 Pull request 不一定会被处理
+> 因此，针对本项目的 Issue 或 Pull request 不一定能被处理
 >
 > ⭐ 欢迎按照 MIT 许可证自由复制和修改此项目以供您自己使用
 
@@ -109,40 +116,8 @@ docker run -d --name telegram-bot -v ./config:/app/config misaka0
 # 或者使用环境变量运行
 docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./config:/app/config misaka0
 
-# 或者直接使用 Docker Hub 镜像
-docker run -d --name telegram-bot -v ./config:/app/config misakamoe/misaka0
-
-# 使用环境变量运行 Docker Hub 镜像
+# 或者使用环境变量运行 Docker Hub 镜像
 docker run -d --name telegram-bot -e TELEGRAM_BOT_TOKEN=your_token_here -e ADMIN_IDS=123456789 -v ./config:/app/config misakamoe/misaka0
-```
-
-**方式 4: Systemd 服务**
-
-创建服务文件 `/etc/systemd/system/telegram-bot.service`：
-
-```ini
-[Unit]
-Description=Modular Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-User=botuser
-WorkingDirectory=/path/to/bot
-ExecStart=/path/to/venv/bin/python /path/to/bot/bot.py
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-启动服务：
-
-```bash
-sudo systemctl enable telegram-bot
-sudo systemctl start telegram-bot
-sudo systemctl status telegram-bot
 ```
 
 ### 使用方法

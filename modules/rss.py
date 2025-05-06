@@ -652,7 +652,7 @@ async def fetch_feed(url):
                     return feed
                 return None
     except Exception as e:
-        _module_interface.logger.error(f"获取 RSS 源 {url} 失败: {e}")
+        _module_interface.logger.warning(f"获取 RSS 源 {url} 失败: {e}")
         return None
 
 
