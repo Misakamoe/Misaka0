@@ -1,15 +1,41 @@
+name: misaka-core
 services:
-  telegram-bot:
+  misaka:
     build: .
-    image: misaka0
-    container_name: misaka0
+    image: misaka-core:local
+    init: true
     restart: unless-stopped
-    volumes:
-      # 持久化配置
-      - ./config:/app/config
+    stop_grace_period: 20s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
     environment:
-      - TZ=Asia/Hong_Kong
-      # 可选：通过环境变量设置配置（优先级高于配置文件）
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - ADMIN_IDS=${ADMIN_IDS:-}
-      # - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      MISAKA_BOT_TOKEN: ${MISAKA_BOT_TOKEN:?Provide a separate test bot token}
+      MISAKA_ADMIN_IDS: ${MISAKA_ADMIN_IDS:?Provide configured superadministrator IDs}
+      MISAKA_DATA_DIR: /app/data/misaka
+      MISAKA_LOG_LEVEL: ${MISAKA_LOG_LEVEL:-INFO}
+      MISAKA_POLLING_TIMEOUT: ${MISAKA_POLLING_TIMEOUT:-30}
+      MISAKA_REQUEST_TIMEOUT: ${MISAKA_REQUEST_TIMEOUT:-60}
+      MISAKA_DROP_PENDING_UPDATES: ${MISAKA_DROP_PENDING_UPDATES:-false}
+      MISAKA_WEB_ENABLED: ${MISAKA_WEB_ENABLED:-false}
+      MISAKA_WEB_HOST: 0.0.0.0
+      MISAKA_WEB_PORT: ${MISAKA_WEB_PORT:-8080}
+      MISAKA_PUBLIC_BASE_URL: ${MISAKA_PUBLIC_BASE_URL:-}
+      MISAKA_OIDC_CLIENT_ID: ${MISAKA_OIDC_CLIENT_ID:-}
+      MISAKA_OIDC_CLIENT_SECRET: ${MISAKA_OIDC_CLIENT_SECRET:-}
+      MISAKA_EXCHANGE_RATE_API_KEY: ${MISAKA_EXCHANGE_RATE_API_KEY:-}
+      MISAKA_QWEATHER_API_KEY: ${MISAKA_QWEATHER_API_KEY:-}
+      MISAKA_QWEATHER_API_HOST: ${MISAKA_QWEATHER_API_HOST:-}
+      MISAKA_OPENWEATHER_API_KEY: ${MISAKA_OPENWEATHER_API_KEY:-}
+      MISAKA_OPEN_METEO_ENABLED: ${MISAKA_OPEN_METEO_ENABLED:-true}
+    ports:
+      - "127.0.0.1:${MISAKA_WEB_PORT:-8080}:${MISAKA_WEB_PORT:-8080}"
+    volumes:
+      - core_data:/app/data/misaka
+
+volumes:
+  core_data:

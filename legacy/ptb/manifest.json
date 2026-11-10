@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "e4758e046dde4ca024cca4a5e5ab351fd422dc11",
+  "files": [
+    {
+      "path": ".dockerignore",
+      "sha256": "7ecfa1717d3f5afb8ad1177c2037df12c83855ca883d77058c2f4dd76c548cb1",
+      "size": 230,
+      "archive": "legacy/ptb/.dockerignore"
+    },
+    {
+      "path": ".gitattributes",
+      "sha256": "13cb7f5e12dd469dc5c88afcf0cd035abe6cd1fc2f30afe224991e66b4262222",
+      "size": 29,
+      "archive": "legacy/ptb/.gitattributes"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+      "sha256": "f3770919edf74ec075157349282b0c6100f4338879390ab7195eefac8be4218f",
+      "size": 1770,
+      "archive": null
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "sha256": "1f103c6a9dd07cd13a9a6f17ace6b813f47747eb9cb7e00488cb2073caaf91bb",
+      "size": 28,
+      "archive": null
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/feature_request.yml",
+      "sha256": "fd0894359f0c56c56911385ec1289396252da312663c39267478f91b30e52450",
+      "size": 659,
+      "archive": null
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/question.yml",
+      "sha256": "f5ed3bd886b313ee68f83c85eebb6fd2a795ba815d2b6a0b21aad5cba1549122",
+      "size": 682,
+      "archive": null
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "sha256": "fe24324af3ec34d6546a73c8e5fdaf0d737e7cd0e8e0843fada7e218a8626ddc",
+      "size": 5416,
+      "archive": "legacy/ptb/.github/workflows/release.yml"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "86ee824d1f028d14a14b163aefa139fde4ed905ab2f2df8931c7780e6b8c6ef2",
+      "size": 168,
+      "archive": "legacy/ptb/.gitignore"
+    },
+    {
+      "path": "Dockerfile",
+      "sha256": "67a7b1831bef1ba6f75e29470ac0f4f5394c055d84a1b0dea88936214e1d9e66",
+      "size": 702,
+      "archive": "legacy/ptb/Dockerfile"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "392796b589da46590dc39e261165791b47367e5ad39352b76d8b4a680d16518a",
+      "size": 1066,
+      "archive": "legacy/ptb/LICENSE"
+    },
+    {
+      "path": "README.md",
+      "sha256": "8a9b9e39871fc0bc676528a76f57ef5ccfb72c466266aee381b1c4ae16c045ba",
+      "size": 5492,
+      "archive": "legacy/ptb/README.md"
+    },
+    {
+      "path": "bot.py",
+      "sha256": "51d97755241ae84977c62d5eb7398bb4330c3879ebfd0db0a1ed34077cecb3b8",
+      "size": 2377,
+      "archive": "legacy/ptb/bot.py"
+    },
+    {
+      "path": "config/config.json.example",
+      "sha256": "83713e9fb76cc9ddab49453b45a322a0d12b236465ee2a218b585c4730a25836",
+      "size": 247,
+      "archive": "legacy/ptb/config/config.json.example"
+    },
+    {
+      "path": "core/__init__.py",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "size": 1,
+      "archive": "legacy/ptb/core/__init__.py"
+    },
+    {
+      "path": "core/bot_engine.py",
+      "sha256": "e656692be9b3d0c159474cabc78c9097406408fec303d77bc13928fed0400207",
+      "size": 33077,
+      "archive": "legacy/ptb/core/bot_engine.py"
+    },
+    {
+      "path": "core/command_manager.py",
+      "sha256": "be304ca786d4c7e2b0805de1c1669e3b7a99432a87651cf2587d7d00e4463180",
+      "size": 42985,
+      "archive": "legacy/ptb/core/command_manager.py"
+    },
+    {
+      "path": "core/config_manager.py",
+      "sha256": "f058c4025d095c4b034164edc0152e3647ec9a5b1a207cc40abb65996e6b76b6",
+      "size": 9320,
+      "archive": "legacy/ptb/core/config_manager.py"
+    },
+    {
+      "path": "core/event_system.py",
+      "sha256": "de7b3d1d8d9e7590bd0251d1ea739bc5fa6761bed97a5e7dfdb2e7f9e2269dce",
+      "size": 8032,
+      "archive": "legacy/ptb/core/event_system.py"
+    },
+    {
+      "path": "core/module_manager.py",
+      "sha256": "4a4c2cb97df3909be50141d200459db8d19172069fcce1374b4f510363fbdc86",
+      "size": 19016,
+      "archive": "legacy/ptb/core/module_manager.py"
+    },
+    {
+      "path": "docker-compose.yml",
+      "sha256": "300b9fd417ad26640718e45c49c8d8fa597f003e8490a21c78c8aad31bdb2284",
+      "size": 427,
+      "archive": "legacy/ptb/docker-compose.yml"
+    },
+    {
+      "path": "docker-entrypoint.sh",
+      "sha256": "16a79a0d3c941832918064748de1bd0d4597daa0fafcf5b8a0d1e1973eb4b265",
+      "size": 2444,
+      "archive": "legacy/ptb/docker-entrypoint.sh"
+    },
+    {
+      "path": "modules/README.md",
+      "sha256": "5c3ad753048cb8fbd2fec5dfaf4c8a68ee8fcce2c5e7759cb0a470923ba49dfa",
+      "size": 12227,
+      "archive": "legacy/ptb/modules/README.md"
+    },
+    {
+      "path": "modules/__init__.py",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "size": 1,
+      "archive": "legacy/ptb/modules/__init__.py"
+    },
+    {
+      "path": "modules/ai.py",
+      "sha256": "d26319ec0bd9a235c7d69fa0f9db10a0ed151b504ae7790c628b5b4395a4220c",
+      "size": 128693,
+      "archive": "legacy/ptb/modules/ai.py"
+    },
+    {
+      "path": "modules/alias.py",
+      "sha256": "c6fc0cc8d6b10905ec18e21a0ae1581e4a043e00adaac8ddf8e039a631e0164a",
+      "size": 27897,
+      "archive": "legacy/ptb/modules/alias.py"
+    },
+    {
+      "path": "modules/echo.py",
+      "sha256": "4b381974efeb5cfc82a640cca342979c352924b6c6e916e5563f6ae1040303e5",
+      "size": 5940,
+      "archive": "legacy/ptb/modules/echo.py"
+    },
+    {
+      "path": "modules/rate.py",
+      "sha256": "b4d415900765333972734b2e263557350cc50a2d649184a8d7f1d21e69b15c07",
+      "size": 27584,
+      "archive": "legacy/ptb/modules/rate.py"
+    },
+    {
+      "path": "modules/reminder.py",
+      "sha256": "ad93b214b0c05ce53d9432e03d9e682cce54bdfeabfa112f24abcd69bd2fe276",
+      "size": 74142,
+      "archive": "legacy/ptb/modules/reminder.py"
+    },
+    {
+      "path": "modules/rss.py",
+      "sha256": "2d53e66ebba42602aed732213fae13d0c65ef938c64ebe4518f6dfe22d7d02ec",
+      "size": 61361,
+      "archive": "legacy/ptb/modules/rss.py"
+    },
+    {
+      "path": "modules/shuo.py",
+      "sha256": "5e415f768922409d4a074257234b8d2222f3d7a4b8856d1607a4b6c6feaca90f",
+      "size": 32770,
+      "archive": "legacy/ptb/modules/shuo.py"
+    },
+    {
+      "path": "modules/sticker.py",
+      "sha256": "057c58e554f054be24f0011f40a3a02afd1e33957b5ff5062d72a5dc228c17b0",
+      "size": 38410,
+      "archive": "legacy/ptb/modules/sticker.py"
+    },
+    {
+      "path": "modules/subconv.py",
+      "sha256": "851857e2620540b079b64570d6353e5c4605604b275673265f1941ba83e720ed",
+      "size": 52901,
+      "archive": "legacy/ptb/modules/subconv.py"
+    },
+    {
+      "path": "modules/weather.py",
+      "sha256": "610707487f934e440ed36fa28ce8d19f579790a533fb1f8eacfc30ce9507b1db",
+      "size": 48531,
+      "archive": "legacy/ptb/modules/weather.py"
+    },
+    {
+      "path": "requirements.txt",
+      "sha256": "f127f0db398e584fa19d4fec82aade497a76b13aaa0b6c32ffabf31caeb49a42",
+      "size": 137,
+      "archive": "legacy/ptb/requirements.txt"
+    },
+    {
+      "path": "start.webp",
+      "sha256": "345ac6d29cb6a18127955ddef3d1db7fb613e775c678b9fe165116d19823323b",
+      "size": 33206,
+      "archive": "legacy/ptb/start.webp"
+    },
+    {
+      "path": "utils/__init__.py",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "size": 1,
+      "archive": "legacy/ptb/utils/__init__.py"
+    },
+    {
+      "path": "utils/currency_data.py",
+      "sha256": "5cf418d018bf3d1daa5b5eb3174f87bcf7d4b556ad2b2c5220f22ee5861d35a9",
+      "size": 21880,
+      "archive": "legacy/ptb/utils/currency_data.py"
+    },
+    {
+      "path": "utils/formatter.py",
+      "sha256": "01102a0de0af1a760b4a315c8da45202319d46e0584013a7aea15ca9d8493101",
+      "size": 12155,
+      "archive": "legacy/ptb/utils/formatter.py"
+    },
+    {
+      "path": "utils/logger.py",
+      "sha256": "6dbf78d48634fa65d26e325c95147b1249a3cfdd8fc42d5f93928412d23b1ac2",
+      "size": 3555,
+      "archive": "legacy/ptb/utils/logger.py"
+    },
+    {
+      "path": "utils/pagination.py",
+      "sha256": "732af60227056628d96d29ec2d530099ed51f7b6626cbc99db2073b8c96b8481",
+      "size": 17569,
+      "archive": "legacy/ptb/utils/pagination.py"
+    },
+    {
+      "path": "utils/session_manager.py",
+      "sha256": "eaa04c85c6582a40114f6f3e18adfa579bbb53f3c4efaae8d514a63baa5fed75",
+      "size": 21057,
+      "archive": "legacy/ptb/utils/session_manager.py"
+    },
+    {
+      "path": "utils/state_manager.py",
+      "sha256": "b7518442f6328ed2eb73616b67934cc81d449ffb47bbecda6bfeae8d4034e6ba",
+      "size": 3637,
+      "archive": "legacy/ptb/utils/state_manager.py"
+    },
+    {
+      "path": "utils/weather_icons.py",
+      "sha256": "1899cd67fbcd456e1a6e7f2f3801cbafff729af0d3f6b96c9ae8a0cb16382dc1",
+      "size": 5673,
+      "archive": "legacy/ptb/utils/weather_icons.py"
+    }
+  ]
+}

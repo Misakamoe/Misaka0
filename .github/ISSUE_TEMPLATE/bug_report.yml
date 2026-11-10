@@ -6,23 +6,24 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to fill out this bug report!
+        Report issues in the Node.js core or WebUI. Archived Python modules are not connected.
+        Never include bot tokens, cookies, initData, authorization codes, or raw configuration files.
 
   - type: input
     id: module-name
     attributes:
-      label: Module Name
-      description: Which module has the issue?
-      placeholder: e.g. rss, ai, reminder
+      label: Component
+      description: Which native component has the issue?
+      placeholder: e.g. core, Telegram commands, WebUI, authentication
     validations:
       required: true
 
   - type: input
     id: module-version
     attributes:
-      label: Module Version
-      description: The version of the module
-      placeholder: e.g. 3.0.1
+      label: Node.js Version
+      description: The Node.js 24 version used by the runtime
+      placeholder: e.g. 24.22.2
     validations:
       required: true
 
@@ -52,7 +53,7 @@ body:
       options:
         - Docker
         - Docker Compose
-        - Python Virtual Environment
+        - Node.js / npm
         - Other
     validations:
       required: true
@@ -70,5 +71,5 @@ body:
     id: logs
     attributes:
       label: Logs/Screenshots
-      description: If applicable, add logs or screenshots
+      description: Add only sanitized logs or screenshots, with all credentials and personal data removed
       render: shell

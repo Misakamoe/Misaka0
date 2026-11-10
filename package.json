@@ -1,0 +1,62 @@
+{
+  "name": "misaka-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "workspaces": [
+    "webui"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "dev:web": "npm run dev --workspace webui",
+    "lint": "eslint src shared webui/src tests scripts *.ts",
+    "typecheck": "tsc --noEmit && npm run typecheck --workspace webui",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "build": "tsc -p tsconfig.build.json && npm run build --workspace webui",
+    "start": "node dist/src/index.js",
+    "verify:archive": "node scripts/verify-archive.mjs",
+    "verify:dist": "node scripts/verify-dist.mjs"
+  },
+  "dependencies": {
+    "@fastify/cookie": "11.1.5",
+    "@fastify/helmet": "13.2.0",
+    "@fastify/rate-limit": "11.2.2",
+    "@fastify/static": "10.1.10",
+    "@grammyjs/runner": "2.0.3",
+    "@lottiefiles/dotlottie-web": "0.82.1",
+    "cldr-core": "49.0.0",
+    "decimal.js": "10.6.0",
+    "fast-xml-parser": "5.12.0",
+    "fastify": "5.12.8",
+    "fflate": "0.8.3",
+    "grammy": "1.46.0",
+    "htmlparser2": "12.0.0",
+    "i18next": "27.0.1",
+    "ipaddr.js": "2.5.0",
+    "linkify-it": "6.1.0",
+    "openid-client": "6.8.9",
+    "pino": "10.4.0",
+    "sharp": "0.35.5",
+    "tlds": "1.261.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.65.0",
+    "@types/node": "24.19.2",
+    "eslint": "10.14.0",
+    "jose": "6.2.15",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.6",
+    "vitest": "5.1.0"
+  },
+  "overrides": {
+    "minimatch": "11.0.5"
+  }
+}

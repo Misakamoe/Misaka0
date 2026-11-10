@@ -1,0 +1,11 @@
+{
+  "appName": "Misaka",
+  "languages": { "auto": "自動", "zh-CN": "中国語（簡体字）", "zh-TW": "中国語（繁体字）", "en": "English", "ja": "日本語" },
+  "actions": { "save": "変更を保存", "saving": "保存中...", "cancel": "キャンセル", "confirm": "確認", "close": "閉じる", "retry": "再試行", "previous": "前へ", "next": "次へ", "add": "追加", "remove": "削除", "moveUp": "上へ移動", "moveDown": "下へ移動", "logout": "ログアウト", "refresh": "更新" },
+  "errors": {
+    "INVALID_INPUT": "表示された項目を確認してください。", "FORBIDDEN": "この操作を行う権限がありません。", "UNAUTHORIZED": "続行するにはログインしてください。", "NOT_FOUND": "この操作またはモジュールは利用できません。", "CONFLICT": "データが別の場所で変更されました。再読み込みしてから保存してください。", "CONFIRMATION_EXPIRED": "この操作は期限切れか、すでに実行済みです。最初からやり直してください。", "CONFIRMATION_REQUIRED": "続行する前に操作を確認してください。", "AI_DISABLED": "AI 機能はインストールされていないか、無効になっています。", "CANCELLED": "操作をキャンセルしました。", "TIMEOUT": "操作がタイムアウトしました。", "OUTCOME_UNKNOWN": "操作の結果を確認できません。再試行する前に現在の状態を確認してください。", "UNAVAILABLE": "サービスを一時的に利用できません。", "RATE_LIMITED": "リクエストが多すぎます。しばらくしてから再試行してください。", "INTERNAL_ERROR": "操作に失敗しました。しばらくしてから再試行してください。", "INVALID_ORIGIN": "信頼できないページからのリクエストです。", "CSRF_INVALID": "ページのセキュリティトークンが期限切れです。ページを再読み込みしてください。", "AUTH_EXPIRED": "セッションの有効期限が切れました。再度ログインしてください。", "AUTH_INVALID": "ログイン情報を検証できません。再度ログインしてください。", "STORAGE_ERROR": "変更を保存できませんでした。以前の状態は保持されています。", "INVALID_OUTPUT": "サービスから無効な結果が返されました。", "CAPACITY": "サービスが混雑しています。しばらくしてから再試行してください。"
+  },
+  "states": { "disabled": "無効", "starting": "起動中", "running": "稼働中", "stopping": "停止処理中", "stopped": "停止", "failed": "異常" },
+  "yes": "はい",
+  "no": "いいえ"
+}

@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "outDir": "dist", "rootDir": ".", "sourceMap": false },
+  "include": ["src/**/*.ts", "shared/**/*.ts", "shared/locales/**/*.json"],
+  "exclude": ["legacy", "node_modules", "dist", "tests", "webui"]
+}

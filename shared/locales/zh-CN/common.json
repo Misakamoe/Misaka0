@@ -1,0 +1,11 @@
+{
+  "appName": "Misaka",
+  "languages": { "auto": "自动", "zh-CN": "简体中文", "zh-TW": "繁体中文", "en": "English", "ja": "日本語" },
+  "actions": { "save": "保存更改", "saving": "正在保存...", "cancel": "取消", "confirm": "确认", "close": "关闭", "retry": "重试", "previous": "上一页", "next": "下一页", "add": "添加", "remove": "移除", "moveUp": "上移", "moveDown": "下移", "logout": "退出登录", "refresh": "刷新" },
+  "errors": {
+    "INVALID_INPUT": "请检查标出的字段。", "FORBIDDEN": "你没有执行此操作的权限。", "UNAUTHORIZED": "请先登录。", "NOT_FOUND": "此操作或模块尚未接入。", "CONFLICT": "数据已在其他入口修改，请重新加载后再保存。", "CONFIRMATION_EXPIRED": "操作已过期或已被使用，请重新发起。", "CONFIRMATION_REQUIRED": "请确认后再继续。", "AI_DISABLED": "AI 入口尚未安装或启用。", "CANCELLED": "操作已取消。", "TIMEOUT": "操作超时。", "OUTCOME_UNKNOWN": "无法确定操作结果，请先检查当前状态，不要直接重试。", "UNAVAILABLE": "服务暂时不可用。", "RATE_LIMITED": "请求过于频繁，请稍后重试。", "INTERNAL_ERROR": "操作失败，请稍后重试。", "INVALID_ORIGIN": "请求来自不受信任的页面。", "CSRF_INVALID": "页面安全凭据已过期，请刷新页面。", "AUTH_EXPIRED": "登录已过期，请重新登录。", "AUTH_INVALID": "无法验证登录信息，请重新登录。", "STORAGE_ERROR": "无法保存更改，原有状态已保留。", "INVALID_OUTPUT": "服务返回了无效结果。", "CAPACITY": "服务繁忙，请稍后重试。"
+  },
+  "states": { "disabled": "未启用", "starting": "启动中", "running": "运行中", "stopping": "停止中", "stopped": "已停止", "failed": "失败" },
+  "yes": "是",
+  "no": "否"
+}

@@ -1,19 +1,25 @@
-# 配置文件和数据
-config/*.json
-data/
-
-# Python 相关
-__pycache__/
-*.py[cod]
-*.so
+node_modules/
+dist/
 .env
-venv/
-
-# 日志文件
+.env.*
+!.env.example
+data/
+config/*.json
 logs/
 *.log
-
-# IDE 相关
+*.bak
+*.tmp
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.cache/
+.vite/
+.kilo/plans/
+.kilo/agent-manager.json
+__pycache__/
+*.py[cod]
+venv/
 .idea/
 .vscode/
 .DS_Store

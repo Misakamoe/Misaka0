@@ -1,0 +1,15 @@
+services:
+  telegram-bot:
+    build: .
+    image: misaka0
+    container_name: misaka0
+    restart: unless-stopped
+    volumes:
+      # 持久化配置
+      - ./config:/app/config
+    environment:
+      - TZ=Asia/Hong_Kong
+      # 可选：通过环境变量设置配置（优先级高于配置文件）
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - ADMIN_IDS=${ADMIN_IDS:-}
+      # - LOG_LEVEL=${LOG_LEVEL:-INFO}

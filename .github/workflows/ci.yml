@@ -1,0 +1,56 @@
+name: Node Core Checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install video sticker codec
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run verify:dist
+      - run: npm run verify:archive
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - name: Validate Compose without printing expanded configuration
+        run: docker compose config --quiet
+        env:
+          MISAKA_BOT_TOKEN: 12345:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          MISAKA_ADMIN_IDS: 1
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results
+          path: test-results/
+          retention-days: 7
+
+  image:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build only, never publish
+        run: docker build -t misaka-core:ci .
+      - name: Verify runtime isolation without network or credentials
+        run: >-
+          docker run --rm --network none --entrypoint node misaka-core:ci
+          --input-type=module -e
+          'import {existsSync} from "node:fs";
+          for (const p of ["legacy","src",".git",".env","bot.py","requirements.txt","node_modules/typescript","/usr/bin/python3"])
+          if (existsSync(p)) throw new Error(`Unexpected runtime path: ${p}`);
+          await import("./dist/src/app.js");'

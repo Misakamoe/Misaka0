@@ -1,0 +1,11 @@
+{
+  "appName": "Misaka",
+  "languages": { "auto": "Automatic", "zh-CN": "Simplified Chinese", "zh-TW": "Traditional Chinese", "en": "English", "ja": "Japanese" },
+  "actions": { "save": "Save changes", "saving": "Saving...", "cancel": "Cancel", "confirm": "Confirm", "close": "Close", "retry": "Retry", "previous": "Previous", "next": "Next", "add": "Add", "remove": "Remove", "moveUp": "Move up", "moveDown": "Move down", "logout": "Log out", "refresh": "Refresh" },
+  "errors": {
+    "INVALID_INPUT": "Check the highlighted fields.", "FORBIDDEN": "You do not have permission for this operation.", "UNAUTHORIZED": "Sign in to continue.", "NOT_FOUND": "This operation or module is not available.", "CONFLICT": "The data changed elsewhere. Reload before saving again.", "CONFIRMATION_EXPIRED": "This operation expired or was already used. Start again.", "CONFIRMATION_REQUIRED": "Confirm this operation before continuing.", "AI_DISABLED": "The AI entry point is not installed or enabled.", "CANCELLED": "The operation was cancelled.", "TIMEOUT": "The operation timed out.", "OUTCOME_UNKNOWN": "The result is uncertain. Check the current state before trying again.", "UNAVAILABLE": "The service is temporarily unavailable.", "RATE_LIMITED": "Too many requests. Try again later.", "INTERNAL_ERROR": "The operation failed. Try again later.", "INVALID_ORIGIN": "This request came from an untrusted page.", "CSRF_INVALID": "The page security token expired. Reload the page.", "AUTH_EXPIRED": "Your session expired. Sign in again.", "AUTH_INVALID": "The login could not be verified. Sign in again.", "STORAGE_ERROR": "Changes could not be saved. The previous state is retained.", "INVALID_OUTPUT": "The service returned an invalid result.", "CAPACITY": "The service is busy. Try again later."
+  },
+  "states": { "disabled": "Disabled", "starting": "Starting", "running": "Running", "stopping": "Stopping", "stopped": "Stopped", "failed": "Failed" },
+  "yes": "Yes",
+  "no": "No"
+}
