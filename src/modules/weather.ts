@@ -1,15 +1,15 @@
 import { z } from 'zod';
-import { emptyInputSchema, revisionSchema, type Locale, type ModuleMetadata } from '../../shared/schemas/index.js';
+import { revisionSchema, type Locale } from '../../shared/schemas/index.js';
 import {
   weatherDefaultInputSchema, weatherDefaultSchema, weatherQueryInputSchema, weatherResultSchema,
-  weatherSearchInputSchema, weatherSearchSchema, type WeatherLocation, type WeatherQueryInput, type WeatherResult, type WeatherSearchInput,
+  type WeatherLocation, type WeatherQueryInput, type WeatherResult, type WeatherSearchInput,
 } from '../../shared/schemas/weather.js';
-import type { ActionExecutor } from '../actions.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { JsonDocument, type JsonStorage } from '../storage.js';
 import { cancellable, createProviderJson, list, number, object, ProviderError, string, type ProviderJson } from './provider-http.js';
 
-export const weatherMetadata: ModuleMetadata = { id: 'weather', nameKey: 'web:weather.name', descriptionKey: 'web:weather.description', schema_version: 1, configurable: false };
+export { weatherMetadata } from './metadata.js';
+export { registerWeatherActions } from './module-actions.js';
 const fileSchema = z.strictObject({ schema_version: z.literal(1), revision: revisionSchema,
   users: z.record(z.string().regex(/^[1-9]\d*$/), weatherDefaultSchema),
 });
@@ -36,9 +36,19 @@ export function isWeatherIntent(text: string): boolean {
 function language(locale: Locale): string { return locale === 'zh-CN' ? 'zh' : locale === 'zh-TW' ? 'zh-hant' : locale; }
 function tidy(value: unknown, max = 128): string { return string(value).replace(/\p{Cc}/gu, ' ').slice(0, max); }
 function coarse(value: number): number { return Math.round(value * 100) / 100; }
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+function dateFormatter(zone: string): Intl.DateTimeFormat {
+  let formatter = dateFormatters.get(zone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    dateFormatters.set(zone, formatter);
+    if (dateFormatters.size > 8) dateFormatters.delete(dateFormatters.keys().next().value!);
+  }
+  return formatter;
+}
 function timezone(value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length > 64) return undefined;
-  try { new Intl.DateTimeFormat('en', { timeZone: value }).format(); return value; } catch { return undefined; }
+  try { dateFormatter(value); return value; } catch { return undefined; }
 }
 function geoQuery(query: string): { name: string; adm?: string; district: boolean } {
   const value = query.replace(/[，,]/g, ' ').trim();
@@ -69,7 +79,7 @@ function geoLocation(row: Record<string, unknown>, provider: string): WeatherLoc
 function localDate(value: unknown, zone = 'UTC'): string {
   const date = typeof value === 'number' ? new Date(value * 1000) : new Date(string(value));
   if (!Number.isFinite(date.getTime())) throw new ProviderError('INVALID_RESPONSE');
-  return new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+  return dateFormatter(zone).format(date);
 }
 function attributes(data: unknown, fallback: string): string[] {
   const urls = list(data).filter((value): value is string => {
@@ -79,12 +89,22 @@ function attributes(data: unknown, fallback: string): string[] {
   return urls.length ? urls : [fallback];
 }
 
+export const WEATHER_CACHE_MAX_BYTES = 128 * 1024;
+export const WEATHER_MAX_TASKS = 4;
+function retainedBytes(value: unknown): number {
+  if (typeof value === 'string') return 32 + value.length * 2;
+  if (Array.isArray(value)) return 32 + value.reduce((bytes, item) => bytes + 8 + retainedBytes(item), 0);
+  if (value && typeof value === 'object') return 32 + Object.entries(value).reduce((bytes, [key, item]) => bytes + 16 + retainedBytes(key) + retainedBytes(item), 0);
+  return 8;
+}
+
 export class WeatherService {
   private readonly file: JsonDocument<z.infer<typeof fileSchema>>;
   private readonly json: ProviderJson;
   private readonly now: () => number;
   private readonly abort = new AbortController();
-  private readonly cache = new Map<string, { expires: number; value: unknown }>();
+  private readonly cache = new Map<string, { expires: number; value: unknown; bytes: number }>();
+  private cacheBytes = 0;
   private readonly tasks = new Map<string, Promise<unknown>>();
   private readonly cooldown = new Map<string, number>();
   constructor(storage: JsonStorage, private readonly options: WeatherOptions = {}) {
@@ -105,13 +125,27 @@ export class WeatherService {
     return this.getDefault(userId);
   }
   private async memo<T>(key: string, ttl: number, loader: () => Promise<T>, signal: AbortSignal): Promise<T> {
+    throwIfAborted(signal); throwIfAborted(this.abort.signal);
+    for (const [entryKey, entry] of this.cache) if (entry.expires <= this.now()) {
+      this.cache.delete(entryKey); this.cacheBytes -= entry.bytes;
+    }
     const cached = this.cache.get(key);
-    if (cached && cached.expires > this.now()) return structuredClone(cached.value) as T;
+    if (cached) {
+      this.cache.delete(key); this.cache.set(key, cached);
+      return structuredClone(cached.value) as T;
+    }
     if (!this.tasks.has(key)) {
-      if (this.tasks.size >= 32) throw new AppError('CAPACITY');
+      if (this.tasks.size >= WEATHER_MAX_TASKS) throw new AppError('CAPACITY');
       const task = loader().then(value => {
-        this.cache.delete(key); this.cache.set(key, { expires: this.now() + ttl, value });
-        while (this.cache.size > 128) this.cache.delete(this.cache.keys().next().value!);
+        throwIfAborted(this.abort.signal);
+        const bytes = retainedBytes(value) + retainedBytes(key) + 64;
+        if (bytes <= WEATHER_CACHE_MAX_BYTES) {
+          while (this.cache.size >= 32 || this.cacheBytes + bytes > WEATHER_CACHE_MAX_BYTES) {
+            const oldest = this.cache.keys().next().value!;
+            this.cacheBytes -= this.cache.get(oldest)!.bytes; this.cache.delete(oldest);
+          }
+          this.cache.set(key, { expires: this.now() + ttl, value, bytes }); this.cacheBytes += bytes;
+        }
         return value;
       }).finally(() => { this.tasks.delete(key); });
       this.tasks.set(key, task);
@@ -281,7 +315,7 @@ export class WeatherService {
       const zone = timezone(rawZone);
       const input = { ...raw, location: { ...location, latitude: coarse(location.latitude), longitude: coarse(location.longitude), ...(zone ? { timezone: zone } : {}) } };
       weatherQueryInputSchema.parse(input);
-      const key = `weather:${input.location.latitude}:${input.location.longitude}:${input.mode}:${input.days}:${locale}`;
+      const key = `weather:${input.location.latitude}:${input.location.longitude}:${input.mode}:${input.days}:${locale}:${zone ?? ''}`;
       const value = await this.memo(key, 600_000, async () => {
         const providers: WeatherResult['provider'][] = [...(this.options.qweatherHost && this.options.qweatherKey ? ['qweather' as const] : []),
           ...(this.options.openWeatherKey ? ['openweather' as const] : []), ...(this.options.openMeteo === false ? [] : ['open-meteo' as const])];
@@ -290,7 +324,10 @@ export class WeatherService {
         for (const [index, provider] of providers.entries()) {
           if ((this.cooldown.get(provider) ?? 0) > this.now()) continue;
           try {
-            const value = await this.queryProvider(input, locale, provider);
+            // Shared entries retain coordinates/provider timezone, never a caller's personal label.
+            const value = await this.queryProvider({ ...input, location: {
+              ...input.location, id: 'coordinates', name: '', label: `${input.location.latitude}, ${input.location.longitude}`, country: '',
+            } }, locale, provider);
             return { ...value, fallback: index > 0 };
           } catch (error) {
             throwIfAborted(this.abort.signal); last = error;
@@ -303,13 +340,5 @@ export class WeatherService {
       return { ...value, location: { ...input.location, ...(resultZone ? { timezone: resultZone } : {}) } };
     } catch (error) { throwIfAborted(signal); throw this.error(error); }
   }
-  async stop(): Promise<void> { this.abort.abort(); await Promise.allSettled(this.tasks.values()); this.cache.clear(); }
-}
-
-export function registerWeatherActions(executor: Pick<ActionExecutor, 'register'>, service: WeatherService): void {
-  const common = { permission: 'any', scopes: ['private', 'group'], sources: ['telegram', 'http'], effect: 'read', timeoutMs: 60_000, aiVisible: false } as const;
-  executor.register({ ...common, id: 'weather.search', input: weatherSearchInputSchema, output: weatherSearchSchema, execute: (input, context) => service.search(input, context.language, context.signal) });
-  executor.register({ ...common, id: 'weather.query', input: weatherQueryInputSchema, output: weatherResultSchema, execute: (input, context) => service.query(input, context.language, context.signal) });
-  executor.register({ ...common, id: 'weather.default.get', permission: 'self', scopes: ['private'], input: emptyInputSchema, output: weatherDefaultSchema, execute: (_input, context) => service.getDefault(context.actorId) });
-  executor.register({ ...common, id: 'weather.default.set', permission: 'self', scopes: ['private'], effect: 'personal_write', input: weatherDefaultInputSchema, output: weatherDefaultSchema, execute: (input, context) => service.setDefault(context.actorId, input, context.signal) });
+  async stop(): Promise<void> { this.abort.abort(); await Promise.allSettled(this.tasks.values()); this.cache.clear(); this.cacheBytes = 0; this.cooldown.clear(); }
 }

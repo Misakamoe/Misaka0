@@ -71,5 +71,5 @@ export async function coreFixture(options: {
   };
   const executor = new ActionExecutor(services);
   return { directory, storage, access, configuration, aliases, rss, rate, weather, stickers, subconv, rssSend, effects, audit, services, executor,
-    close: async () => { await Promise.all([rss.stop(), rate.stop(), weather.stop(), stickers.stop()]); await executor.close(); await storage.close(); await rm(directory, { recursive: true, force: true }); } };
+    close: async () => { await Promise.all([rss.stop(), rate.stop(), weather.stop(), stickers.stop(), subconv.stop()]); await executor.close(); await storage.close(); await rm(directory, { recursive: true, force: true }); } };
 }

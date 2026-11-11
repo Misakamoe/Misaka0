@@ -1,77 +1,21 @@
 import { createHash } from 'node:crypto';
-import { lookup as dnsLookup } from 'node:dns/promises';
 import type { LookupAddress } from 'node:dns';
-import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
-import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
-import { Readable } from 'node:stream';
-import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { Parser } from 'htmlparser2';
-import ipaddr from 'ipaddr.js';
 import { LinkifyIt } from 'linkify-it';
 import tlds from 'tlds' with { type: 'json' };
-import type { FeedErrorCode } from '../../shared/schemas/rss.js';
+import { NetworkError as FeedFetchError, normalizePublicUrl as normalizeFeedUrl, publicAddress, resolveFeedAddresses,
+  abortable, readBody, networkGet as transport, type NetworkTransport as FeedTransport, type NetworkResponse as FeedTransportResponse } from '../network.js';
+export { NetworkError as FeedFetchError, normalizePublicUrl as normalizeFeedUrl, publicAddress, resolveFeedAddresses, resolvePublicAddresses } from '../network.js';
+export type { NetworkTransport as FeedTransport, NetworkResponse as FeedTransportResponse, NetworkRequestOptions as FeedRequestOptions } from '../network.js';
 import { FeedContentParseError, parseFormattedContent } from './rss-content.js';
-import type { FeedContentFormat } from './rss-format.js';
-
-export interface FeedLink { offset: number; length: number; url: string }
-export interface FeedEntry {
-  id: string; title: string; url?: string; content: string; contentLinks?: FeedLink[]; publishedAt?: string; images?: string[]; image?: string;
-  animationIndices?: number[]; imagePositions?: { offset: number; imageIndex: number }[];
-  contentFormat?: FeedContentFormat;
-}
-export interface ParsedFeed { title: string; entries: FeedEntry[] }
-export interface FeedValidators { etag?: string; lastModified?: string }
-export interface FeedResponse extends FeedValidators { notModified: boolean; feed?: ParsedFeed; finalUrl: string }
-export type FeedFetcher = (url: string, validators: FeedValidators, signal: AbortSignal) => Promise<FeedResponse>;
-export type RssPhotoFetcher = (url: string, callerSignal: AbortSignal, maxBytes?: number) => Promise<Buffer>;
-export class FeedFetchError extends Error {
-  constructor(readonly code: FeedErrorCode, readonly status?: number, readonly retryAfterMs?: number) { super(code); }
-}
-export const FEED_MAX_BYTES = 2 * 1024 * 1024;
-export const RSS_PHOTO_MAX_SOURCE_BYTES = 20 * 1024 * 1024;
-export const FEED_MAX_LINKS = 64;
-export const FEED_MAX_IMAGES = 1000;
-export const FEED_MAX_IMAGE_BYTES = 1024 * 1024;
-export const FEED_MAX_IMAGE_POSITIONS = 1000;
+import { contentLinkUrl, isGifImageUrl, FEED_MAX_BYTES, RSS_PHOTO_MAX_SOURCE_BYTES, FEED_MAX_LINKS, FEED_MAX_IMAGES,
+  FEED_MAX_IMAGE_BYTES, FEED_MAX_IMAGE_POSITIONS, type FeedLink, type FeedEntry, type ParsedFeed, type FeedFetcher, type RssPhotoFetcher } from './rss-contract.js';
+export { contentLinkUrl, isGifImageUrl, FEED_MAX_BYTES, RSS_PHOTO_MAX_SOURCE_BYTES, FEED_MAX_LINKS, FEED_MAX_IMAGES,
+  FEED_MAX_IMAGE_BYTES, FEED_MAX_IMAGE_POSITIONS } from './rss-contract.js';
+export type { FeedLink, FeedEntry, ParsedFeed, FeedValidators, FeedResponse, FeedFetcher, RssPhotoFetcher } from './rss-contract.js';
 const linkify = new LinkifyIt({ fuzzyLink: true, fuzzyEmail: true, fuzzyIP: false, urlAuth: true, maxLength: 2048, tlds, '---': true });
-export function publicAddress(address: string): boolean {
-  try {
-    if (!isIP(address)) return false;
-    const parsed = ipaddr.process(address);
-    return parsed.range() === 'unicast';
-  } catch { return false; }
-}
-export function normalizeFeedUrl(input: string): string {
-  try {
-    if (input.length > 2048 || [...input].some(character => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127)) throw new Error();
-    const url = new URL(input);
-    const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '');
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port
-      || !host.includes('.') && !isIP(host) || /(?:^|\.)(?:localhost|local|internal|test|invalid|example|onion)$/.test(host)
-      || isIP(host) && !publicAddress(host)) throw new Error();
-    url.hash = '';
-    return url.href;
-  } catch { throw new FeedFetchError('UNSAFE_URL'); }
-}
-export function contentLinkUrl(input: string, baseUrl?: string): string | undefined {
-  try {
-    if (input.length > 2048 || /[\p{Cc}\p{Cf}]/u.test(input)) return;
-    const url = new URL(input, baseUrl);
-    normalizeFeedUrl(url.href);
-    // Article anchors matter to readers; only feed retrieval URLs discard fragments.
-    return url.href;
-  } catch { return; }
-}
-export function isGifImageUrl(input: string): boolean {
-  try {
-    const safe = contentLinkUrl(input);
-    if (safe === undefined) return false;
-    const pathname = new URL(safe).pathname;
-    return /\.gif$/i.test(pathname) || /\.gif$/i.test(decodeURIComponent(pathname));
-  } catch { return false; }
-}
 function isGifMime(type: string | undefined): boolean { return type?.split(';', 1)[0]?.trim().toLowerCase() === 'image/gif'; }
 export function findFeedLinks(content: string, anchors: readonly { offset: number; length: number; url?: string }[] = []): FeedLink[] {
   const links: FeedLink[] = anchors.filter((span): span is FeedLink => span.url !== undefined).slice(0, FEED_MAX_LINKS);
@@ -259,84 +203,6 @@ export function parseFeed(xml: string, baseUrl: string): ParsedFeed {
   }
 }
 
-export interface FeedTransportResponse { status: number; headers: IncomingHttpHeaders; body: Readable }
-export interface FeedRequestOptions { addresses: LookupAddress[]; headers: Record<string, string>; signal: AbortSignal }
-export type FeedTransport = (url: URL, options: FeedRequestOptions) => Promise<FeedTransportResponse>;
-const transport: FeedTransport = (url, options) => new Promise((resolve, reject) => {
-  const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
-    method: 'GET', agent: false, headers: options.headers,
-    // Pin every answer so Node can fall back between verified IPv4/IPv6 addresses without another DNS lookup.
-    lookup: (_hostname, settings, callback) => settings.all
-      ? callback(null, options.addresses) : callback(null, options.addresses[0]!.address, options.addresses[0]!.family),
-  }, response => resolve({ status: response.statusCode ?? 0, headers: response.headers, body: response }));
-  const abort = () => request.destroy(new FeedFetchError('TIMEOUT'));
-  options.signal.addEventListener('abort', abort, { once: true });
-  request.once('close', () => options.signal.removeEventListener('abort', abort));
-  request.on('error', reject);
-  if (options.signal.aborted) abort();
-  request.end();
-});
-async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) throw new FeedFetchError('TIMEOUT');
-  return new Promise<T>((resolve, reject) => {
-    const abort = () => reject(new FeedFetchError('TIMEOUT'));
-    signal.addEventListener('abort', abort, { once: true });
-    void promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
-  });
-}
-async function readBody(response: FeedTransportResponse, signal: AbortSignal, maxBytes = FEED_MAX_BYTES): Promise<Buffer> {
-  const encoding = response.headers['content-encoding']?.toLowerCase().trim();
-  if (encoding && !['gzip', 'deflate', 'br', 'identity'].includes(encoding)) { response.body.destroy(); throw new FeedFetchError('INVALID_FEED'); }
-  const decoder = encoding === 'gzip' ? createGunzip() : encoding === 'deflate' ? createInflate() : encoding === 'br' ? createBrotliDecompress() : undefined;
-  const body = decoder ?? response.body;
-  const destroy = (error: Error) => { response.body.destroy(error); decoder?.destroy(error); };
-  const abort = () => destroy(new FeedFetchError('TIMEOUT'));
-  let compressed = 0;
-  response.body.on('data', (chunk: Buffer) => { compressed += chunk.length; if (compressed > maxBytes) destroy(new FeedFetchError('TOO_LARGE')); });
-  response.body.on('error', error => decoder?.destroy(error));
-  signal.addEventListener('abort', abort, { once: true });
-  if (decoder) response.body.pipe(decoder);
-  if (signal.aborted) abort();
-  try {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const value of body) {
-      const chunk = Buffer.from(value as Uint8Array);
-      size += chunk.length;
-      if (size > maxBytes) throw new FeedFetchError('TOO_LARGE');
-      chunks.push(chunk);
-    }
-    return Buffer.concat(chunks, size);
-  } finally { signal.removeEventListener('abort', abort); response.body.destroy(); decoder?.destroy(); }
-}
-export async function resolveFeedAddresses(hostname: string, signal: AbortSignal,
-  lookup: (hostname: string) => Promise<LookupAddress[]> = name => dnsLookup(name, { all: true, verbatim: true }), query: FeedTransport = transport): Promise<LookupAddress[]> {
-  const addresses = await abortable(lookup(hostname), signal);
-  const fake = (address: string) => isIP(address) === 4 && /^198\.(18|19)\./.test(address);
-  if (!addresses.some(address => fake(address.address)) || addresses.some(address => !publicAddress(address.address) && !fake(address.address))) return addresses;
-  // TUN fake-IP DNS is not permission to access reserved networks. Resolve publicly over pinned, verified TLS instead.
-  return resolvePublicAddresses(hostname, signal, query);
-}
-export async function resolvePublicAddresses(hostname: string, signal: AbortSignal, query: FeedTransport = transport): Promise<LookupAddress[]> {
-  const replies = await Promise.all(['A', 'AAAA'].map(async type => {
-    const url = new URL('https://cloudflare-dns.com/dns-query');
-    url.searchParams.set('name', hostname); url.searchParams.set('type', type);
-    const response = await query(url, { addresses: [{ address: '1.1.1.1', family: 4 }], headers: { accept: 'application/dns-json' }, signal });
-    if (response.status !== 200 || Number(response.headers['content-length']) > 65_536) { response.body.destroy(); throw new FeedFetchError('NETWORK'); }
-    const body = await readBody(response, signal);
-    if (body.length > 65_536) throw new FeedFetchError('NETWORK');
-    let data: Record<string, unknown>;
-    try { data = object(JSON.parse(body.toString('utf8'))); } catch { throw new FeedFetchError('NETWORK'); }
-    if (data.Status !== 0 || array(data.Answer).length > 128) throw new FeedFetchError('NETWORK');
-    const answers = array(data.Answer).map(object).filter(answer => answer.type === 1 || answer.type === 28)
-      .map(answer => ({ address: text(answer.data), family: answer.type === 1 ? 4 : 6 }));
-    if (answers.some(answer => !publicAddress(answer.address) || isIP(answer.address) !== answer.family)) throw new FeedFetchError('UNSAFE_URL');
-    return answers;
-  }));
-  const result = replies.flat();
-  if (!result.length) throw new FeedFetchError('NETWORK');
-  return result;
-}
 export function createFeedFetcher(options: {
   lookup?: (hostname: string, signal: AbortSignal) => Promise<LookupAddress[]>; transport?: FeedTransport; timeoutMs?: number;
 } = {}): FeedFetcher {

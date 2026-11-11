@@ -26,6 +26,7 @@ import type { ProviderJson } from '../src/modules/provider-http.js';
 import { commands, menuCommands } from '../src/telegram/commands.js';
 import { buttonRows, callbacks, liveCallbacks, recordContent, richText, telegramMessage } from './support/telegram.js';
 import { offlineStickers } from './support/core.js';
+import { ResourcePolicy } from '../src/resources.js';
 
 const me: UserFromGetMe = {
   id: 12345, is_bot: true, first_name: 'Offline', username: 'offline_bot',
@@ -1082,12 +1083,12 @@ describe('Telegram with real Actions and persistent services', () => {
     expect(richText(f.last(10))).toContain('Sticker conversion');
     expect(richText(f.last(10))).toContain(translator('en')('web:subconv.name'));
     expect(richText(f.last(10))).not.toMatch(/hug|reminder|echo/i);
-    expect(commands).toHaveLength(18);
+    expect(commands).toHaveLength(23);
     await f.bot.handleUpdate(text('/help', 10));
     expect(richText(f.last(10))).toContain('/sticker');
     expect(richText(f.last(10))).toContain('/subconv');
     expect(richText(f.last(10))).toContain('Six native modules');
-    expect(richText(f.last(10))).toContain('need no administrator role');
+    expect(richText(f.last(10))).toContain('/sticker and /subconv remain private-chat only without an administrator role');
   });
 
   it('binds alias text entry to its owner/topic and gives recognized commands priority without fabricating updates', async () => {
@@ -1426,7 +1427,7 @@ describe('Telegram with real Actions and persistent services', () => {
     expect(f.calls.some(call => call.method === 'getChat')).toBe(false);
   });
 
-  it('uses only cached group IDs and revision, and requires a fresh click after a conflict refresh', async () => {
+  it('uses only cached group IDs and target revisions, and requires a fresh click after a target conflict refresh', async () => {
     const f = await fixture();
     await f.access.authorize(-200, 'Target', 1, 0);
     await f.bot.handleUpdate(text('/listgroups'));
@@ -1435,7 +1436,8 @@ describe('Telegram with real Actions and persistent services', () => {
     const forged = button(buttonData(pane, 'revoke:-200').replace(/revoke:-200$/, 'revoke:-999'), pane);
     await f.bot.handleUpdate(forged);
     expect(f.adapter.panels.size).toBe(1);
-    await f.access.authorize(-201, 'Concurrent target', 1, f.access.snapshot().revision);
+    await f.access.revoke(-200, 1, f.access.snapshot().revision);
+    await f.access.authorize(-200, 'Target', 1, f.access.snapshot().revision);
     await f.bot.handleUpdate(stale);
     expect(f.access.isAllowed(-200)).toBe(true);
     expect(f.adapter.panels.size).toBe(1);
@@ -1573,6 +1575,39 @@ describe('Telegram with real Actions and persistent services', () => {
     expect(f.calls.filter(call => call.method === 'answerCallbackQuery').at(-1)!.payload.text).toContain('expired');
   });
 
+  it('approves two independently invited groups despite unrelated language and membership changes', async () => {
+    const f = await fixture();
+    await f.bot.handleUpdate(joined(10, -200));
+    const first = f.approvalFor(1);
+    await f.bot.handleUpdate(joined(10, -201));
+    const second = f.approvalFor(1);
+    await f.configuration.updateSettings({ defaultLanguage: 'en' }, 0);
+    const bookkeeping = joined(10, -201);
+    bookkeeping.my_chat_member!.old_chat_member = { status: 'member', user: me };
+    await f.bot.handleUpdate(bookkeeping);
+    await f.bot.handleUpdate(f.click('confirm', first));
+    await f.bot.handleUpdate(f.click('confirm', second));
+    expect(f.access.isAllowed(-200)).toBe(true);
+    expect(f.access.isAllowed(-201)).toBe(true);
+    expect(richText(first)).toContain('is authorized');
+    expect(richText(second)).toContain('is authorized');
+    expect(f.calls.filter(call => call.method === 'getChat')).toHaveLength(2);
+  });
+
+  it('retains cached group-list revoke controls through writes to another group', async () => {
+    const f = await fixture();
+    await f.access.authorize(-200, 'Target', 1, 0);
+    await f.bot.handleUpdate(text('/listgroups'));
+    const listing = f.last();
+    await f.bot.handleUpdate(joined(10, -201));
+    await f.bot.handleUpdate(f.click('revoke:-200', listing));
+    const approval = f.approvalFor(1);
+    await f.bot.handleUpdate(joined(10, -202));
+    await f.bot.handleUpdate(f.click('confirm', approval));
+    expect(f.access.isAllowed(-200)).toBe(false);
+    expect(richText(approval)).toContain('no longer authorized');
+  });
+
   it('expires approval tokens and invalidates approvals after relevant state changes', async () => {
     const f = await fixture();
     await f.bot.handleUpdate(joined());
@@ -1585,7 +1620,10 @@ describe('Telegram with real Actions and persistent services', () => {
     await f.bot.handleUpdate(joined(10, -201));
     const next = f.approvalFor(1);
     const stale = f.click('confirm', next);
-    await f.configuration.updateSettings({ defaultLanguage: 'en' }, 0);
+    const leave = joined(10, -201);
+    leave.my_chat_member!.old_chat_member = { status: 'member', user: me };
+    leave.my_chat_member!.new_chat_member = { status: 'left', user: me };
+    await f.bot.handleUpdate(leave);
     await f.bot.handleUpdate(stale);
     expect(f.access.isAllowed(-201)).toBe(false);
     expect(liveCallbacks(next)).toEqual([]);
@@ -1759,15 +1797,21 @@ describe('Telegram sticker panels with real scoped Actions', () => {
   }
 
   async function stickerFixture() {
+    const tempDirectory = await mkdtemp(join(process.cwd(), '.kilo', 'sticker-integration-test-'));
+    const sentData: Buffer[] = [];
     const transport = {
       download: vi.fn<StickerTransport['download']>(async file => originals[file.kind]),
       getSet: vi.fn<StickerTransport['getSet']>(async name => ({ name, title: '<literal pack>',
         stickers: [packFile('static'), packFile('animated'), packFile('video')] })),
-      send: vi.fn<StickerTransport['send']>(async () => ++sequence),
+      send: vi.fn<StickerTransport['send']>(async (_target, result) => {
+        sentData.push(Buffer.isBuffer(result.data) ? result.data : await readFile(result.data.path));
+        return ++sequence;
+      }),
     };
     const convert = vi.fn<StickerConverter>(async request => ({ data: outputs[request.format], format: request.format, width: 512, height: 256 }));
-    const f = await fixture({}, undefined, { sticker: { transport, convert } });
-    return { ...f, transport, convert };
+    const f = await fixture({}, undefined, { sticker: { transport, convert, tempDirectory, resources: new ResourcePolicy({ heavyBytes: 48 * 1024 * 1024 }) } });
+    cleanup.push(() => rm(tempDirectory, { recursive: true, force: true }));
+    return { ...f, transport, convert, sentData };
   }
 
   function gate() {
@@ -2024,7 +2068,7 @@ describe('Telegram sticker panels with real scoped Actions', () => {
     const upload = f.transport.send.mock.calls[0]!;
     expect(upload[0]).toEqual({ chatId: 10, replyTo });
     expect(upload[1]).toMatchObject({ filename: 'stickers.zip', delivery: 'document' });
-    const entries = unzipSync(upload[1].data);
+    const entries = unzipSync(f.sentData[0]!);
     expect(Object.keys(entries)).toEqual(['001.png', '002.tgs', '003.webm']);
     expect(Object.values(entries).map(value => Buffer.from(value))).toEqual([png, tgs, webm]);
   });
@@ -2039,7 +2083,7 @@ describe('Telegram sticker panels with real scoped Actions', () => {
     expect(JSON.stringify(pane.rich_message)).not.toContain('addstickers');
     await f.bot.handleUpdate(f.click('stformat:original', pane, 10));
     await sent(pane, 'zip');
-    expect(Object.keys(unzipSync(f.transport.send.mock.calls[0]![1].data))).toEqual(['001.tgs']);
+    expect(Object.keys(unzipSync(f.sentData[0]!))).toEqual(['001.tgs']);
   });
 
   it('retains multiple source panels with independent modes and message-bound deliveries', async () => {

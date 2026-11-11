@@ -6,6 +6,7 @@ describe('command spelling suggestions', () => {
     ['hlep', 'help'], ['hepl', 'help'], ['hep', 'help'], ['helpp', 'help'], ['heop', 'help'],
     ['ＨＬＥＰ', 'help'], ['moduels', 'modules'], ['commnads', 'commands'], ['commad', 'commands'],
     ['setings', 'settings'], ['alais', 'alias'], ['addgrop', 'addgroup'], ['listgruops', 'listgroups'],
+    ['chatss', 'chats'], ['memroy', 'memory'], ['taks', 'tasks'], ['aiconfg', 'aiconfig'],
   ])('suggests %s -> %s for nearby spelling errors', (input, expected) => {
     expect(suggestCommands(input!, true, true, () => [])).toEqual([expected]);
   });
@@ -29,6 +30,13 @@ describe('command spelling suggestions', () => {
     expect(suggestCommands('listgruops', true, false, aliasesFor)).toEqual([]);
     expect(suggestCommands('addgrop', true, false, aliasesFor)).toEqual(['addgroup']);
     expect(suggestCommands('statss', false, true, aliasesFor)).toEqual([]);
+    aliasesFor.mockClear();
+    expect(suggestCommands('aiconfg', false, true, aliasesFor)).toEqual([]);
+    expect(aliasesFor).not.toHaveBeenCalledWith('aiconfig');
+    expect(suggestCommands('aiconfg', true, false, aliasesFor)).toEqual([]);
+    expect(suggestCommands('chatss', true, false, aliasesFor)).toEqual([]);
+    expect(suggestCommands('memroy', false, false, aliasesFor)).toEqual([]);
+    expect(suggestCommands('taks', false, false, aliasesFor)).toEqual(['tasks']);
   });
 
   it('returns at most three equally close canonical commands in stable registry order', () => {

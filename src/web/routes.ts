@@ -57,6 +57,10 @@ export async function registerWebRoutes(app: FastifyInstance, deps: WebDependenc
   });
 
   app.get('/health', async () => ({ ok: true }));
+  app.get('/auth/methods', async request => {
+    if (!z.strictObject({}).safeParse(request.query).success) throw new AppError('INVALID_INPUT');
+    return { oidc: auth.oidcEnabled, miniapp: true };
+  });
   const rateLimit = { max: 20, timeWindow: '1 minute' };
   app.get('/auth/login', { config: { rateLimit } }, async (request, reply) => {
     const { url, binding } = await auth.begin(request.invocationSignal);
@@ -70,7 +74,7 @@ export async function registerWebRoutes(app: FastifyInstance, deps: WebDependenc
       reply.setCookie(SESSION_COOKIE, token, { ...cookieOptions, maxAge: 3600 });
       return reply.redirect('/');
     } catch (error) {
-      const code = error instanceof AppError && ['FORBIDDEN', 'CAPACITY', 'CANCELLED'].includes(error.code) ? error.code : 'AUTH_INVALID';
+      const code = error instanceof AppError && ['FORBIDDEN', 'CAPACITY', 'CANCELLED', 'UNAVAILABLE'].includes(error.code) ? error.code : 'AUTH_INVALID';
       return reply.redirect(`/?auth_error=${code}`);
     }
   });
@@ -116,7 +120,8 @@ export async function registerWebRoutes(app: FastifyInstance, deps: WebDependenc
   for (const [path, action] of [
     ['/api/status', 'core.status'], ['/api/preferences', 'preferences.get'],
     ['/api/settings/core', 'core.settings.get'], ['/api/settings/core/schema', 'core.settings.schema'],
-    ['/api/modules', 'modules.list'],
+    ['/api/modules', 'modules.list'], ['/api/ai/admin', 'ai.admin.get'],
+    ['/api/ai/admin/extensions/status', 'ai.extensions.status'],
   ]) {
     app.get(path!, async (request, reply) => sendResult(reply, await deps.executor.execute(context(request), action!, request.query)));
   }
@@ -140,7 +145,18 @@ export async function registerWebRoutes(app: FastifyInstance, deps: WebDependenc
   app.get('/api/weather/default', async (request, reply) => sendResult(reply, await deps.executor.execute(context(request), 'weather.default.get', {})));
   for (const [method, path, action] of [
     ['PUT', '/api/groups', 'groups.authorize'], ['POST', '/api/groups/revoke', 'groups.revoke'],
+    ['POST', '/api/groups/state', 'groups.state'],
     ['PUT', '/api/preferences', 'preferences.set'], ['PUT', '/api/settings/core', 'core.settings.update'],
+    ['PUT', '/api/ai/admin', 'ai.admin.update'], ['POST', '/api/ai/disable', 'ai.admin.disable'],
+    ['POST', '/api/ai/setup', 'ai.admin.setup'],
+    ['POST', '/api/ai/credentials', 'ai.admin.secret.update'],
+    ['POST', '/api/ai/admin/extensions/skills/install', 'ai.skills.install'],
+    ['POST', '/api/ai/admin/extensions/skills/review', 'ai.skills.review'],
+    ['POST', '/api/ai/admin/extensions/mcp/discover', 'ai.mcp.discover'],
+    ['POST', '/api/ai/admin/extensions/sandbox/review', 'ai.sandbox.review'],
+    ['POST', '/api/ai/admin/extensions/sandbox/local/review', 'ai.sandbox.local.review'],
+    ['POST', '/api/ai/admin/extensions/sandbox/local/probe', 'ai.sandbox.local.probe'],
+    ['POST', '/api/ai/admin/extensions/mcp/stdio/discover', 'ai.mcp.stdio.discover'],
     ['POST', '/api/rss', 'rss.add'], ['PUT', '/api/rss', 'rss.update'], ['POST', '/api/rss/remove', 'rss.remove'],
     ['POST', '/api/rate/convert', 'rate.convert'], ['POST', '/api/weather/search', 'weather.search'], ['POST', '/api/weather/query', 'weather.query'], ['PUT', '/api/weather/default', 'weather.default.set'],
   ] as const) {

@@ -12,6 +12,7 @@ export interface StartupConfig {
   readonly requestTimeout: number;
   readonly dropPendingUpdates: boolean;
   readonly providers?: Readonly<{ exchangeRateKey?: string; openWeatherKey?: string; qweatherKey?: string; qweatherHost?: string; openMeteo?: boolean }>;
+  readonly ai?: Readonly<{ masterKey?: string; secrets: Readonly<Record<string, string>> }>;
   readonly web: Readonly<{
     enabled: boolean;
     host: string;
@@ -101,6 +102,17 @@ export async function loadConfig(options: { env?: NodeJS.ProcessEnv; cwd?: strin
     qweatherHost: optional('QWEATHER_API_HOST', /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+qweatherapi\.com$/),
     openMeteo: boolean('OPEN_METEO_ENABLED', true),
   });
+  const masterKey = optional('AI_MASTER_KEY', /^[a-fA-F0-9]{64}$/);
+  const aiSecrets: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (!name.startsWith('MISAKA_AI_SECRET_') || !value) continue;
+    const id = name.slice('MISAKA_AI_SECRET_'.length);
+    if (!/^[A-Z][A-Z0-9_]{0,47}$/.test(id) || value.length > 4096 || /\s/u.test(value)
+      || [...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) {
+      invalid.push(/^MISAKA_AI_SECRET_[A-Z0-9_]{1,48}$/.test(name) ? name : 'MISAKA_AI_SECRET');
+    } else aiSecrets[id] = value;
+  }
+  const ai = Object.freeze({ masterKey, secrets: Object.freeze(aiSecrets) });
   const host = text('WEB_HOST', '127.0.0.1');
   if (!isIP(host) && host !== 'localhost') invalid.push('MISAKA_WEB_HOST');
   const port = integer('WEB_PORT', 8080, 1, 65535);
@@ -114,14 +126,17 @@ export async function loadConfig(options: { env?: NodeJS.ProcessEnv; cwd?: strin
       if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) throw new Error();
       publicBaseUrl = parsed.origin;
     } catch { invalid.push('MISAKA_PUBLIC_BASE_URL'); }
+  }
+  if (env.MISAKA_OIDC_CLIENT_ID?.trim() || env.MISAKA_OIDC_CLIENT_SECRET?.trim()) {
     oidcClientId = text('OIDC_CLIENT_ID');
     oidcClientSecret = text('OIDC_CLIENT_SECRET');
     if (!/^[1-9]\d*$/.test(oidcClientId)) invalid.push('MISAKA_OIDC_CLIENT_ID');
+    if (/\s/u.test(oidcClientSecret) || [...oidcClientSecret].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) invalid.push('MISAKA_OIDC_CLIENT_SECRET');
   }
   if (invalid.length) throw new ConfigurationError([...new Set(invalid)]);
   return Object.freeze({
     botToken, adminIds: Object.freeze(adminIds), dataDir,
-    logLevel: logLevel as StartupConfig['logLevel'], pollingTimeout, requestTimeout, dropPendingUpdates, providers,
+    logLevel: logLevel as StartupConfig['logLevel'], pollingTimeout, requestTimeout, dropPendingUpdates, providers, ai,
     web: Object.freeze({ enabled, host, port, publicBaseUrl, oidcClientId, oidcClientSecret }),
   });
 }

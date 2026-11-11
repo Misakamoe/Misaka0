@@ -47,6 +47,7 @@ const common: Record<string, string[]> = {
   MYR: ['林吉特', '令吉', '马币', '馬幣', 'ringgit', 'rm'], INR: ['印度卢比', '印度盧比'], AED: ['阿联酋迪拉姆', '阿聯酋迪拉姆'],
 };
 const locales = ['zh-CN', 'zh-TW', 'en', 'ja'] as const;
+const displayNames = locales.map(locale => ({ locale, currency: new Intl.DisplayNames(locale, { type: 'currency' }), region: new Intl.DisplayNames(locale, { type: 'region' }) }));
 function normalized(value: string): string { return value.normalize('NFKC').toLowerCase().replace(/[’‘]/g, "'").replace(/[\s\u00b7\u30fb]+/g, ' ').trim(); }
 export class CurrencyParseError extends Error {
   constructor(readonly code: 'QUERY' | 'AMOUNT' | 'CURRENCY') { super(code); }
@@ -102,8 +103,7 @@ export class CurrencyCatalog {
       choices.add(code);
     };
     for (const item of this.definitions.values()) { add(item.code, item.code); add(`${item.kind}:${item.code}`, item.code); add(item.name, item.code); }
-    for (const locale of locales) {
-      const currencyNames = new Intl.DisplayNames(locale, { type: 'currency' });
+    for (const { locale, currency: currencyNames } of displayNames) {
       for (const item of this.definitions.values()) if (item.kind === 'fiat') {
         const name = currencyNames.of(item.code)!;
         add(name, item.code);
@@ -124,7 +124,7 @@ export class CurrencyCatalog {
     for (const [region, rows] of Object.entries(regions)) for (const row of rows) for (const [code, period] of Object.entries(row)) {
       if (period._tender === 'false' || period._from && period._from > date || period._to && period._to < date) continue;
       add(region, code);
-      for (const locale of locales) add(new Intl.DisplayNames(locale, { type: 'region' }).of(region)!, code);
+      for (const names of displayNames) add(names.region.of(region)!, code);
     }
     for (const [code, aliases] of Object.entries(common)) for (const alias of aliases) add(alias, code);
     for (const row of cryptoRows) { const [code, ...aliases] = row.split('|'); for (const alias of aliases) add(alias, code!); }

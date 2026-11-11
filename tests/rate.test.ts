@@ -19,6 +19,26 @@ async function fixture() {
   return { ...f, json, fiat, advance: (ms: number) => { now += ms; } };
 }
 describe('rate service', () => {
+  it('keeps the currency catalog across crypto and price-only writes, rebuilding for changed codes', async () => {
+    const f = await fixture();
+    let extra = false;
+    f.json.mockImplementation(async url => url.pathname.endsWith('/codes')
+      ? { result: 'success', supported_codes: [['USD', 'US Dollar'], ['JPY', 'Japanese Yen'], ['CNY', 'Chinese Yuan'], ['EUR', 'Euro']] }
+      : url.hostname === 'api.coingecko.com' ? { bitcoin: { usd: 60000, last_updated_at: start / 1000 } }
+        : { ...f.fiat(), conversion_rates: { ...f.fiat().conversion_rates, ...(extra ? { AUD: 1.5 } : {}) }, time_next_update_unix: start / 1000 + 600 });
+    const signal = new AbortController().signal;
+    const before = await f.rate.currencies(0, signal);
+    const fiat = f.rate.snapshot().fiat;
+    await f.rate.convert({ query: 'BTC USD' }, signal);
+    expect(f.rate.snapshot().fiat).not.toBe(fiat);
+    expect((await f.rate.currencies(0, signal)).items[0]).toBe(before.items[0]);
+    f.advance(601_000);
+    expect((await f.rate.currencies(0, signal)).items[0]).toBe(before.items[0]);
+    extra = true;
+    const after = await f.rate.currencies(0, signal);
+    expect(after.total).toBe(before.total + 1);
+    expect(after.items[0]).not.toBe(before.items[0]);
+  });
   it('converts from a shared USD table precisely without sending amounts upstream', async () => {
     const f = await fixture();
     expect(await f.rate.convert({ query: '100 jp rmb' }, new AbortController().signal)).toMatchObject({ kind: 'converted', result: '4.8', unitRate: '0.048', from: { code: 'JPY' }, to: { code: 'CNY' }, stale: false });

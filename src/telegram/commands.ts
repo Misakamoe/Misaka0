@@ -22,6 +22,11 @@ export const commands = [
   { name: 'forecast', admin: false, private: false },
   { name: 'sticker', admin: false, private: true },
   { name: 'subconv', admin: false, private: true },
+  { name: 'ai', admin: false, private: false },
+  { name: 'chats', admin: false, private: true },
+  { name: 'memory', admin: false, private: true },
+  { name: 'tasks', admin: false, private: false },
+  { name: 'aiconfig', admin: true, private: true },
 ] as const;
 
 export function visibleCommands(admin: boolean, privateChat: boolean) {

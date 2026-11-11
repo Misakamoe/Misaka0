@@ -1,6 +1,6 @@
-import { spawn } from 'node:child_process';
-import { Worker } from 'node:worker_threads';
+import { fork, spawn } from 'node:child_process';
 import { AppError } from '../errors.js';
+import { defaultResourcePolicy, type ResourcePolicy } from '../resources.js';
 import type { StickerFormat, StickerKind } from '../../shared/schemas/sticker.js';
 import type { RenderJob, RenderReply } from './sticker-render.js';
 
@@ -26,7 +26,7 @@ const DEADLINE_MS = 15_000;
 const validDimension = (value: number) => Number.isSafeInteger(value) && value > 0 && value <= 512;
 
 // Read only the bounded WebM envelope. Never trust a duration tag alone, or use -t to silently trim it.
-function inspectVideo(data: Buffer): { width: number; height: number; duration: number } {
+function inspectVideo(data: Buffer, firstFrame = false): { width: number; height: number; duration: number; firstFrame?: Buffer } {
   const invalid = (): never => { throw new AppError('INVALID_INPUT'); };
   let nodes = 0;
   function vint(offset: number, end: number, identifier = false) {
@@ -107,6 +107,7 @@ function inspectVideo(data: Buffer): { width: number; height: number; duration: 
   const interval = defaultDuration ? uint(defaultDuration) / 1e9 : 0;
   if (defaultDuration && !(interval >= 1 / 60 - 1e-6 && interval <= 3.005)) return invalid();
   const timestamps: { time: number; duration: number }[] = [];
+  let firstBlock: { field: Element; time: Element; timestamp: number } | undefined;
   for (const cluster of entries.filter(element => element.id === 0x1f43b675)) {
     const fields = elements(cluster.start, cluster.end);
     const time = uint(one(fields, 0xe7));
@@ -124,7 +125,9 @@ function inspectVideo(data: Buffer): { width: number; height: number; duration: 
       const start = block.start + number.length;
       // Lacing obscures the frame count and timing; Telegram VP9 stickers do not need it.
       if (start + 3 >= block.end || (data[start + 2]! & 6) !== 0 || timestamps.length >= 180) return invalid();
-      timestamps.push({ time: (time + data.readInt16BE(start)) * scale, duration });
+      const timestamp = (time + data.readInt16BE(start)) * scale;
+      timestamps.push({ time: timestamp, duration });
+      if (!firstBlock || timestamp < firstBlock.timestamp) firstBlock = { field, time: one(fields, 0xe7)!, timestamp };
     }
   }
   if (!timestamps.length) return invalid();
@@ -140,115 +143,153 @@ function inspectVideo(data: Buffer): { width: number; height: number; duration: 
     ? last.time - timestamps.at(-2)!.time : declaredDuration);
   const duration = last.time - first + lastDuration;
   if (!(lastDuration > 0 && duration > 0 && duration <= 3.005)) return invalid();
-  return { width, height, duration: Math.max(duration, declaredDuration) };
+  if (!firstFrame) return { width, height, duration: Math.max(duration, declaredDuration) };
+  const wrap = (id: string, content: Buffer) => {
+    const size = Buffer.alloc(8); size.writeBigUInt64BE(BigInt(content.length) | (1n << 56n));
+    return Buffer.concat([Buffer.from(id, 'hex'), size, content]);
+  };
+  const copy = (element: Element) => wrap(element.id.toString(16), data.subarray(element.start, element.end));
+  // ffmpeg may probe/prefetch codec packets even with -frames:v 1. Supply a
+  // standalone first-block container only AFTER the entire original was inspected.
+  // BlockGroup is preserved intact, including VP9 alpha BlockAdditions.
+  const cluster = wrap('1f43b675', Buffer.concat([copy(firstBlock!.time), copy(firstBlock!.field)]));
+  const single = Buffer.concat([copy(header), wrap('18538067', Buffer.concat([copy(info), copy(tracks), cluster]))]);
+  return { width, height, duration: Math.max(duration, declaredDuration), firstFrame: single };
 }
 
-async function decodeVideo(request: StickerConversionRequest, signal: AbortSignal): Promise<RenderJob['video']> {
+function videoJob(request: StickerConversionRequest): NonNullable<RenderJob['video']> {
   const source = inspectVideo(request.data);
   const ratio = Math.min(request.width / source.width, request.height / source.height, 1);
   const width = Math.max(1, Math.round(source.width * ratio));
   const height = Math.max(1, Math.round(source.height * ratio));
+  return { width, height, count: request.format === 'png' ? 1 : Math.round(source.duration * 30) };
+}
+
+async function decodeVideo(request: StickerConversionRequest, video: NonNullable<RenderJob['video']>, signal: AbortSignal, frame: (data: Buffer) => Promise<void>): Promise<void> {
+  const { width, height } = video;
   const frameBytes = width * height * 4;
+  // PNG validates the whole container above, but deliberately does NOT decode later
+  // compressed payloads. Later corrupt codec packets are relevant only to GIF export.
   const args = [
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-xerror', '-filter_threads', '1',
     '-protocol_whitelist', 'pipe', '-f', 'matroska', '-c:v', 'libvpx-vp9', '-threads', '1',
-    '-max_pixels', '262144', '-probesize', '8388608', '-analyzeduration', '4000000', '-i', 'pipe:0',
+    '-max_pixels', '262144', '-probesize', '8388608', '-analyzeduration', '4000000',
+    ...(request.format === 'png' ? ['-nofind_stream_info'] : []), '-i', 'pipe:0',
     '-map', '0:v:0', '-an', '-sn', '-dn', '-map_metadata', '-1', '-map_chapters', '-1',
-    '-vf', `fps=30,scale=${width}:${height}:flags=bicubic,setsar=1`,
-    '-t', '3.05', '-frames:v', '91', '-threads', '1', '-c:v', 'rawvideo',
+    '-vf', `${request.format === 'gif' ? 'fps=30,' : ''}scale=${width}:${height}:flags=bicubic,setsar=1`,
+    '-frames:v', request.format === 'png' ? '1' : '91', '-threads', '1', '-c:v', 'rawvideo',
     '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1',
   ];
-  return new Promise((resolve, reject) => {
-    const child = spawn('ffmpeg', args, { shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    let stderrBytes = 0;
-    let unavailable = false;
-    let failure: AppError | undefined;
-    const stop = (error: AppError) => { failure ??= error; child.kill('SIGKILL'); };
-    const abort = () => stop(new AppError(signal.reason === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED'));
-    signal.addEventListener('abort', abort, { once: true });
-    child.on('error', () => { failure ??= new AppError('UNAVAILABLE'); });
-    child.stdin.on('error', () => { /* EPIPE is resolved by the child's close status. */ });
-    child.stdout.on('data', (chunk: Buffer) => {
-      bytes += chunk.length;
-      if (bytes > frameBytes * 90) stop(new AppError('INVALID_INPUT'));
-      else chunks.push(chunk);
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderrBytes += chunk.length;
-      // Inspect only installation errors; no decoder text, metadata, or filenames escape this process.
-      unavailable ||= /Unknown decoder|Unknown encoder|Decoder .* not found|Error loading shared libraries/i.test(chunk.toString('utf8'));
-      if (stderrBytes > 64 * 1024) stop(new AppError('INVALID_INPUT'));
-    });
-    child.on('close', code => {
-      signal.removeEventListener('abort', abort);
-      if (failure) reject(failure);
-      else if (code !== 0 || !bytes || bytes % frameBytes || Math.abs(bytes / frameBytes / 30 - source.duration) > 1 / 30 + 0.005) {
-        reject(new AppError(unavailable ? 'UNAVAILABLE' : 'INVALID_INPUT'));
-      }
-      else {
-        const pixels = new Uint8Array(bytes);
-        let offset = 0;
-        for (const chunk of chunks) { pixels.set(chunk, offset); offset += chunk.length; }
-        chunks.length = 0;
-        resolve({ pixels, width, height, count: bytes / frameBytes });
-      }
-    });
-    if (signal.aborted) abort();
-    else child.stdin.end(request.data);
+  const child = spawn('ffmpeg', args, { shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  let failure: AppError | undefined;
+  const stop = (error: AppError) => { failure ??= error; child.kill('SIGKILL'); };
+  const abort = () => stop(new AppError(signal.reason === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED'));
+  const closed = new Promise<void>(resolve => child.once('close', code => {
+    if (code !== 0) failure ??= new AppError('INVALID_INPUT');
+    resolve();
+  }));
+  signal.addEventListener('abort', abort, { once: true });
+  child.on('error', () => { failure ??= new AppError('UNAVAILABLE'); });
+  child.stdin.on('error', () => { /* The close status decides whether an early first-frame EPIPE was expected. */ });
+  let stderrBytes = 0;
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderrBytes += chunk.length;
+    if (/Unknown decoder|Unknown encoder|Decoder .* not found|Error loading shared libraries/i.test(chunk.toString('utf8'))) failure ??= new AppError('UNAVAILABLE');
+    if (stderrBytes > 64 * 1024) stop(new AppError('INVALID_INPUT'));
   });
+  try {
+    if (signal.aborted) abort();
+    else child.stdin.end(request.format === 'png' ? inspectVideo(request.data, true).firstFrame : request.data);
+    const pixels = Buffer.allocUnsafe(frameBytes);
+    let offset = 0;
+    let count = 0;
+    for await (const value of child.stdout) {
+      const chunk = value as Buffer;
+      for (let start = 0; start < chunk.length;) {
+        const size = Math.min(frameBytes - offset, chunk.length - start);
+        chunk.copy(pixels, offset, start, start + size); start += size; offset += size;
+        if (offset === frameBytes) {
+          if (++count > video.count) throw new AppError('INVALID_INPUT');
+          await frame(pixels); // One IPC frame in flight; decoder pipe supplies backpressure.
+          offset = 0;
+        }
+      }
+    }
+    if (offset || count !== video.count) failure ??= new AppError('INVALID_INPUT');
+  } catch (error) {
+    stop(error instanceof AppError ? error : new AppError('INVALID_INPUT'));
+  } finally {
+    await closed;
+    signal.removeEventListener('abort', abort);
+  }
+  if (failure) throw failure;
 }
 
-async function render(job: RenderJob, signal: AbortSignal): Promise<ConvertedSticker> {
+async function render(job: RenderJob, source: StickerConversionRequest, signal: AbortSignal): Promise<ConvertedSticker> {
   if (signal.aborted) throw new AppError(signal.reason === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED');
-  const worker = new Worker(new URL(import.meta.url.endsWith('.ts') ? './sticker-render.ts' : './sticker-render.js', import.meta.url), {
-    workerData: job,
-    // Native TS stripping works in dev/tests; production runs the emitted .js, without tsx/loaders.
-    execArgv: [],
-    env: {},
-    resourceLimits: { maxOldGenerationSizeMb: 128, maxYoungGenerationSizeMb: 16, stackSizeMb: 4 },
-    stdout: true, stderr: true,
-    transferList: job.video ? [job.video.pixels.buffer as ArrayBuffer] : [],
+  const worker = fork(new URL(import.meta.url.endsWith('.ts') ? './sticker-worker.ts' : './sticker-worker.js', import.meta.url), [], {
+    execArgv: ['--max-old-space-size=64', '--max-semi-space-size=2'], env: {}, serialization: 'advanced',
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
-  worker.stdout.resume();
-  worker.stderr.resume();
-  let abort: () => void = () => {};
+  worker.stdout!.resume(); worker.stderr!.resume();
+  let failure: AppError | undefined;
+  let result: ConvertedSticker | undefined;
+  let ready = Promise.withResolvers<void>();
+  // A rejected ready promise is also observed while a non-video job is running.
+  void ready.promise.catch(() => {});
+  const stop = (error: AppError) => { failure ??= error; ready.reject(failure); worker.kill('SIGKILL'); };
+  const abort = () => stop(new AppError(signal.reason === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED'));
+  const closed = new Promise<void>(resolve => worker.once('close', code => {
+    if (code !== 0 || !result) failure ??= new AppError('UNAVAILABLE');
+    ready.reject(failure ?? new AppError('UNAVAILABLE'));
+    resolve();
+  }));
+  worker.on('error', () => stop(new AppError('UNAVAILABLE')));
+  worker.on('message', (reply: RenderReply | { ready: true }) => {
+    if ('ready' in reply) { ready.resolve(); return; }
+    if (!reply.ok) { stop(new AppError(reply.code)); return; }
+    result = reply.result;
+  });
+  const send = (message: unknown) => new Promise<void>((resolve, reject) => worker.send(message as object, error => error ? reject(error) : resolve()));
+  signal.addEventListener('abort', abort, { once: true });
   try {
-    return await new Promise<ConvertedSticker>((resolve, reject) => {
-      abort = () => reject(new AppError(signal.reason === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED'));
-      signal.addEventListener('abort', abort, { once: true });
-      worker.once('error', (error: NodeJS.ErrnoException) => reject(new AppError(error.code === 'ERR_WORKER_OUT_OF_MEMORY' ? 'CAPACITY' : 'UNAVAILABLE')));
-      worker.once('exit', () => reject(new AppError('UNAVAILABLE')));
-      worker.once('message', (reply: RenderReply) => {
-        if (!reply.ok) {
-          reject(new AppError(reply.code === 'CAPACITY' || reply.code === 'UNAVAILABLE' || reply.code === 'TIMEOUT' ? reply.code : 'INVALID_INPUT'));
-          return;
-        }
-        const result = reply.result;
-        const photo = job.request.media && job.request.format !== 'gif';
-        // Only the minimum white short-side padding may exceed the requested content bounds.
-        const widthFits = result.width <= job.request.width || photo
-          && result.width === Math.ceil(result.height / 20) && result.height <= job.request.height;
-        const heightFits = result.height <= job.request.height || photo
-          && result.height === Math.ceil(result.width / 20) && result.width <= job.request.width;
-        if (!(result.data instanceof Uint8Array) || !result.data.length || result.data.length > job.maxOutputBytes
-          || result.format !== job.request.format || !validDimension(result.width) || !validDimension(result.height)
-          || !widthFits || !heightFits || photo && Math.max(result.width, result.height) / Math.min(result.width, result.height) > 20) {
-          reject(new AppError('INVALID_INPUT')); return;
-        }
-        resolve({ ...result, data: Buffer.from(result.data) });
-      });
-      if (signal.aborted) abort();
-    });
+    if (signal.aborted) abort();
+    else {
+      await send(job);
+      if (job.video) {
+        await ready.promise;
+        await decodeVideo(source, job.video, signal, async pixels => {
+          ready = Promise.withResolvers<void>();
+          void ready.promise.catch(() => {});
+          await send({ frame: pixels });
+          await ready.promise;
+        });
+        await send({ end: true });
+      }
+    }
+    await closed;
+    if (failure) throw failure;
+    const output = result!;
+    const photo = job.request.media && job.request.format !== 'gif';
+    const widthFits = output.width <= job.request.width || photo
+      && output.width === Math.ceil(output.height / 20) && output.height <= job.request.height;
+    const heightFits = output.height <= job.request.height || photo
+      && output.height === Math.ceil(output.width / 20) && output.width <= job.request.width;
+    if (!(output.data instanceof Uint8Array) || !output.data.length || output.data.length > job.maxOutputBytes
+      || output.format !== job.request.format || !validDimension(output.width) || !validDimension(output.height)
+      || !widthFits || !heightFits || photo && Math.max(output.width, output.height) / Math.min(output.width, output.height) > 20) throw new AppError('INVALID_INPUT');
+    return { ...output, data: Buffer.from(output.data.buffer, output.data.byteOffset, output.data.byteLength) };
+  } catch (error) {
+    stop(error instanceof AppError ? error : new AppError('UNAVAILABLE'));
+    throw failure;
   } finally {
+    await closed;
     signal.removeEventListener('abort', abort);
-    // Worker termination waits for its native work/environment to actually finish, not just JS rejection.
-    await worker.terminate();
   }
 }
 
-export function createStickerConverter(options: { timeoutMs?: number; maxOutputBytes?: number } = {}): StickerConverter {
+
+export function createStickerConverter(options: { timeoutMs?: number; maxOutputBytes?: number; qualified?: boolean; resources?: Pick<ResourcePolicy, 'tryAcquire'> } = {}): StickerConverter {
   const timeoutMs = Math.min(options.timeoutMs ?? DEADLINE_MS, DEADLINE_MS);
   const maxOutputBytes = Math.min(options.maxOutputBytes ?? MAX_OUTPUT, MAX_OUTPUT);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) throw new AppError('INVALID_INPUT');
@@ -258,14 +299,19 @@ export function createStickerConverter(options: { timeoutMs?: number; maxOutputB
       || !validDimension(request.width) || !validDimension(request.height) || typeof request.media !== 'boolean'
       || !(['static', 'animated', 'video'] as const).includes(request.kind)
       || !(request.kind === 'static' ? ['png', 'jpg', 'webp'] : ['png', 'gif']).includes(request.format)) throw new AppError('INVALID_INPUT');
+    // Qualification includes parent + native children + charged filesystem memory.
+    // An individual V8 limit is not evidence that this fits the 256 MiB runtime.
+    if (!options.qualified) throw new AppError('UNAVAILABLE');
+    const lease = (options.resources ?? defaultResourcePolicy).tryAcquire('heavy', 96 * 1024 * 1024);
+    if (!lease) throw new AppError('CAPACITY');
     const controller = new AbortController();
     const abort = () => controller.abort('CANCELLED');
     const timer = setTimeout(() => controller.abort('TIMEOUT'), timeoutMs);
     caller.addEventListener('abort', abort, { once: true });
     try {
       if (caller.aborted) abort();
-      const video = request.kind === 'video' ? await decodeVideo(request, controller.signal) : undefined;
-      const result = await render({ request: video ? { ...request, data: Buffer.alloc(0) } : request, video, maxOutputBytes }, controller.signal);
+      const video = request.kind === 'video' ? videoJob(request) : undefined;
+      const result = await render({ request: video ? { ...request, data: Buffer.alloc(0) } : request, video, maxOutputBytes }, request, controller.signal);
       if (controller.signal.aborted) throw new AppError(controller.signal.reason === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED');
       return result;
     } catch (error) {
@@ -274,6 +320,7 @@ export function createStickerConverter(options: { timeoutMs?: number; maxOutputB
     } finally {
       clearTimeout(timer);
       caller.removeEventListener('abort', abort);
+      lease.release();
     }
   };
 }

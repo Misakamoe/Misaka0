@@ -1,19 +1,17 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { localeSchema, revisionSchema, type Locale, type ModuleMetadata } from '../../shared/schemas/index.js';
+import { localeSchema, revisionSchema, type Locale } from '../../shared/schemas/index.js';
 import {
-  rssAddInputSchema, rssErrorSchema, rssIdSchema, rssListInputSchema, rssListSchema, rssMutationSchema,
-  rssRemoveInputSchema, rssSubscriptionSchema, rssUpdateInputSchema, type RssList, type RssUpdate,
+  rssAddInputSchema, rssErrorSchema, rssIdSchema, rssListInputSchema,
+  rssRemoveInputSchema, rssUpdateInputSchema, type RssList, type RssUpdate,
 } from '../../shared/schemas/rss.js';
-import type { ActionExecutor, InvocationContext } from '../actions.js';
 import { AppError, throwIfAborted } from '../errors.js';
-import { AsyncMutex, JSON_DOCUMENT_MAX_BYTES, JsonDocument, type JsonStorage } from '../storage.js';
-import { FEED_MAX_IMAGES, FEED_MAX_IMAGE_BYTES, FEED_MAX_IMAGE_POSITIONS, FEED_MAX_LINKS, FeedFetchError, contentLinkUrl, fetchFeed, normalizeFeedUrl, type FeedEntry, type FeedFetcher, type FeedResponse } from './rss-feed.js';
+import { AsyncMutex, JSON_DOCUMENT_MAX_BYTES, JsonDocument, jsonDocumentByteLength, type JsonStorage } from '../storage.js';
+import { FEED_MAX_IMAGES, FEED_MAX_IMAGE_BYTES, FEED_MAX_IMAGE_POSITIONS, FEED_MAX_LINKS, FeedFetchError, contentLinkUrl, normalizeFeedUrl, type FeedEntry, type FeedFetcher, type FeedResponse } from './rss-contract.js';
 import { clipFeedContentFormat, feedContentFormatSchema, isValidFeedContentFormat } from './rss-format.js';
 
-export const rssMetadata: ModuleMetadata = {
-  id: 'rss', nameKey: 'web:rss.name', descriptionKey: 'web:rss.description', schema_version: 1, configurable: false,
-};
+export { rssMetadata } from './metadata.js';
+export { registerRssActions } from './module-actions.js';
 export interface RssTarget { chatId: number; kind: 'private' | 'group'; threadId?: number }
 export const RSS_IMAGES_PER_MESSAGE = 50;
 const RSS_MAX_LINK_BYTES = 4 * 1024;
@@ -145,6 +143,7 @@ export class RssService {
   private readonly abort = new AbortController();
   private readonly now: () => number;
   private readonly fetcher: FeedFetcher;
+  private feedModule?: Promise<typeof import('./rss-feed.js')>;
   private timer?: ReturnType<typeof setTimeout>;
   private task?: Promise<void>;
   private started = false;
@@ -153,7 +152,12 @@ export class RssService {
   constructor(storage: JsonStorage, private readonly options: RssOptions) {
     this.file = new JsonDocument(storage, 'rss.json', documentSchema);
     this.now = options.now ?? Date.now;
-    this.fetcher = options.fetcher ?? fetchFeed;
+    this.fetcher = options.fetcher ?? (async (...args) => {
+      throwIfAborted(args[2]);
+      const { fetchFeed } = await (this.feedModule ??= import('./rss-feed.js'));
+      throwIfAborted(args[2]);
+      return fetchFeed(...args);
+    });
   }
   async initialize(): Promise<void> {
     await this.file.load({ schema_version: 1, revision: 0, sources: [], subscriptions: [], queue: [], lastSent: {}, nextSendAt: 0 });
@@ -164,7 +168,8 @@ export class RssService {
         state.subscriptions.find(subscription => subscription.id === job.subscriptionId)!.deliveryError = 'UNKNOWN';
       }
       collectEntries(state);
-    });
+    }, { preflight: state => state.queue.some(job => job.state === 'sending') || state.entries !== undefined
+      && (!Object.keys(state.entries).length || Object.keys(state.entries).some(id => !state.queue.some(job => job.payload.kind === 'entry-ref' && job.payload.entryId === id))) });
   }
   snapshot(): RssDocument { return this.file.snapshot(); }
   private assertTarget(target: RssTarget): void {
@@ -293,7 +298,7 @@ export class RssService {
     for (const subscription of subscriptions) state.queue.push({ id: randomBytes(12).toString('hex'), subscriptionId: subscription.id,
       payload: stored, state: 'queued', nextAttemptAt: this.now(), ...(stored.kind === 'entry-ref' ? { page: 0 } : {}) });
     // Match JsonDocument's pretty JSON format, reserving space for source bookkeeping and delivery progress.
-    if (Buffer.byteLength(JSON.stringify(state, null, 2)) + 1 > JSON_DOCUMENT_MAX_BYTES - RSS_DOCUMENT_HEADROOM) {
+    if (jsonDocumentByteLength(state) > JSON_DOCUMENT_MAX_BYTES - RSS_DOCUMENT_HEADROOM) {
       state.queue.splice(previousLength);
       collectEntries(state);
       return false;
@@ -443,14 +448,4 @@ export class RssService {
     await this.task?.catch(() => undefined);
     await this.lock.drain();
   }
-}
-
-export function registerRssActions(executor: Pick<ActionExecutor, 'register'>, service: RssService): void {
-  const common = { permission: 'chat_manager', scopes: ['private', 'group'], sources: ['telegram', 'http'], aiVisible: false, timeoutMs: 30_000 } as const;
-  const target = (context: InvocationContext): RssTarget => ({ chatId: context.chat.id, kind: context.chat.type === 'private' ? 'private' : 'group', threadId: context.chat.threadId });
-  executor.register({ ...common, id: 'rss.list', input: rssListInputSchema, output: rssListSchema, effect: 'read', execute: (input, context) => service.list(target(context), input.page) });
-  executor.register({ ...common, id: 'rss.get', input: rssRemoveInputSchema.pick({ id: true }), output: rssSubscriptionSchema, effect: 'read', execute: (input, context) => service.get(target(context), input.id) });
-  executor.register({ ...common, id: 'rss.add', input: rssAddInputSchema, output: rssMutationSchema, effect: 'permission', execute: (input, context) => service.add(target(context), input, context.language, context.signal) });
-  executor.register({ ...common, id: 'rss.update', input: rssUpdateInputSchema, output: rssMutationSchema, effect: 'permission', execute: (input, context) => service.update(target(context), input, context.signal) });
-  executor.register({ ...common, id: 'rss.remove', input: rssRemoveInputSchema, output: rssMutationSchema, effect: 'permission', execute: (input, context) => service.remove(target(context), input.id, input.revision, context.signal) });
 }

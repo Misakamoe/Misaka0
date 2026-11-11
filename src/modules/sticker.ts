@@ -1,20 +1,19 @@
 import { randomBytes } from 'node:crypto';
-import { zipSync } from 'fflate';
 import { z } from 'zod';
-import type { ModuleMetadata } from '../../shared/schemas/index.js';
 import {
-  stickerCancelInputSchema, stickerCancelResultSchema, stickerConvertInputSchema, stickerInspectInputSchema, stickerKindSchema,
-  stickerResultSchema, stickerSetNameSchema, stickerSourceSchema, stickerViewSchema,
+  stickerConvertInputSchema, stickerKindSchema,
+  stickerSetNameSchema, stickerSourceSchema,
   type StickerConvertInput, type StickerFormat, type StickerKind, type StickerResult, type StickerView,
 } from '../../shared/schemas/sticker.js';
-import type { ActionExecutor, InvocationContext } from '../actions.js';
+import type { InvocationContext } from '../actions.js';
+import type { StickerSources } from '../../shared/schemas/ai-native.js';
 import { AppError, throwIfAborted } from '../errors.js';
-import { convertSticker, type StickerConverter } from './sticker-media.js';
+import type { StickerConverter } from './sticker-media.js';
+import { withStickerZip, type StickerZipFile } from './sticker-zip.js';
+import { defaultResourcePolicy, type ResourcePolicy } from '../resources.js';
 
-export const stickerMetadata: ModuleMetadata = {
-  id: 'sticker', nameKey: 'web:modules.stickerName', descriptionKey: 'web:modules.stickerDescription',
-  schema_version: 1, configurable: false,
-};
+export { stickerMetadata } from './metadata.js';
+export { registerStickerActions } from './module-actions.js';
 
 export interface StickerFile {
   fileId: string;
@@ -32,13 +31,12 @@ export interface StickerTransport {
   download(file: StickerFile, signal: AbortSignal, maxBytes: number): Promise<Buffer>;
   getSet(name: string, signal: AbortSignal): Promise<{ name: string; title: string; stickers: StickerFile[] }>;
   send(target: { chatId: number; threadId?: number; replyTo: number },
-    result: { data: Buffer; filename: string; delivery: 'photo' | 'animation' | 'document' }, signal: AbortSignal): Promise<number>;
+    result: { data: Buffer | StickerZipFile; filename: string; delivery: 'photo' | 'animation' | 'document' }, signal: AbortSignal): Promise<number>;
 }
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_PACK_BYTES = 20 * 1024 * 1024;
 const MAX_SINGLE_RESULT_BYTES = 10 * 1024 * 1024;
-const MAX_ZIP_BYTES = 21 * 1024 * 1024;
 const SOURCE_TTL = 600_000;
 const dimensionSchema = z.number().int().min(1).max(512);
 const boundedText = (max: number) => z.string().max(max).refine(value => value.length <= max && !/\p{Cc}/u.test(value));
@@ -81,21 +79,32 @@ function originalFormat(data: Buffer, kind: StickerKind): StickerResult['format'
 export class StickerService {
   private readonly transport: StickerTransport;
   private readonly converter: StickerConverter;
+  private mediaModule: Promise<typeof import('./sticker-media.js')> | undefined;
   private readonly now: () => number;
   private readonly capacity: number;
+  private readonly tempDirectory: string | undefined;
+  private readonly resources: Pick<ResourcePolicy, 'tryAcquire'>;
   private readonly sources = new Map<string, Source>();
   private readonly jobs = new Map<string, Job>();
   private closed = false;
 
-  constructor(options: { transport: StickerTransport; convert?: StickerConverter; now?: () => number; capacity?: number }) {
+  constructor(options: { transport: StickerTransport; convert?: StickerConverter; now?: () => number; capacity?: number; tempDirectory?: string; resources?: Pick<ResourcePolicy, 'tryAcquire'> }) {
     this.transport = options.transport;
-    this.converter = options.convert ?? convertSticker;
+    this.converter = options.convert ?? (async (request, signal) => {
+      throwIfAborted(signal);
+      const media = await (this.mediaModule ??= import('./sticker-media.js'));
+      throwIfAborted(signal);
+      return media.convertSticker(request, signal);
+    });
     this.now = options.now ?? Date.now;
     this.capacity = options.capacity ?? 200;
+    this.tempDirectory = options.tempDirectory;
+    this.resources = options.resources ?? defaultResourcePolicy;
     if (!Number.isSafeInteger(this.capacity) || this.capacity < 1 || this.capacity > 200) throw new AppError('INVALID_INPUT');
   }
 
   capture(context: InvocationContext, source: StickerCapture, sourceMessageId: number): string {
+    if (context.source !== 'telegram') throw new AppError('FORBIDDEN');
     const scope = this.scope(context);
     this.prune();
     const parsed = captureSchema.safeParse(source);
@@ -113,6 +122,27 @@ export class StickerService {
       target: { chatId: context.chat.id, ...(context.chat.threadId === undefined ? {} : { threadId: context.chat.threadId }), replyTo: sourceMessageId },
     });
     return reference;
+  }
+
+  listSources(context: InvocationContext): StickerSources {
+    const scope = this.scope(context);
+    this.prune();
+    return { items: [...this.sources.entries()].filter(([, source]) => source.scope === scope).slice(-8).reverse()
+      .map(([reference, source]) => ({ source: reference, kind: source.capture.kind,
+        ...(source.capture.kind === 'single' ? { sourceKind: source.capture.sticker.kind } : {}),
+        expiresAt: new Date(source.expires).toISOString(),
+      })) };
+  }
+
+  async agentFile(context: InvocationContext, reference: string): Promise<{ file: StickerFile; format: StickerResult['format']; size: number }> {
+    const source = this.source(context, reference);
+    if (context.source !== 'ai' || !context.aiRunId || source.capture.kind !== 'single') throw new AppError('FORBIDDEN');
+    const file = source.capture.sticker;
+    if (file.fileSize !== undefined && file.fileSize > 1_048_576) throw new AppError('CAPACITY');
+    const data = await this.transport.download(file, context.signal, 1_048_576);
+    this.source(context, reference);
+    if (!data.length || data.length > 1_048_576) throw new AppError('CAPACITY');
+    return { file: structuredClone(file), format: originalFormat(data, file.kind), size: data.length };
   }
 
   release(context: InvocationContext, sourceRef: string): void {
@@ -149,24 +179,41 @@ export class StickerService {
       : !formats(source.capture.sticker.kind).includes(input.format)
         || (input.format === 'original' || input.format === 'webp') && input.delivery !== 'file') throw new AppError('INVALID_INPUT');
     return this.run(context, input.source, async signal => {
+      const send = async (data: Buffer | StickerZipFile, format: StickerResult['format'], count: number, delivery: StickerResult['delivery']): Promise<StickerResult> => {
+        this.check(source, input.source, signal);
+        let messageId: number;
+        try {
+          messageId = await this.transport.send({ ...source.target }, { data, filename: `${format === 'zip' ? 'stickers' : 'sticker'}.${format}`, delivery }, signal);
+          if (signal.aborted || !Number.isSafeInteger(messageId) || messageId < 1) throw new AppError('OUTCOME_UNKNOWN');
+        } catch (error) {
+          if (error instanceof AppError && ['FORBIDDEN', 'NOT_FOUND', 'INVALID_INPUT', 'RATE_LIMITED', 'CAPACITY', 'UNAVAILABLE'].includes(error.code)) throw new AppError(error.code);
+          throw new AppError('OUTCOME_UNKNOWN');
+        }
+        return { format, delivery, bytes: Buffer.isBuffer(data) ? data.length : data.size, count, messageId };
+      };
       let data: Buffer;
       let format: StickerResult['format'];
-      let count = 1;
       let delivery: StickerResult['delivery'] = 'document';
       if (source.capture.kind === 'pack') {
-        const set = await this.resolveSet(source, input.source, signal);
-        const entries: Record<string, Uint8Array> = {};
-        let bytes = 0;
-        for (const [index, file] of set.stickers.entries()) {
-          this.check(source, input.source, signal);
-          const original = await this.download(file, signal, Math.min(MAX_FILE_BYTES, MAX_PACK_BYTES - bytes));
-          this.check(source, input.source, signal);
-          bytes += original.length;
-          entries[`${String(index + 1).padStart(3, '0')}.${originalFormat(original, file.kind)}`] = original;
+        if (!this.tempDirectory) throw new AppError('UNAVAILABLE');
+        const lease = this.resources.tryAcquire('heavy', 48 * 1024 * 1024);
+        if (!lease) throw new AppError('CAPACITY');
+        try {
+          const set = await this.resolveSet(source, input.source, signal);
+          const entries = async function* (service: StickerService) {
+            let bytes = 0;
+            for (const [index, file] of set.stickers.entries()) {
+              service.check(source, input.source, signal);
+              const original = await service.download(file, signal, Math.min(MAX_FILE_BYTES, MAX_PACK_BYTES - bytes));
+              service.check(source, input.source, signal);
+              bytes += original.length;
+              yield { name: `${String(index + 1).padStart(3, '0')}.${originalFormat(original, file.kind)}`, data: original };
+            }
+          };
+          return await withStickerZip(this.tempDirectory, entries(this), signal, file => send(file, 'zip', set.stickers.length, 'document'));
+        } finally {
+          lease.release();
         }
-        this.check(source, input.source, signal);
-        data = Buffer.from(zipSync(entries, { level: 0 }));
-        format = 'zip'; count = set.stickers.length;
       } else {
         const file = source.capture.sticker;
         const original = await this.download(file, signal, MAX_FILE_BYTES);
@@ -184,19 +231,8 @@ export class StickerService {
           if (input.delivery === 'media') delivery = input.format === 'gif' ? 'animation' : 'photo';
         }
       }
-      if (!Buffer.isBuffer(data) || data.length < 1
-        || data.length > (format === 'zip' ? MAX_ZIP_BYTES : MAX_SINGLE_RESULT_BYTES)) throw new AppError('CAPACITY');
-      this.check(source, input.source, signal);
-      let messageId: number;
-      try {
-        messageId = await this.transport.send({ ...source.target }, { data, filename: `${format === 'zip' ? 'stickers' : 'sticker'}.${format}`, delivery }, signal);
-        if (signal.aborted || !Number.isSafeInteger(messageId) || messageId < 1) throw new AppError('OUTCOME_UNKNOWN');
-      } catch (error) {
-        // Only the trusted port can classify a definite rejection; ambiguous uploads are never retried.
-        if (error instanceof AppError && ['FORBIDDEN', 'NOT_FOUND', 'INVALID_INPUT', 'RATE_LIMITED', 'CAPACITY', 'UNAVAILABLE'].includes(error.code)) throw new AppError(error.code);
-        throw new AppError('OUTCOME_UNKNOWN');
-      }
-      return { format, delivery, bytes: data.length, count, messageId };
+      if (!Buffer.isBuffer(data) || data.length < 1 || data.length > MAX_SINGLE_RESULT_BYTES) throw new AppError('CAPACITY');
+      return send(data, format, 1, delivery);
     });
   }
 
@@ -216,7 +252,7 @@ export class StickerService {
   }
 
   private scope(context: InvocationContext): string {
-    if (context.source !== 'telegram' || context.chat.type !== 'private' || context.chat.id !== context.actorId
+    if ((context.source !== 'telegram' && !(context.source === 'ai' && context.aiRunId)) || context.chat.type !== 'private' || context.chat.id !== context.actorId
       || context.dataScope.kind !== 'user' || context.dataScope.id !== context.actorId) throw new AppError('FORBIDDEN');
     if (this.closed) throw new AppError('CANCELLED');
     throwIfAborted(context.signal);
@@ -292,14 +328,4 @@ export class StickerService {
     if (data.length > maxBytes) throw new AppError('CAPACITY');
     return data;
   }
-}
-
-export function registerStickerActions(executor: Pick<ActionExecutor, 'register'>, service: StickerService): void {
-  const common = { permission: 'self', scopes: ['private'], sources: ['telegram'], aiVisible: false, timeoutMs: 60_000 } as const;
-  executor.register({ ...common, id: 'sticker.inspect', input: stickerInspectInputSchema, output: stickerViewSchema,
-    effect: 'read', execute: (input, context) => service.inspect(context, input.source) });
-  executor.register({ ...common, id: 'sticker.convert', input: stickerConvertInputSchema, output: stickerResultSchema,
-    effect: 'personal_write', execute: (input, context) => service.convert(context, input) });
-  executor.register({ ...common, id: 'sticker.cancel', input: stickerCancelInputSchema, output: stickerCancelResultSchema,
-    effect: 'personal_write', execute: (input, context) => service.cancel(context, input.source) });
 }

@@ -2,10 +2,32 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { AppError, throwIfAborted } from './errors.js';
 
 export const JSON_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024;
+
+// Size admission without retaining another full pretty-printed document alongside the candidate.
+export function jsonDocumentByteLength(value: unknown): number {
+  if (value === undefined) throw new AppError('STORAGE_ERROR');
+  function size(item: unknown, depth: number): number {
+    if (item === undefined) return 4; // Undefined array slots serialize as null; object fields are omitted below.
+    if (item === null || typeof item === 'string' || typeof item === 'boolean' || typeof item === 'number') return Buffer.byteLength(JSON.stringify(item));
+    if (typeof item !== 'object' || depth > 64) throw new AppError('STORAGE_ERROR');
+    let count = 0; let children = 0;
+    if (Array.isArray(item)) {
+      for (const child of item) { count++; children += size(child, depth + 1); }
+    } else {
+      if (Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null) throw new AppError('STORAGE_ERROR');
+      for (const [key, child] of Object.entries(item)) if (child !== undefined) {
+        count++; children += Buffer.byteLength(JSON.stringify(key)) + 2 + size(child, depth + 1);
+      }
+    }
+    return count ? 2 + count * 2 + count * (depth + 1) * 2 + depth * 2 + children : 2;
+  }
+  return size(value, 0) + 1;
+}
 
 export class AsyncMutex {
   private tail: Promise<void> = Promise.resolve();
@@ -72,34 +94,39 @@ export class JsonDocument<T extends Versioned> {
 
   async update(
     mutate: (candidate: T) => boolean | void | Promise<boolean | void>,
-    options: { revision?: number; signal?: AbortSignal } = {},
+    options: { revision?: number; signal?: AbortSignal; preflight?: (current: Readonly<T>) => boolean; sizeError?: 'CAPACITY' | 'STORAGE_ERROR' } = {},
   ): Promise<{ snapshot: T; changed: boolean }> {
     return this.owner.lock.run(async () => {
       this.owner.assertOpen();
       const current = this.snapshot();
       if (options.revision !== undefined && options.revision !== current.revision) throw new AppError('CONFLICT');
+      // The frozen snapshot and revision are checked under the same lock as mutation.
+      if (options.preflight?.(current) === false) {
+        throwIfAborted(options.signal);
+        return { snapshot: current, changed: false };
+      }
       const candidate = structuredClone(current);
       const requested = await mutate(candidate);
       throwIfAborted(options.signal);
-      if (requested === false || JSON.stringify(candidate) === JSON.stringify(current)) return { snapshot: current, changed: false };
+      if (requested === false || isDeepStrictEqual(candidate, current)) return { snapshot: current, changed: false };
       candidate.schema_version = 1;
       candidate.revision = current.revision + 1;
       const parsed = this.schema.safeParse(candidate);
       if (!parsed.success) throw new AppError('INVALID_INPUT');
-      await this.write(parsed.data, options.signal);
+      await this.write(parsed.data, options.signal, options.sizeError);
       this.value = freeze(parsed.data);
       return { snapshot: this.value, changed: true };
     }, options.signal);
   }
 
-  private async write(candidate: T, signal?: AbortSignal): Promise<void> {
+  private async write(candidate: T, signal?: AbortSignal, sizeError: 'CAPACITY' | 'STORAGE_ERROR' = 'STORAGE_ERROR'): Promise<void> {
     const path = join(this.owner.directory, this.filename);
     const temporary = join(this.owner.directory, `.${this.filename}.${randomUUID()}.tmp`);
     let committed = false;
     try {
       throwIfAborted(signal);
       const serialized = `${JSON.stringify(candidate, null, 2)}\n`;
-      if (Buffer.byteLength(serialized) > JSON_DOCUMENT_MAX_BYTES) throw new AppError('STORAGE_ERROR');
+      if (Buffer.byteLength(serialized) > JSON_DOCUMENT_MAX_BYTES) throw new AppError(sizeError);
       const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       try {
         await handle.writeFile(serialized, { encoding: 'utf8', signal });
@@ -120,6 +147,7 @@ export class JsonDocument<T extends Versioned> {
         throw new AppError('OUTCOME_UNKNOWN');
       }
       if (signal?.aborted || error instanceof AppError && error.code === 'CANCELLED') throw new AppError('CANCELLED');
+      if (error instanceof AppError && error.code === sizeError) throw error;
       throw new AppError('STORAGE_ERROR');
     } finally {
       if (!committed) await unlink(temporary).catch(() => undefined);

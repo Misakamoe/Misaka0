@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InjectOptions } from 'fastify';
-import { ActionExecutor, createInvocation } from '../src/actions.js';
+import { ActionExecutor, createInvocation, type ActionServices } from '../src/actions.js';
+import { AiService } from '../src/ai/service.js';
 import { AccessService } from '../src/access.js';
 import { ConfigurationService } from '../src/configuration.js';
 import { aliasMetadata, AliasService } from '../src/modules/alias.js';
@@ -20,6 +21,7 @@ import { JsonStorage, type StorageOptions } from '../src/storage.js';
 import { createWebServer, type WebDependencies } from '../src/web/server.js';
 import { LOGIN_COOKIE, SESSION_COOKIE, OIDC_ISSUER, type OidcAdapter } from '../src/web/auth.js';
 import type { ActionResult, Me } from '../shared/schemas/index.js';
+import type { AiAdminSnapshot } from '../shared/schemas/ai-admin.js';
 
 const config: StartupConfig = {
   botToken: '123456789:TEST_ONLY_NOT_A_REAL_BOT_TOKEN_000000', adminIds: [42], dataDir: '/tmp/kilo/not-used',
@@ -43,7 +45,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function fixture(options: { storage?: StorageOptions; signal?: AbortSignal; oidc?: OidcAdapter; timeout?: number } = {}) {
+async function fixture(options: { storage?: StorageOptions; signal?: AbortSignal; oidc?: OidcAdapter; oidcConfigured?: boolean; timeout?: number } = {}) {
   const directory = await mkdtemp('/tmp/kilo/misaka-web-');
   cleanup.push(() => rm(directory, { recursive: true, force: true }));
   const staticRoot = join(directory, 'static');
@@ -67,15 +69,18 @@ async function fixture(options: { storage?: StorageOptions; signal?: AbortSignal
     describeGroup: vi.fn(async () => ({ title: 'Offline Test Group', present: true })),
     notifyGroup: vi.fn(async () => true), leaveGroup: vi.fn(async () => true), syncPrivateMenu: vi.fn(async () => true),
   };
-  const executor = new ActionExecutor({ access, configuration, aliases, rss, rate, weather, stickers, subconv, effects,
+  const services: ActionServices = { access, configuration, aliases, rss, rate, weather, stickers, subconv, effects,
     status: () => ({ uptimeSeconds: 1, updateCount: 0, authorizedGroupCount: access.count(), polling: 'running', http: 'running', lastApiError: null }),
-  });
+  };
+  const executor = new ActionExecutor(services);
   cleanup.push(() => executor.close());
   const oidc: OidcAdapter = options.oidc ?? {
     authorize: vi.fn(async attempt => new URL(`${OIDC_ISSUER}/auth?state=${attempt.state}&nonce=${attempt.nonce}`)),
     exchange: vi.fn(async () => ({ id: 42, name: 'Browser Admin' })),
   };
-  const deps: WebDependencies = { config: { ...config, requestTimeout: options.timeout ?? config.requestTimeout }, executor, configuration, access, botId: () => 123456789, oidc, staticRoot, signal: options.signal };
+  const deps: WebDependencies = { config: { ...config, requestTimeout: options.timeout ?? config.requestTimeout,
+    web: options.oidcConfigured === false ? { ...config.web, oidcClientId: undefined, oidcClientSecret: undefined } : config.web },
+    executor, configuration, access, botId: () => 123456789, oidc: options.oidcConfigured === false ? undefined : oidc, staticRoot, signal: options.signal };
   const server = await createWebServer(deps);
   cleanup.push(() => server.close());
   const inject = (input: InjectOptions) => server.inject({ ...input, headers: Object.fromEntries(Object.entries({ host: 'console.example', ...input.headers }).filter(([, value]) => value !== undefined)) });
@@ -96,10 +101,67 @@ async function fixture(options: { storage?: StorageOptions; signal?: AbortSignal
     const { token, expiresAt } = response.json<{ token: string; expiresAt: string }>();
     return { token, expiresAt, headers: { authorization: `Bearer ${token}`, origin } };
   };
-  return { server, inject, deps, storage, access, configuration, aliases, executor, effects, oidc, directory, staticRoot, browser, bearer };
+  return { server, inject, deps, storage, access, configuration, aliases, services, executor, effects, oidc, directory, staticRoot, browser, bearer };
 }
 
 describe('same-origin HTTP server boundary', () => {
+  it('completes real Mini App setup without OIDC or an environment master key and never returns the provider key', async () => {
+    const h = await fixture({ oidcConfigured: false });
+    const provider = vi.fn(() => { throw new Error('No provider calls during setup'); });
+    const ai = new AiService({ config: { ...h.deps.config, dataDir: h.storage.directory }, access: h.access,
+      storageLock: h.storage.lock, provider });
+    const executor = new ActionExecutor({ ...h.services, ai });
+    cleanup.push(async () => { await ai.stop(); await executor.close(); });
+    await ai.initialize();
+    const server = await createWebServer({ ...h.deps, executor });
+    cleanup.push(() => server.close());
+    const login = await server.inject({ method: 'POST', url: '/auth/miniapp', headers: { host: 'console.example', origin }, payload: { initData: signedInit() } });
+    expect(login.statusCode).toBe(200);
+    const headers = { host: 'console.example', origin, authorization: `Bearer ${login.json<{ token: string }>().token}` };
+    const before = (await server.inject({ method: 'GET', url: '/api/ai/admin', headers })).json<ActionResult<AiAdminSnapshot>>();
+    expect(before.status).toBe('succeeded');
+    if (before.status !== 'succeeded') throw new Error('Expected AI snapshot');
+    expect(before.data.status.available).toBe(true);
+    const response = await server.inject({ method: 'POST', url: '/api/ai/setup', headers, payload: {
+      revision: before.data.revision, protocol: 'openai-responses', baseUrl: 'https://provider.invalid/v1',
+      model: 'offline-model', apiKey: 'ISOLATED_HTTP_SETUP_SECRET', groupIds: [],
+    } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ status: 'succeeded', data: { status: { available: true }, settings: {
+      enabled: true, presets: [{ model: 'offline-model', budgetMode: 'usage' }],
+      grants: [{ kind: 'private', subjectId: 42 }],
+    }, credentials: [{ source: 'vault', hasValue: true }] } });
+    expect(response.body).not.toContain('ISOLATED_HTTP_SETUP_SECRET');
+    expect(await readFile(join(h.storage.directory, 'ai-master.key'))).toHaveLength(32);
+    expect(ai.available(createInvocation({ actorId: 42, botId: 123456789, source: 'telegram', chat: { id: 42, type: 'private' }, language: 'en' }))).toBe(true);
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it('reads target group versions through authenticated Actions and preserves unrelated pending approvals', async () => {
+    const h = await fixture({ oidcConfigured: false });
+    expect((await h.inject({ method: 'POST', url: '/api/groups/state', payload: { chatId: -100 }, headers: { origin } })).statusCode).toBe(401);
+    const { headers } = await h.bearer();
+    const state = async (chatId: number) => {
+      const response = await h.inject({ method: 'POST', url: '/api/groups/state', headers, payload: { chatId } });
+      expect(response.statusCode).toBe(200);
+      const result = response.json<ActionResult<{ chatId: number; revision: number; groupRevision: number }>>();
+      expect(result.status).toBe('succeeded');
+      if (result.status !== 'succeeded') throw new Error('Expected group state');
+      return result.data;
+    };
+    expect((await h.inject({ method: 'POST', url: '/api/groups/state', headers, payload: { chatId: -100, actorId: 99 } })).statusCode).toBe(400);
+    const first = await state(-100);
+    expect((await h.inject({ method: 'PUT', url: '/api/groups', headers, payload: first })).statusCode).toBe(200);
+    const target = await state(-100);
+    const prepared = (await h.inject({ method: 'POST', url: '/api/groups/revoke', headers, payload: target })).json<ActionResult>();
+    expect(prepared.status).toBe('pending_confirmation');
+    if (prepared.status !== 'pending_confirmation') throw new Error('Expected group approval');
+    expect((await h.inject({ method: 'PUT', url: '/api/groups', headers, payload: await state(-200) })).statusCode).toBe(200);
+    const confirmed = await h.inject({ method: 'POST', url: '/api/confirm', headers, payload: { token: prepared.confirmation.token } });
+    expect(confirmed.json()).toMatchObject({ status: 'succeeded', data: { chatId: -100, changed: true } });
+    expect(h.access.isAllowed(-100)).toBe(false); expect(h.access.isAllowed(-200)).toBe(true);
+  });
+
   it('does not listen or call the network at factory creation; health is minimal', async () => {
     const h = await fixture();
     expect(h.server.server.listening).toBe(false);
@@ -185,6 +247,37 @@ describe('same-origin HTTP server boundary', () => {
 });
 
 describe('HTTP authentication and CSRF', () => {
+  it.each([true, false])('publishes only strict public login-method metadata (OIDC configured: %s)', async oidcConfigured => {
+    const h = await fixture({ oidcConfigured });
+    const response = await h.inject({ method: 'GET', url: '/auth/methods' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ oidc: oidcConfigured, miniapp: true });
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(response.headers['access-control-allow-origin']).toBeUndefined();
+    expect((await h.inject({ method: 'GET', url: '/auth/methods?oidc=true' })).json()).toEqual({ error: { code: 'INVALID_INPUT' } });
+    expect((await h.inject({ method: 'POST', url: '/auth/methods' })).statusCode).toBe(404);
+    expect((await h.inject({ method: 'GET', url: '/api/me' })).statusCode).toBe(401);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('guards unconfigured OIDC routes without issuing cookies or granting anonymous API access', async () => {
+    const h = await fixture({ oidcConfigured: false });
+    const login = await h.inject({ method: 'GET', url: '/auth/login' });
+    expect(login.statusCode).toBe(503);
+    expect(login.json()).toEqual({ error: { code: 'UNAVAILABLE' } });
+    expect(login.headers['set-cookie']).toBeUndefined();
+    const callback = await h.inject({ method: 'GET', url: '/auth/callback?code=PRIVATE_CODE&state=PRIVATE_STATE' });
+    expect(callback.statusCode).toBe(302);
+    expect(callback.headers.location).toBe('/?auth_error=UNAVAILABLE');
+    expect(callback.body).not.toContain('PRIVATE');
+    expect(callback.cookies.some(value => value.value)).toBe(false);
+    for (const url of ['/api/me', '/api/status', '/api/unknown']) {
+      expect((await h.inject({ method: 'GET', url, headers: { 'x-user-id': '42', 'x-admin': 'true' } })).statusCode).toBe(401);
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('rotates opaque secure cookies, returns Me directly and strips OIDC callback secrets', async () => {
     const h = await fixture();
     const first = await h.browser();
@@ -236,8 +329,8 @@ describe('HTTP authentication and CSRF', () => {
     }
   });
 
-  it('creates bearer credentials from verified Mini App data without requiring a cookie', async () => {
-    const h = await fixture(); const b = await h.bearer();
+  it.each([true, false])('creates bearer credentials from verified Mini App data without requiring a cookie (OIDC configured: %s)', async oidcConfigured => {
+    const h = await fixture({ oidcConfigured }); const b = await h.bearer();
     expect(b.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(Date.parse(b.expiresAt) - Date.now()).toBeGreaterThan(3_590_000);
     const me = await h.inject({ method: 'GET', url: '/api/me', headers: b.headers });
@@ -246,8 +339,8 @@ describe('HTTP authentication and CSRF', () => {
     expect((await h.inject({ method: 'PUT', url: '/api/preferences', headers: b.headers, payload: { language: 'zh-CN' } })).statusCode).toBe(200);
   });
 
-  it('rejects nonadmins at login and rechecks current admin status on every API request', async () => {
-    const h = await fixture();
+  it.each([true, false])('rejects nonadmins at login and rechecks current admin status on every API request (OIDC configured: %s)', async oidcConfigured => {
+    const h = await fixture({ oidcConfigured });
     expect((await h.inject({ method: 'POST', url: '/auth/miniapp', headers: { origin }, payload: { initData: signedInit(43) } })).statusCode).toBe(403);
     const b = await h.bearer();
     vi.spyOn(h.access, 'isAdmin').mockReturnValue(false);
@@ -266,6 +359,27 @@ describe('HTTP authentication and CSRF', () => {
     }
     const response = await h.inject({ method: 'GET', url: '/api/me', headers: { cookie: browser.cookie, authorization: miniapp.headers.authorization } });
     expect(response.json<Me>().method).toBe('miniapp');
+  });
+
+  it('preserves Mini App strict input, replay, Origin and credential-type checks without OIDC', async () => {
+    const h = await fixture({ oidcConfigured: false });
+    const initData = signedInit();
+    for (const payload of [{ initData, actorId: 42 }, { initData, admin: true }]) {
+      expect((await h.inject({ method: 'POST', url: '/auth/miniapp', headers: { origin }, payload })).statusCode).toBe(401);
+    }
+    expect((await h.inject({ method: 'POST', url: '/auth/miniapp', payload: { initData } })).statusCode).toBe(403);
+    const login = await h.inject({ method: 'POST', url: '/auth/miniapp', headers: { origin }, payload: { initData } });
+    expect(login.statusCode).toBe(200);
+    expect(login.headers['set-cookie']).toBeUndefined();
+    const { token } = login.json<{ token: string }>();
+    expect((await h.inject({ method: 'POST', url: '/auth/miniapp', headers: { origin }, payload: { initData } })).statusCode).toBe(401);
+    expect((await h.inject({ method: 'GET', url: '/api/me', headers: { cookie: `${SESSION_COOKIE}=${token}` } })).statusCode).toBe(401);
+    const headers = { authorization: `Bearer ${token}`, origin };
+    for (const invalid of [{ origin: 'https://attacker.example' }, { origin, 'sec-fetch-site': 'cross-site' }]) {
+      expect((await h.inject({ method: 'PUT', url: '/api/preferences', headers: { ...headers, ...invalid }, payload: { language: 'en' } })).statusCode).toBe(403);
+    }
+    expect((await h.inject({ method: 'POST', url: '/auth/logout', headers })).statusCode).toBe(204);
+    expect((await h.inject({ method: 'GET', url: '/api/me', headers })).statusCode).toBe(401);
   });
 
   it.each([undefined, 'null', 'http://console.example', 'https://attacker.example', 'https://console.example.attacker.example'])('requires exact same Origin on cookie and bearer mutations: %s', async suppliedOrigin => {

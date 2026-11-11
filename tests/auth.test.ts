@@ -10,6 +10,7 @@ const config: StartupConfig = {
   logLevel: 'silent', pollingTimeout: 30, requestTimeout: 60, dropPendingUpdates: false,
   web: { enabled: true, host: '127.0.0.1', port: 8080, publicBaseUrl: 'https://console.example', oidcClientId: '123456789', oidcClientSecret: 'test-only-client-secret' },
 };
+const miniappConfig: StartupConfig = { ...config, web: { ...config.web, oidcClientId: undefined, oidcClientSecret: undefined } };
 const signal = () => new AbortController().signal;
 const attempt = { state: 'state', nonce: 'nonce', verifier: 'a'.repeat(43) };
 const callback = () => new URL('https://console.example/auth/callback?state=state&code=private-code');
@@ -199,6 +200,24 @@ describe('one-use browser-bound attempts and memory sessions', () => {
     await expect(auth.begin(signal())).resolves.toHaveProperty('binding');
   });
 
+  it('bounds pending login bytes without evicting an existing attempt', async () => {
+    const auth = make({ attemptBytes: 800 });
+    const first = await auth.begin(signal());
+    await expect(auth.begin(signal())).rejects.toThrow('CAPACITY');
+    const state = first.url.searchParams.get('state');
+    await expect(auth.finish(new URL(`https://console.example/auth/callback?state=${state}&code=valid`), first.binding, undefined, signal())).resolves.toMatchObject({ session: { id: 42 } });
+    await expect(auth.begin(signal())).resolves.toHaveProperty('binding');
+  });
+
+  it('bounds session bytes without revoking a live session to admit another', () => {
+    const auth = make({ sessionBytes: 500 });
+    const first = auth.miniapp(signedInit({ query_id: 'first' }), signal());
+    expect(() => auth.miniapp(signedInit({ query_id: 'second' }), signal())).toThrow('CAPACITY');
+    expect(auth.authenticate(`Bearer ${first.token}`, undefined).session.id).toBe(42);
+    auth.revoke(first.token);
+    expect(auth.miniapp(signedInit({ query_id: 'third' }), signal()).session.id).toBe(42);
+  });
+
   it('expires sessions absolutely after one hour even if used, and prunes capacity', () => {
     let now = Date.now(); const auth = make({ now: () => now, sessionCapacity: 1 });
     const first = auth.miniapp(signedInit(), signal());
@@ -234,8 +253,37 @@ describe('one-use browser-bound attempts and memory sessions', () => {
   });
 });
 
-describe('Telegram Mini App original HMAC validation', () => {
-  const make = (options: Partial<ConstructorParameters<typeof WebAuth>[0]> = {}) => new WebAuth({ config, isAdmin: () => true, oidc: mockOidc(), ...options });
+describe('Mini App without OIDC configuration', () => {
+  it('constructs without an OIDC adapter and keeps bearer-only sessions, admin checks and absolute expiry', () => {
+    const fetch = vi.fn(() => { throw new Error('No live network'); }); vi.stubGlobal('fetch', fetch);
+    let now = Date.now();
+    const auth = new WebAuth({ config: miniappConfig, isAdmin: id => id === 42, now: () => now });
+    expect(auth.oidcEnabled).toBe(false);
+    const login = auth.miniapp(signedInit(), signal());
+    expect(auth.authenticate(`Bearer ${login.token}`, undefined).session).toMatchObject({ id: 42, method: 'miniapp', csrfToken: null });
+    expect(() => auth.authenticate(undefined, login.token)).toThrow('AUTH_INVALID');
+    expect(() => auth.miniapp(signedInit({ user: '{"id":43,"first_name":"Other"}' }), signal())).toThrow('FORBIDDEN');
+    now += 3_600_000;
+    expect(() => auth.authenticate(`Bearer ${login.token}`, undefined)).toThrow('AUTH_EXPIRED');
+    expect(fetch).not.toHaveBeenCalled();
+    auth.close();
+  });
+
+  it('rejects both OIDC operations even when an adapter is injected without configuration', async () => {
+    const oidc = mockOidc();
+    const auth = new WebAuth({ config: miniappConfig, isAdmin: () => true, oidc });
+    expect(auth.oidcEnabled).toBe(false);
+    await expect(auth.begin(signal())).rejects.toThrow('UNAVAILABLE');
+    await expect(auth.finish(callback(), 'binding', undefined, signal())).rejects.toThrow('UNAVAILABLE');
+    expect(oidc.authorize).not.toHaveBeenCalled();
+    expect(oidc.exchange).not.toHaveBeenCalled();
+    expect(() => auth.authenticate(undefined, undefined)).toThrow('UNAUTHORIZED');
+    auth.close();
+  });
+});
+
+describe.each([true, false])('Telegram Mini App original HMAC validation (OIDC configured: %s)', configured => {
+  const make = (options: Partial<ConstructorParameters<typeof WebAuth>[0]> = {}) => new WebAuth({ config: configured ? config : miniappConfig, isAdmin: () => true, ...options });
   it('accepts original signed fields including signature, then rejects replay despite reordering', () => {
     const auth = make(); const initData = signedInit({ signature: 'official-additional-signature', query_id: 'q' });
     const login = auth.miniapp(initData, signal());
@@ -281,5 +329,13 @@ describe('Telegram Mini App original HMAC validation', () => {
     expect(() => auth.miniapp(signedInit({ auth_date: String(now / 1000) }), signal())).toThrow('CAPACITY');
     now += 30_001;
     expect(auth.miniapp(signedInit({ auth_date: String(Math.floor(now / 1000)) }), signal()).session.id).toBe(42);
+  });
+
+  it('rejects new replay records at the byte limit without forgetting a consumed credential', () => {
+    const auth = make({ replayBytes: 256 });
+    const original = signedInit({ query_id: 'original' });
+    auth.miniapp(original, signal());
+    expect(() => auth.miniapp(signedInit({ query_id: 'new' }), signal())).toThrow('CAPACITY');
+    expect(() => auth.miniapp(original, signal())).toThrow('AUTH_INVALID');
   });
 });

@@ -1,4 +1,6 @@
 import { Agent } from 'node:https';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { run, type RunnerHandle, type RunOptions } from '@grammyjs/runner';
 import { Bot, GrammyError, HttpError } from 'grammy';
@@ -19,16 +21,20 @@ import { SubconvService } from './modules/subconv.js';
 import type { StickerConverter } from './modules/sticker-media.js';
 import type { ProviderJson } from './modules/provider-http.js';
 import type { FeedFetcher } from './modules/rss-feed.js';
-import { createRssSender } from './telegram/rss.js';
+import type { createRssSender } from './telegram/rss.js';
 import { createStickerTransport } from './telegram/sticker.js';
 import { commands } from './telegram/commands.js';
 import { AppError, throwIfAborted } from './errors.js';
 import { JsonStorage, type StorageOptions } from './storage.js';
 import { createTelegramAdapter, createTelegramEffects } from './telegram/index.js';
 import { telegramSignal } from './telegram/effects.js';
-import { createWebServer, type WebDependencies } from './web/server.js';
+import type { WebDependencies } from './web/server.js';
+import { AiService } from './ai/service.js';
+import type { AiProvider, ProviderProfile } from './ai/providers.js';
+import { ResourcePolicy } from './resources.js';
+import { SystemMetrics } from './system-metrics.js';
 
-export const ALLOWED_UPDATES = ['message', 'callback_query', 'my_chat_member'] as const;
+export const ALLOWED_UPDATES = ['message', 'callback_query', 'my_chat_member', 'stopped_message_generation'] as const;
 export const RUNNER_CONCURRENCY = 16;
 
 interface RunnerBot {
@@ -50,6 +56,9 @@ export interface ApplicationOptions {
   weatherJson?: ProviderJson;
   stickerTransport?: StickerTransport;
   stickerConverter?: StickerConverter;
+  aiProvider?: (profile: ProviderProfile) => AiProvider;
+  resources?: ResourcePolicy;
+  statusMetrics?: Pick<SystemMetrics, 'start' | 'snapshot' | 'stop'>;
 }
 
 function apiCode(error: unknown): string {
@@ -67,11 +76,24 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
   const storage = new JsonStorage(config.dataDir, options.storage);
   const access = new AccessService(storage, config.adminIds);
   const configuration = new ConfigurationService(storage);
+  const resources = options.resources ?? new ResourcePolicy({ heavyBytes: 64 * 1024 * 1024 });
+  const statusMetrics = options.statusMetrics ?? new SystemMetrics();
+  const ai = new AiService({ config, access, resources, storageLock: storage.lock, provider: options.aiProvider,
+    stickerFile: async (context, reference) => {
+      const { file, format, size } = await stickers.agentFile(context, reference);
+      const mimeType = format === 'tgs' ? 'application/x-tgsticker' : format === 'webm' ? 'video/webm' : `image/${format}`;
+      return { fileId: file.fileId, uniqueId: file.uniqueId, kind: 'sticker', mimeType, name: `sticker.${format}`, size };
+    },
+    isMember: async (chatId, userId, signal) => {
+      const member = await bot.api.getChatMember(chatId, userId, telegramSignal(signal));
+      return member.status !== 'left' && member.status !== 'kicked' && (member.status !== 'restricted' || member.is_member);
+    } });
   const aliases = new AliasService(storage, commands.map(command => command.name));
   const rate = new RateService(storage, { key: config.providers?.exchangeRateKey, json: options.rateJson });
   const weather = new WeatherService(storage, { qweatherHost: config.providers?.qweatherHost, qweatherKey: config.providers?.qweatherKey,
     openWeatherKey: config.providers?.openWeatherKey, openMeteo: config.providers?.openMeteo, json: options.weatherJson });
-  const stickers = new StickerService({ transport: options.stickerTransport ?? createStickerTransport(bot, config.botToken), convert: options.stickerConverter });
+  const stickers = new StickerService({ transport: options.stickerTransport ?? createStickerTransport(bot, config.botToken), convert: options.stickerConverter,
+    resources, tempDirectory: join(config.dataDir, 'tmp', 'sticker') });
   const subconv = new SubconvService(storage);
   let initialized = false;
   let ready = false;
@@ -98,12 +120,23 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
     ...health, lastApiError: health.lastApiError ? { ...health.lastApiError } : null,
     uptimeSeconds: Math.max(0, (Date.now() - startedAt) / 1000),
     authorizedGroupCount: initialized ? access.count() : 0,
+    resources: statusMetrics.snapshot(),
   });
-  const rssSender = createRssSender(bot);
+  let rssSender: Promise<ReturnType<typeof createRssSender>> | undefined;
   const rss = new RssService(storage, {
     allowed: target => target.kind === 'private' || access.isAllowed(target.chatId),
-    send: (target, title, payload, language, silent, signal) => rssSender(target, title, payload,
-      target.kind === 'private' ? configuration.resolveLanguage(target.chatId, language) : language, silent, signal),
+    send: async (target, title, payload, language, silent, signal) => {
+      throwIfAborted(signal);
+      const send = await (rssSender ??= import('./telegram/rss.js').then(module => module.createRssSender(bot)));
+      throwIfAborted(signal);
+      await send(target, title, payload,
+        target.kind === 'private' ? configuration.resolveLanguage(target.chatId, language) : language, silent, signal);
+      try {
+        ai.emitModuleEvent('rss.delivered', createHash('sha256').update(JSON.stringify(payload)).digest('hex'), {
+          botId: Number(config.botToken.split(':', 1)[0]), chatId: target.chatId, ...(target.threadId ? { threadId: target.threadId } : {}),
+          ...(target.kind === 'private' ? { ownerId: target.chatId } : {}) });
+      } catch { logger.warn({ event: 'ai_event_capacity' }); }
+    },
     fetcher: options.rssFetcher,
     onError: error => {
       if (stopping) return;
@@ -123,14 +156,19 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
     }
   });
   const executor = new ActionExecutor({
-    access, configuration, aliases, rss, rate, weather, stickers, subconv, effects: createTelegramEffects(bot, configuration, metrics, config.adminIds), status,
+    access, configuration, aliases, rss, rate, weather, stickers, subconv, ai, effects: createTelegramEffects(bot, configuration, metrics, config.adminIds), status,
+    aiPolicy: { available: context => ai.available(context), authorize: (context, id, effect) => ai.authorize(context, id, effect),
+      approvalExempt: (context, id) => ai.approvalExempt(context, id) },
+    aiNativeDelivery: (context, file) => ai.deliverNative(context, file),
+    onResult: (context, id, result) => ai.observeAction(context, id, result),
     audit: record => logger.info({ event: 'action', ...record }),
     groupAdmin: async (chatId, userId, signal) => {
       const member = await bot.api.getChatMember(chatId, userId, telegramSignal(signal));
       return member.status === 'administrator' || member.status === 'creator';
     },
   });
-  const telegram = createTelegramAdapter(bot, { config, executor, access, configuration, stickers, health: metrics, signal: shutdown.signal });
+  ai.attachExecutor(executor);
+  const telegram = createTelegramAdapter(bot, { config, executor, access, configuration, stickers, ai, health: metrics, signal: shutdown.signal });
   const completion = Promise.withResolvers<void>();
   // Consumers may attach after start; an early startup failure must not be unhandled.
   void completion.promise.catch(() => undefined);
@@ -200,11 +238,11 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
         const stoppedRunner = Promise.resolve().then(() => runner?.stop());
         const stoppedWeb = Promise.resolve().then(() => web?.close());
         const stoppedRss = rss.stop();
-        const results = await Promise.allSettled([stoppedRunner, stoppedWeb, stoppedRss, rate.stop(), weather.stop(), stickers.stop(), ...inFlight]);
-        if (!failure && (results.slice(0, 6).some(result => result.status === 'rejected')
+        const results = await Promise.allSettled([stoppedRunner, stoppedWeb, stoppedRss, rate.stop(), weather.stop(), stickers.stop(), ai.stop(false), subconv.stop(), statusMetrics.stop(), ...inFlight]);
+        if (!failure && (results.slice(0, 9).some(result => result.status === 'rejected')
           || !shutdown.signal.aborted && results.some(result => result.status === 'rejected'))) failure = new AppError('UNAVAILABLE');
         shutdown.abort();
-        for (const close of [() => executor.close(), () => telegram.stop(), () => storage.close()]) {
+        for (const close of [() => executor.close(), () => telegram.stop(), () => ai.stop(), () => storage.close()]) {
           try { await close(); }
           catch { failure ??= new AppError('UNAVAILABLE'); }
         }
@@ -242,16 +280,21 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
         await rate.initialize();
         await weather.initialize();
         await subconv.initialize();
+        await ai.initialize();
+        await statusMetrics.start();
         initialized = true;
         throwIfAborted(shutdown.signal);
         if (config.web.enabled) {
           health.http = 'starting';
-          web = await (options.webFactory ?? createWebServer)({ config, executor, configuration, access, botId: () => bot.botInfo.id, signal: shutdown.signal });
+          const createWebServer = options.webFactory ?? (await import('./web/server.js')).createWebServer;
+          throwIfAborted(shutdown.signal);
+          web = await createWebServer({ config, executor, configuration, access, botId: () => bot.botInfo.id, signal: shutdown.signal });
         }
         await bot.init(telegramSignal(shutdown.signal));
         if (bot.botInfo.id !== Number(config.botToken.split(':')[0])) throw new AppError('UNAUTHORIZED');
         await bot.api.deleteWebhook({ drop_pending_updates: config.dropPendingUpdates }, telegramSignal(shutdown.signal));
         await telegram.registerMenus();
+        ai.startBackground();
         throwIfAborted(shutdown.signal);
         if (web) {
           await web.listen({ host: config.web.host, port: config.web.port });
@@ -291,6 +334,6 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
     return stopTask;
   }
 
-  return { start, stop, done: completion.promise, status, bot, executor, access, configuration, rss, rate, weather,
+  return { start, stop, done: completion.promise, status, bot, executor, access, configuration, rss, rate, weather, ai,
     get web() { return web; }, get runner() { return runner; } };
 }

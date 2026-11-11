@@ -1,16 +1,18 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Me } from '../../shared/schemas';
 import { errorCodeSchema, supportedLocales } from '../../shared/schemas';
-import { ApiError, clearSession, errorCode, establishSession, exchangeMiniApp, request } from './api';
+import { ApiError, clearSession, errorCode, establishSession, exchangeMiniApp, loginMethods, request } from './api';
 import { ConfirmDialog } from './ConfirmDialog';
 import { GroupsPage, ModulesPage, PreferencesPage, SettingsPage, StatusPage } from './pages';
 import { telegram, useTheme, type Theme } from './platform';
 import i18n from './i18n';
 
-type Page = 'status' | 'groups' | 'settings' | 'modules' | 'preferences';
+const AiAdminPage = lazy(() => import('./AiAdminPage').then((module) => ({ default: module.AiAdminPage })));
+
+type Page = 'status' | 'groups' | 'settings' | 'modules' | 'ai' | 'preferences';
 type Auth = { state: 'checking' } | { state: 'signedOut'; reason?: string } | { state: 'authenticated'; me: Me };
-const pages: Page[] = ['status', 'groups', 'settings', 'modules', 'preferences'];
+const pages: Page[] = ['status', 'groups', 'settings', 'modules', 'ai', 'preferences'];
 
 // One credential exchange per document. A failed/expired Mini App must be reopened, not replayed.
 let bootstrap: Promise<Me> | undefined;
@@ -33,6 +35,8 @@ function authenticate() {
 export function App() {
   const { t } = useTranslation();
   const [auth, setAuth] = useState<Auth>({ state: 'checking' });
+  const [methods, setMethods] = useState<Awaited<ReturnType<typeof loginMethods>>>();
+  const [methodsError, setMethodsError] = useState<string>();
   const [page, setPage] = useState<Page>('status');
   const [moduleId, setModuleId] = useState<string>();
   const [dirty, setDirty] = useState(false);
@@ -53,6 +57,14 @@ export function App() {
     window.addEventListener('misaka:expired', expire);
     return () => window.removeEventListener('misaka:expired', expire);
   }, [i18n]);
+
+  useEffect(() => {
+    if (auth.state !== 'signedOut' || telegram) return;
+    let active = true;
+    void loginMethods().then(value => { if (active) { setMethods(value); setMethodsError(undefined); } })
+      .catch((error: unknown) => { if (active) { setMethods(undefined); setMethodsError(errorCode(error)); } });
+    return () => { active = false; };
+  }, [auth.state]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.resolvedLanguage ?? 'zh-CN';
@@ -93,7 +105,8 @@ export function App() {
     <main className="login-main"><p className="eyebrow">{t(telegram ? 'auth.miniapp' : 'auth.browser')}</p><h1>{t('auth.title')}</h1><p className="login-description">{t('auth.description')}</p>
       {auth.state === 'checking' ? <p role="status">{t('auth.checking')}</p> : <>
         {auth.reason && <p className="notice" role="alert">{t(['expired', 'loggedOut', 'logoutFailed'].includes(auth.reason) ? `auth.${auth.reason}` : `common:errors.${auth.reason}`)}</p>}
-        {telegram ? <p>{t('auth.reopen')}</p> : <a className="button primary" href="/auth/login">{t('auth.login')}<span aria-hidden="true">&#8599;</span></a>}
+        {telegram ? <p>{t('auth.reopen')}</p> : methods?.oidc ? <a className="button primary" href="/auth/login">{t('auth.login')}<span aria-hidden="true">&#8599;</span></a>
+          : methods ? <p>{t('auth.openTelegram')}</p> : methodsError ? <p className="notice" role="alert">{t(`common:errors.${methodsError}`)}</p> : <p role="status">{t('auth.checking')}</p>}
       </>}
       <div className="login-language"><label htmlFor="login-language">{t('preferences.language')}</label><select id="login-language" value={i18n.resolvedLanguage} onChange={(event) => { void i18n.changeLanguage(event.target.value); }}>{supportedLocales.map(locale => <option key={locale} value={locale}>{t(`common:languages.${locale}`)}</option>)}</select></div>
     </main><footer className="login-footer">{t('tagline')}</footer></div>;
@@ -109,6 +122,7 @@ export function App() {
         {page === 'status' && <StatusPage />}
         {page === 'groups' && <GroupsPage onDirty={setDirty} />}
         {page === 'settings' && <SettingsPage onDirty={setDirty} />}
+        {page === 'ai' && <Suspense fallback={<p role="status">{t('state.loading')}</p>}><AiAdminPage onDirty={setDirty} clearSensitive={logout || destination !== undefined} /></Suspense>}
         {page === 'modules' && (moduleId ? <><button className="text-button" onClick={() => navigate('modules')}>{t('modules.back')}</button><SettingsPage moduleId={moduleId} onDirty={setDirty} /></> : <ModulesPage configure={setModuleId} />)}
         {page === 'preferences' && <PreferencesPage onDirty={setDirty} onSaved={(preference) => { setAuth({ state: 'authenticated', me: { ...auth.me, ...preference } }); void i18n.changeLanguage(preference.resolvedLanguage); }} />}
       </main>

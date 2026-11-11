@@ -344,14 +344,15 @@ describe('alias persistence integrity and races', () => {
 });
 
 describe('alias action registration', () => {
-  it('registers only private human superadmin actions with strict schemas and bounded timeouts', async () => {
+  it('registers private superadmin Actions for humans and AI with strict schemas and bounded timeouts', async () => {
     const f = await fixture();
     const actions: ActionDefinition<unknown, unknown>[] = [];
     const executor: Pick<ActionExecutor, 'register'> = { register: definition => { actions.push(definition as ActionDefinition<unknown, unknown>); } };
     registerAliasActions(executor, f.service);
     expect(actions.map(action => action.id)).toEqual(['alias.list', 'alias.add', 'alias.remove']);
     for (const action of actions) {
-      expect(action).toMatchObject({ permission: 'superadmin', scopes: ['private'], sources: ['telegram', 'http'], aiVisible: false, timeoutMs: 15_000 });
+      expect(action).toMatchObject({ permission: 'superadmin', scopes: ['private'], sources: ['telegram', 'http', 'ai'], aiVisible: true, timeoutMs: 15_000 });
+      expect(action.aiDescription).toEqual(expect.any(String));
       expect(action.confirmation).toBeUndefined();
       expect(inputJsonSchema(action.input)).toMatchObject({ additionalProperties: false });
       expect(z.toJSONSchema(action.output)).toMatchObject({ additionalProperties: false });
@@ -383,7 +384,8 @@ describe('alias action registration', () => {
       coreInvocation({ actorId: 3, chat: { id: 3, type: 'private' } }),
       coreInvocation({ actorId: 3, chat: { id: 3, type: 'private' }, source: 'http' }),
       coreInvocation({ chat: { id: -100, type: 'supergroup' } }),
-      coreInvocation({ source: 'ai' }),
+      coreInvocation({ actorId: 3, chat: { id: 3, type: 'private' }, source: 'ai', aiRunId: 'ordinary-run' }),
+      coreInvocation({ chat: { id: -100, type: 'supergroup' }, source: 'ai', aiRunId: 'group-run' }),
     ];
     for (const [id, input] of [
       ['alias.list', {}],
@@ -396,7 +398,27 @@ describe('alias action registration', () => {
     }
     expect(await f.executor.execute(coreInvocation(), 'alias.list', {}))
       .toMatchObject({ status: 'succeeded', data: { revision: 0 } });
-    expect((await f.executor.discoverTools(coreInvocation())).some(tool => tool.id.startsWith('alias.'))).toBe(false);
+    expect((await f.executor.discoverTools(coreInvocation())).filter(tool => tool.id.startsWith('alias.')).map(tool => tool.id))
+      .toEqual(['alias.list', 'alias.add', 'alias.remove']);
+    expect((await f.executor.discoverTools(contexts[0]!)).filter(tool => tool.id.startsWith('alias.'))).toEqual([]);
+  });
+
+  it('requires a real private superadmin to confirm AI alias writes and retains AI provenance', async () => {
+    const f = await coreFixture({ services: { aiEnabled: true } }); cleanups.push(f.close);
+    const context = coreInvocation({ source: 'ai', aiRunId: 'alias-run' });
+    expect(await f.executor.execute(context, 'alias.list', {})).toMatchObject({ status: 'succeeded', data: { revision: 0 } });
+    const approval = await f.executor.execute(context, 'alias.add', { command: 'help', alias: 'custom', revision: 0 });
+    expect(approval.status).toBe('pending_confirmation');
+    if (approval.status !== 'pending_confirmation') throw new Error('Expected human approval');
+    expect(f.aliases.snapshot().revision).toBe(0);
+    expect(await f.executor.confirm(coreInvocation({ actorId: 2, chat: { id: 2, type: 'private' } }), approval.confirmation.token))
+      .toMatchObject({ status: 'rejected', error: { code: 'CONFIRMATION_EXPIRED' } });
+    expect(await f.executor.confirm(context, approval.confirmation.token)).toMatchObject({ status: 'rejected', error: { code: 'CONFIRMATION_EXPIRED' } });
+    expect(f.aliases.snapshot().revision).toBe(0);
+    expect(await f.executor.confirm(coreInvocation(), approval.confirmation.token))
+      .toMatchObject({ status: 'succeeded', data: { command: 'help', alias: 'custom', revision: 1 } });
+    expect(f.audit.mock.calls.at(-1)![0]).toMatchObject({ actorId: 1, source: 'ai', actionId: 'alias.add', outcome: 'succeeded' });
+    expect(await f.executor.confirm(coreInvocation(), approval.confirmation.token)).toMatchObject({ error: { code: 'CONFIRMATION_EXPIRED' } });
   });
 
   it('executes private HTTP/Telegram mutations directly with normalized responses and strict Action validation', async () => {
@@ -420,5 +442,18 @@ describe('alias action registration', () => {
       expect(aliasSnapshotSchema.safeParse(list.data).success).toBe(true);
       expect(list.data).not.toHaveProperty('schema_version');
     }
+  });
+
+  it('reserves all five new native AI command names without preventing aliases that target them', async () => {
+    const f = await coreFixture(); cleanups.push(f.close);
+    const before = f.aliases.snapshot();
+    for (const alias of ['ai', 'chats', 'memory', 'tasks', 'aiconfig']) {
+      expect(await f.executor.execute(coreInvocation(), 'alias.add', { command: 'help', alias, revision: 0 }))
+        .toMatchObject({ status: 'failed', error: { code: 'CONFLICT', fields: ['alias'] } });
+    }
+    expect(f.aliases.snapshot()).toEqual(before);
+    expect(await f.executor.execute(coreInvocation(), 'alias.add', { command: 'ai', alias: 'askai', revision: 0 }))
+      .toMatchObject({ status: 'succeeded', data: { command: 'ai', alias: 'askai', revision: 1 } });
+    expect(f.executor.resolveAlias('askai')).toBe('ai');
   });
 });

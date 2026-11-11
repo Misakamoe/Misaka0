@@ -1,9 +1,32 @@
 {
   "appName": "Misaka",
+  "resources": {
+    "title": "リソーススナップショット", "sampledAt": "計測時刻", "window": "CPU 計測期間",
+    "unavailable": "取得不可", "warmup": "準備中（初回 CPU 計測）", "unlimited": "無制限", "limited": "{{value}}（制限あり）", "cores": "{{value}} コア",
+    "process": "ボットプロセス", "system": "カーネルから見えるシステム", "cgroup": "cgroup v2 リソース",
+    "cpu": "CPU", "rss": "常駐メモリ（RSS）", "heap": "JavaScript ヒープ", "buffers": "外部メモリ / バッファ", "cpus": "CPU 容量", "load": "平均負荷", "memory": "メモリ", "swap": "スワップ", "pids": "タスク数（PID）", "availability": "取得状況",
+    "heapValue": "使用 {{used}} / 割当 {{total}} / 上限 {{limit}}",
+    "buffersValue": "外部メモリ {{external}} / ArrayBuffers {{buffers}}（外部メモリに含まれる）",
+    "cpusValue": "可視論理 CPU {{logical}} / 利用可能な並列度 {{available}}",
+    "loadValue": "1 分 {{one}} / 5 分 {{five}} / 15 分 {{fifteen}}",
+    "memoryValue": "利用可能 {{available}} / 合計 {{total}}",
+    "cgroupCpuValue": "使用率 {{usage}} / 割当 {{quota}}；{{scope}}",
+    "cgroupMemoryValue": "現在 {{current}} / ピーク {{peak}} / 上限 {{limit}}；{{scope}}",
+    "boundedValue": "現在 {{current}} / 上限 {{limit}}",
+    "pidsValue": "現在 {{current}} / 上限 {{limit}}；{{scope}}",
+    "cpuNote": "プロセスと cgroup の CPU：100% = 1 コア。100% を超える場合があります。",
+    "systemNote": "カーネルから見える合計値はコンテナの制限ではありません。システム CPU は可視 CPU 全体で 0-100%。負荷は百分率ではありません。",
+    "cgroupNote": "資源ごとに現在のグループまたは可視の制限元祖先を選び、子孫や他のプロセスを含む場合があります。各資源のグループは同一とは限らず、不可視の祖先による制限もあり得ます。",
+    "qualificationNote": "単一のスナップショットはボットや高負荷機能の 256 MiB 環境への適合を証明しません。",
+    "v1Unavailable": "取得不可：cgroup v1 は未対応です。",
+    "states": { "available": "取得可能", "partial": "一部取得可能", "unavailable": "取得不可" },
+    "scopes": { "current": "現在のグループ", "ancestor": "可視の制限元祖先", "unavailable": "範囲取得不可" }
+  },
   "languages": { "auto": "自動", "zh-CN": "中国語（簡体字）", "zh-TW": "中国語（繁体字）", "en": "English", "ja": "日本語" },
   "actions": { "save": "変更を保存", "saving": "保存中...", "cancel": "キャンセル", "confirm": "確認", "close": "閉じる", "retry": "再試行", "previous": "前へ", "next": "次へ", "add": "追加", "remove": "削除", "moveUp": "上へ移動", "moveDown": "下へ移動", "logout": "ログアウト", "refresh": "更新" },
   "errors": {
-    "INVALID_INPUT": "表示された項目を確認してください。", "FORBIDDEN": "この操作を行う権限がありません。", "UNAUTHORIZED": "続行するにはログインしてください。", "NOT_FOUND": "この操作またはモジュールは利用できません。", "CONFLICT": "データが別の場所で変更されました。再読み込みしてから保存してください。", "CONFIRMATION_EXPIRED": "この操作は期限切れか、すでに実行済みです。最初からやり直してください。", "CONFIRMATION_REQUIRED": "続行する前に操作を確認してください。", "AI_DISABLED": "AI 機能はインストールされていないか、無効になっています。", "CANCELLED": "操作をキャンセルしました。", "TIMEOUT": "操作がタイムアウトしました。", "OUTCOME_UNKNOWN": "操作の結果を確認できません。再試行する前に現在の状態を確認してください。", "UNAVAILABLE": "サービスを一時的に利用できません。", "RATE_LIMITED": "リクエストが多すぎます。しばらくしてから再試行してください。", "INTERNAL_ERROR": "操作に失敗しました。しばらくしてから再試行してください。", "INVALID_ORIGIN": "信頼できないページからのリクエストです。", "CSRF_INVALID": "ページのセキュリティトークンが期限切れです。ページを再読み込みしてください。", "AUTH_EXPIRED": "セッションの有効期限が切れました。再度ログインしてください。", "AUTH_INVALID": "ログイン情報を検証できません。再度ログインしてください。", "STORAGE_ERROR": "変更を保存できませんでした。以前の状態は保持されています。", "INVALID_OUTPUT": "サービスから無効な結果が返されました。", "CAPACITY": "サービスが混雑しています。しばらくしてから再試行してください。"
+    "AI_PRICING_REQUIRED": "このプリセットは金額制限を使いますが、審査済み料金がありません。料金を設定するか、AI の詳細設定で上限付き使用量方式を明示的に選択してください。",
+    "INVALID_INPUT": "表示された項目を確認してください。", "FORBIDDEN": "この操作を行う権限がありません。", "UNAUTHORIZED": "続行するにはログインしてください。", "NOT_FOUND": "この操作またはモジュールは利用できません。", "CONFLICT": "データが別の場所で変更されました。再読み込みしてから保存してください。", "CONFIRMATION_EXPIRED": "この操作は期限切れか、すでに実行済みです。最初からやり直してください。", "CONFIRMATION_REQUIRED": "続行する前に操作を確認してください。", "AI_DISABLED": "現在の設定と範囲では AI が無効か利用できません。既存データの操作は新しい AI 利用権限を付与しません。", "CANCELLED": "操作をキャンセルしました。", "TIMEOUT": "操作がタイムアウトしました。", "OUTCOME_UNKNOWN": "操作の結果を確認できません。再試行する前に現在の状態を確認してください。", "UNAVAILABLE": "サービスを一時的に利用できません。", "RATE_LIMITED": "リクエストが多すぎます。しばらくしてから再試行してください。", "INTERNAL_ERROR": "操作に失敗しました。しばらくしてから再試行してください。", "INVALID_ORIGIN": "信頼できないページからのリクエストです。", "CSRF_INVALID": "ページのセキュリティトークンが期限切れです。ページを再読み込みしてください。", "AUTH_EXPIRED": "セッションの有効期限が切れました。再度ログインしてください。", "AUTH_INVALID": "ログイン情報を検証できません。再度ログインしてください。", "STORAGE_ERROR": "変更を保存できませんでした。以前の状態は保持されています。", "INVALID_OUTPUT": "サービスから無効な結果が返されました。", "CAPACITY": "サービスが混雑しています。しばらくしてから再試行してください。"
   },
   "states": { "disabled": "無効", "starting": "起動中", "running": "稼働中", "stopping": "停止処理中", "stopped": "停止", "failed": "異常" },
   "yes": "はい",

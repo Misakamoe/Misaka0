@@ -1,4 +1,6 @@
 import { Bot, GrammyError, InputFile } from 'grammy';
+import { createReadStream } from 'node:fs';
+import { finished } from 'node:stream/promises';
 import type { Sticker } from 'grammy/types';
 import { stickerSetNameSchema } from '../../shared/schemas/sticker.js';
 import { AppError, throwIfAborted } from '../errors.js';
@@ -60,50 +62,48 @@ export function createStickerTransport(bot: Bot, token: string, fetcher: typeof 
         || info.file_size !== undefined && (!Number.isSafeInteger(info.file_size) || info.file_size < 1 || info.file_size > maxBytes)) throw new AppError('INVALID_INPUT');
       let response: Response | undefined;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-      const interrupted = Promise.withResolvers<never>();
-      const discard = () => { void (reader ? reader.cancel() : response?.body?.cancel())?.catch(() => undefined); };
-      const abort = () => { discard(); interrupted.reject(new AppError(signal.aborted ? 'CANCELLED' : 'TIMEOUT')); };
+      let draining: Promise<void> | undefined;
+      const discard = () => draining ??= (reader ? reader.cancel() : response?.body?.cancel())?.catch(() => undefined);
+      const abort = () => { void discard(); };
       request.addEventListener('abort', abort, { once: true });
       try {
         throwIfAborted(request);
-        const fetching = fetcher(`https://api.telegram.org/file/bot${token}/${path}`, {
+        response = await fetcher(`https://api.telegram.org/file/bot${token}/${path}`, {
           method: 'GET', redirect: 'error', credentials: 'omit', headers: { 'Accept-Encoding': 'identity' }, signal: request,
-        }).then(result => {
-          response = result;
-          if (request.aborted) { void result.body?.cancel().catch(() => undefined); throw new AppError('CANCELLED'); }
-          return result;
         });
-        response = await Promise.race([fetching, interrupted.promise]);
+        throwIfAborted(request);
         const length = response.headers.get('content-length');
         const encoding = response.headers.get('content-encoding');
         if (response.status !== 200 || !response.body || encoding && encoding !== 'identity'
           || length !== null && (!/^[0-9]+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) < 1 || Number(length) > maxBytes)) throw new AppError('INVALID_INPUT');
         reader = response.body.getReader();
-        const chunks: Buffer[] = [];
+        const data = Buffer.allocUnsafe(length === null ? info.file_size ?? maxBytes : Number(length));
         let bytes = 0;
         for (;;) {
-          const part = await Promise.race([reader.read(), interrupted.promise]);
+          const part = await reader.read();
           throwIfAborted(request);
           if (part.done) break;
           bytes += part.value.byteLength;
-          if (bytes > maxBytes) throw new AppError('INVALID_INPUT');
-          chunks.push(Buffer.from(part.value));
+          if (bytes > data.length) throw new AppError('INVALID_INPUT');
+          data.set(part.value, bytes - part.value.byteLength);
         }
         if (!bytes || length !== null && bytes !== Number(length) || info.file_size !== undefined && bytes !== info.file_size) throw new AppError('INVALID_INPUT');
-        return Buffer.concat(chunks, bytes);
+        return data.subarray(0, bytes);
       } catch (error) {
         if (signal.aborted) throw new AppError('CANCELLED');
         if (request.aborted) throw new AppError('TIMEOUT');
         throw error instanceof AppError ? error : new AppError('UNAVAILABLE');
       } finally {
         request.removeEventListener('abort', abort);
-        discard();
+        await discard();
         reader?.releaseLock();
       }
     },
     async send(target, result, signal) {
       throwIfAborted(signal);
-      const file = new InputFile(result.data, result.filename);
+      const stream = Buffer.isBuffer(result.data) ? undefined : createReadStream(result.data.path, { highWaterMark: 64 * 1024, signal });
+      const drained = stream ? finished(stream).catch(() => undefined) : undefined;
+      const file = new InputFile(stream ?? result.data as Buffer, result.filename);
       const options = {
         message_thread_id: target.threadId,
         reply_parameters: { message_id: target.replyTo, allow_sending_without_reply: true },
@@ -121,6 +121,9 @@ export function createStickerTransport(bot: Bot, token: string, fetcher: typeof 
           throw new AppError(error.error_code === 429 ? 'CAPACITY' : error.error_code === 403 ? 'FORBIDDEN' : 'INVALID_INPUT');
         }
         throw new AppError('OUTCOME_UNKNOWN');
+      } finally {
+        stream?.destroy();
+        await drained;
       }
     },
   };

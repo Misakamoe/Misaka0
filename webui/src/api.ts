@@ -1,5 +1,6 @@
 import type { ActionResult, ErrorCode, Me } from '../../shared/schemas';
 import { errorCodeSchema } from '../../shared/schemas';
+import { z } from 'zod';
 
 export class ApiError extends Error {
   constructor(public code: ErrorCode, public fields: string[] = []) {
@@ -59,6 +60,12 @@ export async function request<T>(path: string, method = 'GET', body?: unknown): 
     active.delete(controller);
     window.clearTimeout(timeout);
   }
+}
+
+export async function loginMethods() {
+  const result = z.strictObject({ oidc: z.boolean(), miniapp: z.literal(true) }).safeParse(await request<unknown>('/auth/methods'));
+  if (!result.success) throw new ApiError('INVALID_OUTPUT');
+  return result.data;
 }
 
 export async function exchangeMiniApp(initData: string) {

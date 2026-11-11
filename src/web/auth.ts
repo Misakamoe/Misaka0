@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import * as client from 'openid-client';
+import type { CustomFetch } from 'openid-client';
 import type { StartupConfig } from '../config.js';
 import { AppError, throwIfAborted } from '../errors.js';
 
@@ -37,11 +37,13 @@ export interface OidcAdapter {
 }
 
 /** Official metadata is pinned: discovery cannot change issuer or credential destinations. */
-export function createOidcAdapter(config: StartupConfig, options: { customFetch?: client.CustomFetch } = {}): OidcAdapter {
+export function createOidcAdapter(config: StartupConfig, options: { customFetch?: CustomFetch } = {}): OidcAdapter {
   const { publicBaseUrl, oidcClientId, oidcClientSecret } = config.web;
   if (!publicBaseUrl || !oidcClientId || !oidcClientSecret) throw new AppError('UNAVAILABLE');
   const redirectUri = `${publicBaseUrl}/auth/callback`;
-  const configuration = (signal: AbortSignal) => {
+  let library: Promise<typeof import('openid-client')> | undefined;
+  const load = () => library ??= import('openid-client');
+  const configuration = (signal: AbortSignal, client: typeof import('openid-client')) => {
     const oidc = new client.Configuration({
       issuer: OIDC_ISSUER,
       authorization_endpoint: `${OIDC_ISSUER}/auth`,
@@ -66,9 +68,11 @@ export function createOidcAdapter(config: StartupConfig, options: { customFetch?
   return {
     async authorize(attempt, signal) {
       throwIfAborted(signal);
+      const client = await load();
+      throwIfAborted(signal);
       const challenge = await client.calculatePKCECodeChallenge(attempt.verifier);
       throwIfAborted(signal);
-      return client.buildAuthorizationUrl(configuration(signal), {
+      return client.buildAuthorizationUrl(configuration(signal, client), {
         redirect_uri: redirectUri, response_type: 'code', scope: 'openid profile',
         state: attempt.state, nonce: attempt.nonce,
         code_challenge: challenge, code_challenge_method: 'S256',
@@ -78,8 +82,10 @@ export function createOidcAdapter(config: StartupConfig, options: { customFetch?
       try {
         throwIfAborted(signal);
         if (callback.origin + callback.pathname !== redirectUri || callback.hash) throw new AppError('AUTH_INVALID');
+        const client = await load();
+        throwIfAborted(signal);
         // A fresh client per exchange fetches the current JWKS, including rotated keys.
-        const tokens = await client.authorizationCodeGrant(configuration(signal), callback, {
+        const tokens = await client.authorizationCodeGrant(configuration(signal, client), callback, {
           expectedState: attempt.state, expectedNonce: attempt.nonce,
           pkceCodeVerifier: attempt.verifier, idTokenExpected: true,
         });
@@ -103,19 +109,29 @@ export function createOidcAdapter(config: StartupConfig, options: { customFetch?
 }
 
 class ExpiringMap<T extends { expiresAt: number }> {
-  private readonly values = new Map<string, T>();
-  constructor(private readonly capacity: number, private readonly now: () => number) {}
-  prune(): void {
-    for (const [key, value] of this.values) if (value.expiresAt <= this.now()) this.values.delete(key);
+  private readonly values = new Map<string, { value: T; bytes: number }>();
+  private bytes = 0;
+  constructor(private readonly capacity: number, private readonly now: () => number,
+    private readonly maxBytes: number, private readonly measure: (key: string, value: T) => number) {
+    if (!Number.isSafeInteger(capacity) || capacity < 1 || !Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new AppError('INVALID_INPUT');
   }
-  get(key: string): T | undefined { this.prune(); return this.values.get(key); }
-  delete(key: string): void { this.values.delete(key); }
+  prune(): void {
+    for (const [key, entry] of this.values) if (entry.value.expiresAt <= this.now()) this.delete(key);
+  }
+  get(key: string): T | undefined { this.prune(); return this.values.get(key)?.value; }
+  delete(key: string): void {
+    const entry = this.values.get(key);
+    if (entry) { this.bytes -= entry.bytes; this.values.delete(key); }
+  }
   set(key: string, value: T): void {
     this.prune();
+    const bytes = this.measure(key, value);
+    const total = this.bytes - (this.values.get(key)?.bytes ?? 0) + bytes;
     if (this.values.size >= this.capacity && !this.values.has(key)) throw new AppError('CAPACITY');
-    this.values.set(key, value);
+    if (total > this.maxBytes) throw new AppError('CAPACITY');
+    this.values.set(key, { value, bytes }); this.bytes = total;
   }
-  clear(): void { this.values.clear(); }
+  clear(): void { this.values.clear(); this.bytes = 0; }
 }
 
 export interface Session extends Identity {
@@ -130,7 +146,7 @@ export class WebAuth {
   private readonly sessions: ExpiringMap<Session>;
   private readonly attempts: ExpiringMap<OidcAttempt & { binding: string; expiresAt: number }>;
   private readonly replays: ExpiringMap<{ expiresAt: number }>;
-  private readonly oidc: OidcAdapter;
+  private readonly oidc: OidcAdapter | undefined;
 
   constructor(private readonly options: {
     config: StartupConfig;
@@ -140,17 +156,27 @@ export class WebAuth {
     sessionCapacity?: number;
     attemptCapacity?: number;
     replayCapacity?: number;
+    sessionBytes?: number;
+    attemptBytes?: number;
+    replayBytes?: number;
   }) {
     this.now = options.now ?? Date.now;
-    this.sessions = new ExpiringMap(options.sessionCapacity ?? 10_000, this.now);
-    this.attempts = new ExpiringMap(options.attemptCapacity ?? 1_000, this.now);
-    this.replays = new ExpiringMap(options.replayCapacity ?? 10_000, this.now);
-    this.oidc = options.oidc ?? createOidcAdapter(options.config);
+    this.sessions = new ExpiringMap(options.sessionCapacity ?? 10_000, this.now, options.sessionBytes ?? 1024 * 1024,
+      (key, value) => 256 + 2 * (key.length + value.name.length + (value.languageHint?.length ?? 0) + (value.csrfToken?.length ?? 0)));
+    this.attempts = new ExpiringMap(options.attemptCapacity ?? 1_000, this.now, options.attemptBytes ?? 256 * 1024,
+      (key, value) => 256 + 2 * (key.length + value.binding.length + value.state.length + value.nonce.length + value.verifier.length));
+    this.replays = new ExpiringMap(options.replayCapacity ?? 10_000, this.now, options.replayBytes ?? 512 * 1024,
+      key => 128 + key.length * 2);
+    this.oidc = options.config.web.oidcClientId && options.config.web.oidcClientSecret
+      ? options.oidc ?? createOidcAdapter(options.config) : undefined;
   }
+
+  get oidcEnabled(): boolean { return this.oidc !== undefined; }
 
   async begin(signal: AbortSignal): Promise<{ url: URL; binding: string }> {
     throwIfAborted(signal);
-    const attempt = { state: opaque(), nonce: opaque(), verifier: client.randomPKCECodeVerifier() };
+    if (!this.oidc) throw new AppError('UNAVAILABLE');
+    const attempt = { state: opaque(), nonce: opaque(), verifier: opaque() };
     const binding = opaque();
     this.attempts.set(attempt.state, { ...attempt, binding: digest(binding), expiresAt: this.now() + LOGIN_TTL });
     try {
@@ -163,6 +189,7 @@ export class WebAuth {
 
   async finish(callback: URL, binding: string | undefined, previousCookie: string | undefined, signal: AbortSignal): Promise<{ token: string; session: Session }> {
     throwIfAborted(signal);
+    if (!this.oidc) throw new AppError('UNAVAILABLE');
     const state = callback.searchParams.get('state') ?? '';
     const attempt = this.attempts.get(state);
     // Consume before any asynchronous exchange, even when the callback fails.

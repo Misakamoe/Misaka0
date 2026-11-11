@@ -8,7 +8,7 @@ import {
   subconvOptionsSchema, subconvPresets, subconvResultSchema, subconvSettingsSchema, subconvSnapshotSchema, subconvSourceCount,
   subconvSourceSchema, subconvTargets, subconvTriStateFields, type SubconvCustomParam, type SubconvOptions,
 } from '../shared/schemas/subconv.js';
-import { createInvocation, type InvocationContext } from '../src/actions.js';
+import { createInvocation, type ActionDefinition, type InvocationContext } from '../src/actions.js';
 import { registerSubconvActions, subconvMetadata, SubconvService } from '../src/modules/subconv.js';
 import { JSON_DOCUMENT_MAX_BYTES, JsonStorage, type StorageOptions } from '../src/storage.js';
 import { coreFixture, invocation } from './support/core.js';
@@ -26,6 +26,7 @@ async function fixture(storageOptions: StorageOptions = {}, contents?: string) {
   await storage.initialize();
   if (contents !== undefined) await writeFile(join(directory, 'subconv.json'), contents);
   const service = new SubconvService(storage);
+  cleanup.push(async () => service.stop());
   if (contents === undefined) await service.initialize();
   return { directory, storage, service };
 }
@@ -423,26 +424,43 @@ describe('personal subconv storage and private Actions', () => {
     expect(commit).not.toHaveBeenCalled();
     expect(await readFile(join(f.directory, 'subconv.json'), 'utf8')).toBe(bytes);
   });
-  it('registers private self-only Telegram Actions with serializable DTOs and read generation', () => {
-    const definitions: { id: string; effect: string; permission: string; sources: readonly string[]; scopes: readonly string[]; aiVisible: boolean }[] = [];
+  it('registers private self-only Actions with model-safe projections while raw subconv remains Telegram-only', () => {
+    const definitions: ActionDefinition<unknown, unknown>[] = [];
     const service = {} as SubconvService;
-    registerSubconvActions({ register: definition => { definitions.push(definition); } }, service);
+    registerSubconvActions({ register: definition => { definitions.push(definition as ActionDefinition<unknown, unknown>); } }, service);
     expect(definitions.map(item => [item.id, item.effect])).toEqual([
       ['subconv.settings.get', 'read'], ['subconv.settings.set', 'personal_write'], ['subconv.settings.reset', 'personal_write'], ['subconv.generate', 'read'],
+      ['subconv.options.set', 'personal_write'], ['subconv.sources', 'read'], ['subconv.generate_owned', 'personal_write'],
     ]);
-    for (const definition of definitions) expect(definition).toMatchObject({ permission: 'self', sources: ['telegram'], scopes: ['private'], aiVisible: false });
+    const visible = ['subconv.settings.get', 'subconv.options.set', 'subconv.sources', 'subconv.generate_owned'];
+    for (const definition of definitions) {
+      expect(definition).toMatchObject({ permission: 'self', scopes: ['private'],
+        sources: visible.includes(definition.id) ? ['telegram', 'ai'] : ['telegram'], aiVisible: visible.includes(definition.id) });
+      expect(inputJsonSchema(definition.input)).toMatchObject({ additionalProperties: false });
+      if (['subconv.settings.get', 'subconv.options.set'].includes(definition.id)) {
+        expect(definition.aiOutput).toBeDefined();
+        expect(definition.modelOutput).toEqual(expect.any(Function));
+      }
+    }
   });
   it('enforces ownership through Actions and never puts secret URL values in audit, errors or schemas', async () => {
-    const f = await coreFixture(); cleanup.push(f.close);
+    const f = await coreFixture({ services: { aiEnabled: true } }); cleanup.push(f.close);
     const settings = { ...subconvDefaults(), backend: `${backend}?token=TEST_ONLY_BACKEND` };
     const saved = await f.executor.execute(owner(), 'subconv.settings.set', { revision: 0, settings });
     expect(saved).toMatchObject({ status: 'succeeded', data: { revision: 1 } });
     expect(await f.executor.execute(other(), 'subconv.settings.get', {})).toMatchObject({ status: 'succeeded', data: { revision: 0, settings: subconvDefaults() } });
     const result = await f.executor.execute(owner(), 'subconv.generate', { revision: 1, source, customParams: [{ name: 'test', value: 'TEST_ONLY_CUSTOM' }] });
     expect(result).toMatchObject({ status: 'succeeded', data: { target: 'clash', sourceCount: 1 } });
+    const model = invocation({ actorId: 10, chat: { id: 10, type: 'private' }, aiRunId: 'subconv-run' });
+    const projected = await f.executor.executeTool(model, 'subconv.settings.get', {});
+    expect(projected).toMatchObject({ status: 'succeeded', data: { revision: 1, configured: true, target: 'clash' } });
+    expect(JSON.stringify(projected)).not.toMatch(/TEST_ONLY|backend|https:\/\/|include|exclude/);
+    for (const [id, input] of [['subconv.settings.set', { revision: 1, settings }], ['subconv.settings.reset', { revision: 1 }]] as const) {
+      expect(await f.executor.executeTool(model, id, input)).toMatchObject({ status: 'rejected', error: { code: 'FORBIDDEN' } });
+    }
     for (const context of [invocation({ source: 'http' }), invocation({ source: 'ai' }), invocation({ chat: { id: -100, type: 'supergroup' } }), { ...owner() } as InvocationContext]) {
       const rejected = await f.executor.execute(context, 'subconv.generate', { revision: 1, source, customParams: [] });
-      expect(rejected).toMatchObject({ status: 'rejected' });
+      expect(rejected).toMatchObject({ status: 'rejected', error: { code: 'FORBIDDEN' } });
       expect(JSON.stringify(rejected)).not.toContain('TEST_ONLY');
     }
     const invalids = [

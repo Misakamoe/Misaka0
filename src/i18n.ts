@@ -8,7 +8,7 @@ const i18n = createInstance();
 await i18n.init({
   resources,
   lng: 'zh-CN',
-  fallbackLng: 'zh-CN',
+  fallbackLng: 'en',
   supportedLngs: supportedLocales,
   defaultNS: 'common',
   initAsync: false,

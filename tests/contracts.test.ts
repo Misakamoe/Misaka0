@@ -156,6 +156,23 @@ describe('settings and operation schema boundaries', () => {
 });
 
 describe('legacy and frontend isolation', () => {
+  it('includes only the fixed sandbox build inputs in the Docker context', async () => {
+    const rules = (await readFile('.dockerignore', 'utf8')).split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#'));
+    const dockerfile = await readFile('Dockerfile', 'utf8');
+    expect(rules[0]).toBe('**');
+    expect(dockerfile).toContain('COPY scripts scripts');
+    expect(rules.filter(rule => rule.startsWith('!scripts'))).toEqual([
+      '!scripts/', '!scripts/build-sandbox.mjs', '!scripts/sandbox-runner.c', '!scripts/sandbox-smoke.mjs',
+    ]);
+    for (const path of ['scripts/build-sandbox.mjs', 'scripts/sandbox-runner.c', 'scripts/sandbox-smoke.mjs']) {
+      expect((await readFile(path)).byteLength).toBeGreaterThan(0);
+    }
+    for (const excluded of ['**/.env', '**/.env.*', '**/.git/', '**/.kilo/', '**/data/', 'legacy/', 'tests/']) expect(rules).toContain(excluded);
+    expect(rules).not.toContain('!scripts/**');
+    expect(rules).not.toContain('!data/');
+    expect(rules).not.toContain('!legacy/');
+  });
+
   it('retains exact archived bytes and registers only explicitly migrated native modules', async () => {
     const manifest = JSON.parse(await readFile('legacy/ptb/manifest.json', 'utf8')) as { files: { path: string; archive: string | null; sha256: string }[] };
     const archived = manifest.files.filter(file => file.archive);
@@ -171,7 +188,7 @@ describe('legacy and frontend isolation', () => {
     { metadata: { id: 'subconv', nameKey: 'web:subconv.name', descriptionKey: 'web:subconv.description', schema_version: 1, configurable: false } }]);
     expect(Object.isFrozen(modules)).toBe(true);
     const packageJson = JSON.parse(await readFile('package.json', 'utf8'));
-    expect(packageJson.scripts.start).toBe('node dist/src/index.js');
+    expect(packageJson.scripts.start).toBe('node --max-old-space-size=96 --max-semi-space-size=4 dist/src/index.js');
     expect(JSON.stringify(packageJson.dependencies)).not.toMatch(/python|ai-sdk|langchain|openai|anthropic|mcp/i);
   });
 

@@ -1,19 +1,20 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { fork, spawn, ChildProcess } from 'node:child_process';
 import { EventEmitter, getEventListeners } from 'node:events';
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { fileURLToPath } from 'node:url';
-import { Worker } from 'node:worker_threads';
 import { gzipSync } from 'node:zlib';
 import sharp from 'sharp';
-import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { convertSticker, createStickerConverter, type StickerConversionRequest } from '../src/modules/sticker-media.js';
+import { createStickerConverter as createQualifiedConverter, type StickerConversionRequest } from '../src/modules/sticker-media.js';
+import { ResourcePolicy } from '../src/resources.js';
+import { encodeGif } from '../src/modules/sticker-render.js';
+
+const resources = new ResourcePolicy({ heavyBytes: 96 * 1024 * 1024 });
+const createStickerConverter = (options: Parameters<typeof createQualifiedConverter>[0] = {}) => createQualifiedConverter({ qualified: true, resources, ...options });
+const convertSticker = createStickerConverter();
 
 vi.mock('node:child_process', async importOriginal => {
   const original = await importOriginal<typeof import('node:child_process')>();
-  return { ...original, spawn: vi.fn(original.spawn) };
+  return { ...original, spawn: vi.fn(original.spawn), fork: vi.fn(original.fork) };
 });
 
 const signal = () => new AbortController().signal;
@@ -101,7 +102,7 @@ async function webm(options: { fps?: number; count?: number; width?: number; hei
   });
 }
 
-afterEach(() => { vi.mocked(spawn).mockReset(); vi.restoreAllMocks(); vi.useRealTimers(); });
+afterEach(() => { vi.mocked(spawn).mockReset(); vi.mocked(fork).mockReset(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('static sticker conversion', () => {
   it.each(['png', 'webp'] as const)('converts real %s to transparent PNG and lossless WebP, respecting aspect', async format => {
@@ -280,6 +281,35 @@ describe('offline vector TGS rendering', () => {
 });
 
 describe('VP9 video conversion', () => {
+  it('checks the complete envelope but deliberately ignores corrupt later codec payloads for PNG only', async () => {
+    const data = await webm();
+    const blocks: [number, number][] = [];
+    function scan(start: number, end: number) {
+      const vint = (offset: number, id = false) => {
+        let size = 1;
+        while (!(data[offset]! & (128 >> (size - 1)))) size++;
+        let value = id ? data[offset]! : data[offset]! & (255 >> size);
+        for (let i = 1; i < size; i++) value = value * 256 + data[offset + i]!;
+        return { size, value };
+      };
+      while (start < end) {
+        const id = vint(start, true); const length = vint(start + id.size);
+        const content = start + id.size + length.size;
+        const next = Math.min(end, content + length.value);
+        if ([0x18538067, 0x1f43b675, 0xa0].includes(id.value)) scan(content, next);
+        if ([0xa1, 0xa3].includes(id.value)) blocks.push([content + 4, next]);
+        start = next;
+      }
+    }
+    scan(0, data.length);
+    expect(blocks).toHaveLength(2);
+    const late = Buffer.from(data); late.fill(0, ...blocks[1]!);
+    await expect(convertSticker(request(late, { kind: 'video' }), signal())).resolves.toMatchObject({ format: 'png' });
+    await expect(convertSticker(request(late, { kind: 'video', format: 'gif' }), signal())).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const early = Buffer.from(data); early.fill(0, ...blocks[0]!);
+    await expect(convertSticker(request(early, { kind: 'video' }), signal())).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it('decodes real VP9 alpha into an actual first-frame PNG', async () => {
     const result = await convertSticker(request(await webm(), { kind: 'video' }), signal());
     const raw = await sharp(result.data).ensureAlpha().raw().toBuffer();
@@ -334,10 +364,12 @@ describe('VP9 video conversion', () => {
     const controller = new AbortController();
     const task = convertSticker(request(data, { kind: 'video' }), controller.signal);
     const checked = expect(task).rejects.toMatchObject({ code: 'CANCELLED', message: 'CANCELLED' });
+    await vi.waitFor(() => expect(spawned).toHaveBeenCalled());
     const [, args, options] = spawned.mock.calls[0]!;
     expect(options).toMatchObject({ shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     expect(args).toEqual(expect.arrayContaining(['-protocol_whitelist', 'pipe', '-f', 'matroska', '-c:v', 'libvpx-vp9',
-      '-max_pixels', '262144', '-threads', '1', '-map', '0:v:0', '-an', '-sn', '-dn', '-frames:v', '91', 'pipe:0', 'pipe:1']));
+      '-max_pixels', '262144', '-threads', '1', '-map', '0:v:0', '-an', '-sn', '-dn', '-frames:v', '1', 'pipe:0', 'pipe:1']));
+    expect(args?.join(' ')).not.toContain('fps=');
     let settled = false;
     void task.then(() => { settled = true; }, () => { settled = true; });
     controller.abort(new Error('private reason'));
@@ -345,6 +377,7 @@ describe('VP9 video conversion', () => {
     await Promise.resolve();
     expect(settled).toBe(false);
     fake.emit('close', null, 'SIGKILL');
+    fake.stdout.end();
     await checked;
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
@@ -359,11 +392,13 @@ describe('VP9 video conversion', () => {
       const task = convertSticker(request(data, { kind: 'video' }), signal());
       const code = mode === 'missing-decoder' ? 'UNAVAILABLE' : 'INVALID_INPUT';
       const checked = expect(task).rejects.toMatchObject({ code, message: code });
+      await vi.waitFor(() => expect(mocked).toHaveBeenCalled());
       if (mode === 'extra-frame') {
-        fake.stdout.emit('data', Buffer.alloc(32 * 32 * 4 * 91));
-        expect(fake.kill).toHaveBeenCalledWith('SIGKILL');
+        fake.stdout.end(Buffer.alloc(32 * 32 * 4 * 2));
+        await vi.waitFor(() => expect(fake.kill).toHaveBeenCalledWith('SIGKILL'));
       } else fake.stderr.emit('data', Buffer.from(mode === 'missing-decoder' ? "Unknown decoder 'libvpx-vp9'" : 'secretfilename.webm malformed packet'));
       fake.emit('close', 1);
+      fake.stdout.end();
       await checked;
       mocked.mockReset();
     }
@@ -371,19 +406,71 @@ describe('VP9 video conversion', () => {
 });
 
 describe('conversion budgets and cleanup', () => {
+  it('clears opaque canvases before later transparent frames, including high-entropy palettes', async () => {
+    const originals: Buffer[] = [];
+    let seed = 123456;
+    async function* frames() {
+      const pixels = Buffer.alloc(64 * 64 * 4);
+      for (let frame = 0; frame < 3; frame++) {
+        for (let i = 0; i < 4096; i++) {
+          for (let channel = 0; channel < 3; channel++) { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; pixels[i * 4 + channel] = seed >>> 24; }
+          pixels[i * 4 + 3] = frame === 1 && i % 2 === 0 ? 0 : 255;
+        }
+        originals.push(Buffer.from(pixels));
+        yield { pixels, delay: [40, 30, 30][frame]! };
+      }
+    }
+    const gif = await encodeGif(frames(), 64, 64, 1024 * 1024);
+    const raw = await sharp(gif, { animated: true }).ensureAlpha().raw().toBuffer();
+    expect(await sharp(gif).metadata()).toMatchObject({ pages: 3, delay: [40, 30, 30] });
+    let error = 0; let channels = 0;
+    for (let frame = 0; frame < 3; frame++) for (let i = 0; i < 4096; i++) {
+      const offset = (frame * 4096 + i) * 4; const original = originals[frame]!;
+      expect(raw[offset + 3]).toBe(original[i * 4 + 3]);
+      if (raw[offset + 3]) for (let channel = 0; channel < 3; channel++) { error += Math.abs(raw[offset + channel]! - original[i * 4 + channel]!); channels++; }
+    }
+    expect(error / channels).toBeLessThan(25);
+  });
+
+  it('incrementally encodes high-entropy changing palettes, alpha and exact centisecond timing', async () => {
+    const pixels = Buffer.alloc(64 * 64 * 4);
+    async function* frames() {
+      for (let frame = 0; frame < 3; frame++) {
+        for (let i = 0; i < 4096; i++) {
+          pixels[i * 4] = frame === 0 ? i % 256 : 0;
+          pixels[i * 4 + 1] = frame === 1 ? i % 256 : 0;
+          pixels[i * 4 + 2] = frame === 2 ? i % 256 : 0;
+          pixels[i * 4 + 3] = (i + frame) % 5 ? 255 : 0;
+        }
+        yield { pixels, delay: [30, 40, 30][frame]! };
+      }
+    }
+    const gif = await encodeGif(frames(), 64, 64, 1024 * 1024);
+    expect(await sharp(gif).metadata()).toMatchObject({ pages: 3, delay: [30, 40, 30], loop: 0 });
+    const raw = await sharp(gif, { animated: true }).ensureAlpha().raw().toBuffer();
+    for (let frame = 0; frame < 3; frame++) for (let i = 0; i < 4096; i++) {
+      const offset = (frame * 4096 + i) * 4;
+      expect(raw[offset + 3]).toBe((i + frame) % 5 ? 255 : 0);
+      if (raw[offset + 3]) expect(Math.abs(raw[offset + frame]! - i % 256)).toBeLessThanOrEqual(2);
+    }
+    await expect(encodeGif(frames(), 64, 64, 32)).rejects.toThrow('CAPACITY');
+  });
+
   it('allows only minimum short-side padding beyond requested photo dimensions', async () => {
-    const emit = Worker.prototype.emit;
+    const emit = EventEmitter.prototype.emit;
     const source = await sourceImage('png', 512, 1);
     for (const dimensions of [{ width: 512, height: 27 }, { width: 513, height: 26 }, { width: 512, height: 25 }]) {
-      const changed = vi.spyOn(Worker.prototype, 'emit').mockImplementation(function (this: Worker, event, ...args) {
-        if (event === 'message' && args[0]?.ok) Object.assign(args[0].result, dimensions);
+      const changed = vi.spyOn(ChildProcess.prototype, 'emit').mockImplementation(function (this: ChildProcess, event: string, ...args: unknown[]) {
+        const reply = args[0] as { ok?: boolean; result?: object } | undefined;
+        if (event === 'message' && reply?.ok) Object.assign(reply.result!, dimensions);
         return emit.call(this, event, ...args);
       });
       await expect(convertSticker(request(source, { width: 512, height: 1, media: true }), signal())).rejects.toMatchObject({ code: 'INVALID_INPUT' });
       changed.mockRestore();
     }
-    const changed = vi.spyOn(Worker.prototype, 'emit').mockImplementation(function (this: Worker, event, ...args) {
-      if (event === 'message' && args[0]?.ok) Object.assign(args[0].result, { width: 512, height: 26 });
+    const changed = vi.spyOn(ChildProcess.prototype, 'emit').mockImplementation(function (this: ChildProcess, event: string, ...args: unknown[]) {
+      const reply = args[0] as { ok?: boolean; result?: object } | undefined;
+      if (event === 'message' && reply?.ok) Object.assign(reply.result!, { width: 512, height: 26 });
       return emit.call(this, event, ...args);
     });
     await expect(convertSticker(request(source, { width: 512, height: 1 }), signal())).rejects.toMatchObject({ code: 'INVALID_INPUT' });
@@ -423,48 +510,32 @@ describe('conversion budgets and cleanup', () => {
     expect(getEventListeners(timed, 'abort')).toHaveLength(0);
   });
 
-  it('does not settle cancellation until worker termination has completed', async () => {
-    const terminate = Worker.prototype.terminate;
-    const gate = Promise.withResolvers<void>();
-    const started = Promise.withResolvers<void>();
-    vi.spyOn(Worker.prototype, 'terminate').mockImplementation(async function (this: Worker) {
-      const result = await terminate.call(this);
-      started.resolve();
-      await gate.promise;
-      return result;
+  it('does not settle cancellation or admit the next job until child close', async () => {
+    const fake = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(), send: vi.fn((_message, callback) => callback()),
     });
+    vi.mocked(fork).mockReturnValueOnce(fake as unknown as ChildProcess);
     const controller = new AbortController();
     let settled = false;
     const task = convertSticker(request(tgs(), { kind: 'animated', format: 'gif' }), controller.signal);
     const checked = expect(task).rejects.toMatchObject({ code: 'CANCELLED' });
     void task.then(() => { settled = true; }, () => { settled = true; });
     controller.abort();
-    await started.promise;
+    await Promise.resolve();
     expect(settled).toBe(false);
-    gate.resolve();
+    expect(fake.kill).toHaveBeenCalledWith('SIGKILL');
+    await expect(convertSticker(request(tgs(), { kind: 'animated' }), signal())).rejects.toMatchObject({ code: 'CAPACITY' });
+    fake.emit('close', null);
     await checked;
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+    await expect(convertSticker(request(await sourceImage()), signal())).resolves.toHaveProperty('data');
   });
 
-  it('runs emitted JavaScript in Node without a TypeScript loader or browser globals', async () => {
-    const directory = await mkdtemp('/tmp/kilo/sticker-render-js-');
-    let worker: Worker | undefined;
-    try {
-      const input = await readFile(new URL('../src/modules/sticker-render.ts', import.meta.url), 'utf8');
-      const compiled = ts.transpileModule(input, { compilerOptions: { target: ts.ScriptTarget.ES2024, module: ts.ModuleKind.ESNext } }).outputText;
-      await writeFile(join(directory, 'sticker-render.mjs'), compiled);
-      await symlink(fileURLToPath(new URL('../node_modules', import.meta.url)), join(directory, 'node_modules'));
-      worker = new Worker(new URL(`file://${join(directory, 'sticker-render.mjs')}`), {
-        execArgv: [], env: {}, workerData: { request: request(tgs(), { kind: 'animated' }), maxOutputBytes: 10 * 1024 * 1024 },
-      });
-      const reply = await new Promise<{ ok: boolean; result: { data: Uint8Array } }>((resolve, reject) => {
-        worker!.once('message', resolve); worker!.once('error', reject);
-      });
-      expect(reply.ok).toBe(true);
-      expect(await sharp(Buffer.from(reply.result.data)).metadata()).toMatchObject({ width: 32, height: 32, format: 'png' });
-    } finally {
-      await worker?.terminate();
-      await rm(directory, { recursive: true, force: true });
-    }
+  it('defaults to unavailable until explicitly qualified and starts only the fixed clean-environment child', async () => {
+    await expect(createQualifiedConverter()(request(tgs(), { kind: 'animated' }), signal())).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    expect(fork).not.toHaveBeenCalled();
+    await convertSticker(request(await sourceImage()), signal());
+    expect(vi.mocked(fork).mock.calls[0]?.[0].toString()).toMatch(/\/sticker-worker\.ts$/);
+    expect(vi.mocked(fork).mock.calls[0]?.[2]).toMatchObject({ env: {}, serialization: 'advanced', execArgv: ['--max-old-space-size=64', '--max-semi-space-size=2'] });
   });
 });

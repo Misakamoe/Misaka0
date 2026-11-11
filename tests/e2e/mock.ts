@@ -27,7 +27,7 @@ export const extensionDescriptor: SettingsDescriptor = {
   order: ['label', 'connection', 'tags', 'secret', 'mode', 'identity', 'workers'],
 };
 
-export async function mockApi(page: Page, options: { miniapp?: boolean; signedOut?: boolean; fixture?: boolean; language?: LanguagePreference } = {}) {
+export async function mockApi(page: Page, options: { miniapp?: boolean; oidc?: boolean; signedOut?: boolean; fixture?: boolean; language?: LanguagePreference } = {}) {
   const state = {
     signedOut: options.signedOut ?? false,
     expired: false,
@@ -44,7 +44,7 @@ export async function mockApi(page: Page, options: { miniapp?: boolean; signedOu
       saved: options.fixture ? { label: 'Local', connection: { endpoint: 'local.test' }, tags: ['alpha'], secret: { has_value: true }, mode: 'safe', identity: 'fixed', workers: 1 } as Record<string, unknown> : { defaultLanguage: 'en' },
       effective: options.fixture ? { label: 'Local', connection: { endpoint: 'local.test' }, tags: ['alpha'], secret: { has_value: true }, mode: 'safe', identity: 'fixed', workers: 1 } as Record<string, unknown> : { defaultLanguage: 'en' },
     },
-    groups: [{ id: -1001234567890, title: 'Engineering', authorizedBy: 42, authorizedAt: '2026-11-08T12:00:00.000Z', present: true }],
+    groups: [{ id: -1001234567890, title: 'Engineering', authorizedBy: 42, authorizedAt: '2026-11-08T12:00:00.000Z', present: true, groupRevision: 5 }],
   };
   const failures: string[] = [];
   page.on('pageerror', (error) => failures.push(error.message));
@@ -74,12 +74,16 @@ export async function mockApi(page: Page, options: { miniapp?: boolean; signedOu
     state.calls.push({ path, method: request.method(), body, headers });
     const fail = (code: string, status: number) => route.fulfill({ status, json: { status: 'rejected', invocationId: 'test', error: { code } } });
     const success = (data: unknown) => route.fulfill({ json: { status: 'succeeded', invocationId: 'test', data } });
+    if (path === '/auth/methods') { await route.fulfill({ json: { oidc: options.oidc ?? true, miniapp: true } }); return; }
     if (path === '/auth/miniapp') {
       state.exchanges += 1;
       expect(body).toEqual({ initData: 'signed-test-init-data' });
       await route.fulfill({ json: { token: 'test-memory-bearer', expiresAt: new Date(Date.now() + 3_600_000).toISOString() } }); return;
     }
-    if (path === '/auth/login') { await route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>OIDC test redirect</title>' }); return; }
+    if (path === '/auth/login') {
+      if (options.oidc === false) { await fail('UNAVAILABLE', 503); return; }
+      await route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>OIDC test redirect</title>' }); return;
+    }
     if (state.expired || state.signedOut) { await fail(state.expired ? 'AUTH_EXPIRED' : 'UNAUTHORIZED', 401); return; }
     if (options.miniapp) expect(headers.authorization).toBe('Bearer test-memory-bearer');
     if (request.method() !== 'GET' && !options.miniapp) expect(headers['x-csrf-token']).toBe('test-csrf');
@@ -111,11 +115,19 @@ export async function mockApi(page: Page, options: { miniapp?: boolean; signedOu
       if (body) state.language = body.language as LanguagePreference;
       await success({ language: state.language, resolvedLanguage: state.language === 'auto' ? 'en' : state.language, menuSynced: true }); return;
     }
+    if (path === '/api/groups/state') { await success({ chatId: body?.chatId, revision: 1, groupRevision: state.groups.find(group => group.id === body?.chatId)?.groupRevision ?? 0 }); return; }
     if (path === '/api/groups') {
-      if (body) { state.groups.push({ id: body.chatId as number, title: 'New group', authorizedBy: 42, authorizedAt: new Date().toISOString(), present: true }); await success({ chatId: body.chatId, revision: 2, changed: true, notificationSent: true, left: false }); return; }
+      if (body) {
+        expect(body).toEqual({ chatId: body.chatId, revision: 1, groupRevision: 0 });
+        state.groups.push({ id: body.chatId as number, title: 'New group', authorizedBy: 42, authorizedAt: new Date().toISOString(), present: true, groupRevision: 1 });
+        await success({ chatId: body.chatId, revision: 2, groupRevision: 1, changed: true, notificationSent: true, left: false }); return;
+      }
       await success({ items: state.groups, page: 0, pageSize: 10, total: state.groups.length, revision: 1 }); return;
     }
-    if (path === '/api/groups/revoke') { await route.fulfill({ json: { status: 'pending_confirmation', invocationId: 'test', confirmation: { token: 'a'.repeat(40), actionId: 'groups.revoke', expiresAt: new Date(Date.now() + 60_000).toISOString(), target: String(body?.chatId) } } }); return; }
+    if (path === '/api/groups/revoke') {
+      expect(body?.groupRevision).toBe(state.groups.find(group => group.id === body?.chatId)?.groupRevision);
+      await route.fulfill({ json: { status: 'pending_confirmation', invocationId: 'test', confirmation: { token: 'a'.repeat(40), actionId: 'groups.revoke', expiresAt: new Date(Date.now() + 60_000).toISOString(), target: String(body?.chatId) } } }); return;
+    }
     if (path === '/api/confirm') {
       state.confirmations += 1; expect(body).toEqual({ token: 'a'.repeat(40) });
       if (state.pendingSettings) {

@@ -1,4 +1,7 @@
 import { unzipSync } from 'fflate';
+import { mkdtempSync } from 'node:fs';
+import { readFile, readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { moduleMetadataSchema, type ActionResult } from '../shared/schemas/index.js';
 import { stickerResultSchema, stickerViewSchema, type StickerConvertInput, type StickerKind } from '../shared/schemas/sticker.js';
@@ -7,6 +10,7 @@ import { AppError } from '../src/errors.js';
 import { registerStickerActions, StickerService, stickerMetadata, type StickerCapture, type StickerFile, type StickerTransport } from '../src/modules/sticker.js';
 import type { StickerConverter } from '../src/modules/sticker-media.js';
 import { coreFixture, invocation } from './support/core.js';
+import { ResourcePolicy } from '../src/resources.js';
 
 const MiB = 1024 * 1024;
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
@@ -24,18 +28,24 @@ function user(id = 1, threadId?: number): InvocationContext {
   return invocation({ actorId: id, chat: { id, type: 'private', ...(threadId === undefined ? {} : { threadId }) } });
 }
 function fixture(options: Partial<Pick<ConstructorParameters<typeof StickerService>[0], 'now' | 'capacity'>> = {}) {
+  const tempDirectory = mkdtempSync(join(process.cwd(), '.kilo', 'sticker-service-test-'));
+  cleanups.push(() => rm(tempDirectory, { recursive: true, force: true }));
+  const sentData: Buffer[] = [];
   const transport = {
     download: vi.fn<StickerTransport['download']>(async sticker => Buffer.from(originals[sticker.kind])),
     getSet: vi.fn<StickerTransport['getSet']>(async name => ({ name, title: 'A pack', stickers: [file()] })),
-    send: vi.fn<StickerTransport['send']>(async () => 99),
+    send: vi.fn<StickerTransport['send']>(async (_target, result) => {
+      sentData.push(Buffer.isBuffer(result.data) ? result.data : await readFile(result.data.path));
+      return 99;
+    }),
   };
   const converter = vi.fn<StickerConverter>(async request => ({ data: Buffer.from(`converted_${request.format}`),
     format: request.format, width: request.width, height: request.height }));
-  const service = new StickerService({ transport, convert: converter, ...options });
+  const service = new StickerService({ transport, convert: converter, tempDirectory, resources: new ResourcePolicy({ heavyBytes: 48 * MiB }), ...options });
   cleanups.push(() => service.stop());
   let nextMessageId = 12;
   let nextPackMessageId = 34;
-  return { service, transport, converter,
+  return { service, transport, converter, sentData, tempDirectory,
     capture: (context = user(), kind: StickerKind = 'static', messageId = nextMessageId++) => service.capture(context, { kind: 'single', sticker: file(kind) }, messageId),
     pack: (context = user()) => service.capture(context, { kind: 'pack', name: 'Example_pack' }, nextPackMessageId++),
   };
@@ -260,6 +270,15 @@ describe('single sticker conversion and delivery', () => {
 });
 
 describe('bounded original sticker packs', () => {
+  it('rejects a malformed last original and removes the partial spool without any send', async () => {
+    const f = fixture();
+    f.transport.getSet.mockResolvedValue({ name: 'Example_pack', title: 'late failure', stickers: [file(), file()] });
+    f.transport.download.mockResolvedValueOnce(webp).mockResolvedValueOnce(Buffer.from('invalid final original'));
+    await expect(f.service.convert(user(), input(f.pack()))).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(f.transport.send).not.toHaveBeenCalled();
+    expect(await readdir(f.tempDirectory)).toEqual([]);
+  });
+
   it('resolves only within inspection, caches a copied set and preserves every mixed original in a safe ZIP', async () => {
     const f = fixture();
     const set = { name: 'Example_pack', title: '../untrusted <pack>', stickers: [file('static', { setType: 'custom_emoji' }), file('animated'), file('video'), file('static', { fileId: 'png_static' })] };
@@ -281,11 +300,13 @@ describe('bounded original sticker packs', () => {
     const sent = f.transport.send.mock.calls[0]!;
     expect(sent[0]).toEqual({ chatId: 1, threadId: 77, replyTo: 34 });
     expect(sent[1].filename).toBe('stickers.zip');
-    expect(sent[1].data.length).toBe(result.bytes);
+    expect(f.sentData[0]!.length).toBe(result.bytes);
     expect(result.bytes).toBeLessThanOrEqual(21 * MiB);
-    const entries = unzipSync(sent[1].data);
+    const entries = unzipSync(f.sentData[0]!);
     expect(Object.keys(entries)).toEqual(['001.webp', '002.tgs', '003.webm', '004.png']);
     expect(Object.values(entries).map(value => Buffer.from(value))).toEqual([webp, tgs, webm, png]);
+    expect(Buffer.isBuffer(sent[1].data)).toBe(false);
+    expect(await readdir(f.tempDirectory)).toEqual([]);
   });
 
   it('supports direct original conversion without a prior inspection and rejects other pack choices', async () => {
@@ -303,8 +324,8 @@ describe('bounded original sticker packs', () => {
     f.transport.getSet.mockResolvedValueOnce({ name: 'Example_pack', title: 'full', stickers: Array.from({ length: 120 }, () => file()) });
     const result = await f.service.convert(user(), input(f.pack()));
     expect(result.count).toBe(120);
-    expect(Object.keys(unzipSync(f.transport.send.mock.calls[0]![1].data))).toHaveLength(120);
-    expect(Object.keys(unzipSync(f.transport.send.mock.calls[0]![1].data)).at(-1)).toBe('120.webp');
+    expect(Object.keys(unzipSync(f.sentData[0]!))).toHaveLength(120);
+    expect(Object.keys(unzipSync(f.sentData[0]!)).at(-1)).toBe('120.webp');
     f.transport.getSet.mockResolvedValueOnce({ name: 'Example_pack', title: 'too large', stickers: Array.from({ length: 121 }, () => file()) });
     await expect(f.service.inspect(user(), f.pack())).rejects.toMatchObject({ code: 'CAPACITY' });
     expect(f.transport.send).toHaveBeenCalledTimes(1);
@@ -336,7 +357,7 @@ describe('bounded original sticker packs', () => {
     expect(f.transport.download.mock.calls.map(call => call[2])).toEqual([8 * MiB, 8 * MiB, 4 * MiB]);
     expect(result.bytes).toBeGreaterThan(20 * MiB);
     expect(result.bytes).toBeLessThanOrEqual(21 * MiB);
-    expect(Object.values(unzipSync(f.transport.send.mock.calls[0]![1].data)).map(value => Buffer.from(value))).toEqual(large);
+    expect(Object.values(unzipSync(f.sentData[0]!)).map(value => Buffer.from(value))).toEqual(large);
   });
 
   it('rejects a lying downloader beyond remaining bytes and never sends partial packs', async () => {
@@ -506,12 +527,12 @@ describe('sticker concurrency and actual cancellation', () => {
 });
 
 describe('sticker Action policies, deduplication and redaction', () => {
-  it('registers exactly three strict private Telegram-only self Actions, with no extra confirmation', () => {
+  it('registers four strict private self Actions for native or owned AI sources, with no extra confirmation', () => {
     const f = fixture(); const actions: ActionDefinition<unknown, unknown>[] = [];
     registerStickerActions({ register: action => actions.push(action as ActionDefinition<unknown, unknown>) }, f.service);
-    expect(actions.map(action => [action.id, action.effect])).toEqual([['sticker.inspect', 'read'], ['sticker.convert', 'personal_write'], ['sticker.cancel', 'personal_write']]);
+    expect(actions.map(action => [action.id, action.effect])).toEqual([['sticker.sources', 'read'], ['sticker.inspect', 'read'], ['sticker.convert', 'personal_write'], ['sticker.cancel', 'personal_write']]);
     for (const action of actions) {
-      expect(action).toMatchObject({ permission: 'self', scopes: ['private'], sources: ['telegram'], aiVisible: false, timeoutMs: 60_000 });
+      expect(action).toMatchObject({ permission: 'self', scopes: ['private'], sources: ['telegram', 'ai'], aiVisible: true, timeoutMs: 60_000 });
       expect(action.confirmation).toBeUndefined();
       expect(action.input.safeParse({ actorId: 1 }).success).toBe(false);
     }
@@ -525,15 +546,34 @@ describe('sticker Action policies, deduplication and redaction', () => {
 
   it('enforces real executor policy and rejects forged identities or raw file parameters', async () => {
     const f = await actionFixture(); const source = f.capture();
-    for (const context of [invocation({ source: 'http' }), invocation({ source: 'ai' }), invocation({ chat: { id: -1, type: 'group' } }), { ...user() }]) {
+    for (const context of [invocation({ source: 'http' }), invocation({ chat: { id: -1, type: 'group' } }), { ...user() }]) {
       expect(await f.execute(context, 'convert', input(source))).toMatchObject({ status: 'rejected', error: { code: 'FORBIDDEN' } });
     }
+    // AI is now an admitted source, but the service still refuses an unbound run.
+    expect(await f.execute(invocation({ source: 'ai' }), 'convert', input(source)))
+      .toMatchObject({ status: 'failed', error: { code: 'FORBIDDEN' } });
     for (const raw of [{ ...input(source), actorId: 2 }, { ...input(source), chatId: 2 }, { ...input(source), fileId: 'file_static' },
       { ...input(source), source: 'https://example.com/file' }, { ...input(source), confirmed: true }]) {
       expect(await f.execute(user(), 'convert', raw)).toMatchObject({ status: 'rejected', error: { code: 'INVALID_INPUT' } });
     }
-    expect((await f.core.executor.discoverTools(user())).map(tool => tool.id)).not.toContain('fixture.sticker.convert');
+    expect((await f.core.executor.discoverTools(user())).filter(tool => tool.id.startsWith('fixture.sticker.')).map(tool => tool.id))
+      .toEqual(['fixture.sticker.sources', 'fixture.sticker.inspect', 'fixture.sticker.convert', 'fixture.sticker.cancel']);
     expect(f.transport.send).not.toHaveBeenCalled();
+  });
+
+  it('allows an ordinary owner AI run to use only references captured in its actual private topic', async () => {
+    const f = await actionFixture(); const human = user(3, 7); const source = f.capture(human);
+    const context = invocation({ actorId: 3, chat: human.chat, source: 'ai', aiRunId: 'sticker-run' });
+    expect(() => f.capture(context)).toThrow('FORBIDDEN');
+    expect(success(await f.execute(context, 'sources', {}))).toMatchObject({ items: [{ source, kind: 'single', sourceKind: 'static' }] });
+    for (const other of [invocation({ actorId: 4, chat: { id: 4, type: 'private', threadId: 7 }, source: 'ai', aiRunId: 'other-run' }),
+      invocation({ actorId: 3, chat: { id: 3, type: 'private', threadId: 8 }, source: 'ai', aiRunId: 'other-topic-run' })]) {
+      expect(await f.execute(other, 'convert', input(source))).toMatchObject({ status: 'failed', error: { code: 'NOT_FOUND' } });
+    }
+    expect(f.transport.send).not.toHaveBeenCalled();
+    expect(await f.execute(context, 'convert', input(source))).toMatchObject({ status: 'succeeded', data: { format: 'webp', delivery: 'document', messageId: 99 } });
+    expect(f.transport.send).toHaveBeenCalledWith(expect.objectContaining({ chatId: 3, threadId: 7 }), expect.anything(), expect.any(AbortSignal));
+    expect(f.core.audit.mock.calls.at(-1)![0]).toMatchObject({ actorId: 3, source: 'ai', actionId: 'fixture.sticker.convert', outcome: 'succeeded' });
   });
 
   it('deduplicates download/conversion/delivery together and replays only serializable receipts after UI failure', async () => {

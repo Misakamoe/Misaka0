@@ -3,6 +3,8 @@ import { Bot, InputFile } from 'grammy';
 import type { Sticker } from 'grammy/types';
 import { createStickerTransport, stickerSetName, telegramStickerFile } from '../src/telegram/sticker.js';
 import type { StickerFile } from '../src/modules/sticker.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 const token = '12345:TEST_ONLY_NOT_A_REAL_TOKEN';
 const bytes = Buffer.from('offline sticker bytes');
@@ -110,9 +112,10 @@ describe('bounded official-host sticker download', () => {
     const entered = Promise.withResolvers<void>(); const response = Promise.withResolvers<Response>();
     f.fetcher.mockImplementation(() => { entered.resolve(); return response.promise; });
     const pending = f.transport.download(file, controller.signal, bytes.length);
+    const checked = expect(pending).rejects.toMatchObject({ code: 'CANCELLED', message: 'CANCELLED' });
     await entered.promise; controller.abort();
-    await expect(pending).rejects.toMatchObject({ code: 'CANCELLED', message: 'CANCELLED' });
     response.resolve(new Response(new ReadableStream({ cancel })));
+    await checked;
     await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
   });
   it('sanitizes upstream exceptions that contain credential-bearing URLs', async () => {
@@ -128,6 +131,25 @@ describe('bounded official-host sticker download', () => {
 });
 
 describe('single-attempt sticker output', () => {
+  it('streams a finalized disk artifact in bounded chunks without loading a second whole ZIP', async () => {
+    const directory = await mkdtemp(join(process.cwd(), '.kilo', 'sticker-transport-test-'));
+    try {
+      const path = join(directory, 'stickers.zip');
+      const original = Buffer.alloc(256 * 1024, 123); await writeFile(path, original);
+      const f = fixture(); const chunks: Uint8Array[] = [];
+      f.bot.api.config.use(async (_previous, method, payload) => {
+        expect(method).toBe('sendDocument');
+        const file = (payload as { document: InputFile }).document;
+        const raw = await file.toRaw();
+        expect(raw).not.toBeInstanceOf(Uint8Array);
+        for await (const chunk of raw as AsyncIterable<Uint8Array>) { expect(chunk.length).toBeLessThanOrEqual(64 * 1024); chunks.push(chunk); }
+        return { ok: true, result: { message_id: 99 } } as never;
+      });
+      expect(await f.transport.send(target, { data: { path, size: original.length }, filename: 'stickers.zip', delivery: 'document' }, new AbortController().signal)).toBe(99);
+      expect(Buffer.concat(chunks)).toEqual(original);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it.each([['photo', 'sendPhoto', 'photo'], ['animation', 'sendAnimation', 'animation'], ['document', 'sendDocument', 'document']] as const)('sends %s through the selected API only', async (delivery, method, field) => {
     const f = fixture();
     expect(await f.transport.send(target, { data: bytes, filename: 'sticker.gif', delivery }, new AbortController().signal)).toBe(99);

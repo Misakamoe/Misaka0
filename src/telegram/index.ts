@@ -1,7 +1,6 @@
 import { Bot, Context, GrammyError, InlineKeyboard } from 'grammy';
 import type { ChatMember, InputRichMessage, Message, MessageEntity, RichMessageButton, RichText } from 'grammy/types';
 import { sequentialize } from '@grammyjs/runner';
-import { Decimal } from 'decimal.js';
 import { languagePreferences, supportedLocales } from '../../shared/schemas/index.js';
 import { aliasNameSchema, type AliasSnapshot, type AliasMutationResult } from '../../shared/schemas/alias.js';
 import { rssIdSchema, type RssList, type RssSubscriptionView } from '../../shared/schemas/rss.js';
@@ -29,6 +28,9 @@ import { pageBounds, pageSelectionKeyboard, paginate, paginationKeyboard, type P
 import { SessionStore, messageTopicId, sessionKey, type SubconvInputField } from './session.js';
 import { commandEntities, panelContent, richButtonRows } from './rich.js';
 import { stickerSetName, telegramStickerFile } from './sticker.js';
+import type { AiTelegramPort } from '../ai/telegram-port.js';
+import { createAiTelegramAdapter } from './ai.js';
+import { statusMessage } from './status.js';
 
 export { createTelegramEffects } from './effects.js';
 export { SessionStore, sessionKey } from './session.js';
@@ -39,6 +41,7 @@ export interface TelegramDependencies {
   access: AccessService;
   configuration: ConfigurationService;
   stickers: StickerService;
+  ai?: AiTelegramPort;
   health: ApiHealth & { recordUpdate(): void };
   signal: AbortSignal;
 }
@@ -54,7 +57,7 @@ interface GroupMutationResult {
 type PanelValue = { language: Locale; generation: number; signature?: string; lastView?: { text: string; entities?: MessageEntity[] } } & (
   | { kind: 'settings'; revision?: number }
   | { kind: 'commands'; page: number }
-  | { kind: 'groups'; page: number; revision: number; ids: number[] }
+  | { kind: 'groups'; page: number; revision: number; groups: { id: number; groupRevision: number }[] }
   | { kind: 'approval'; confirmation: Confirmation }
   | { kind: 'alias'; view: 'main' | 'add' | 'remove' | 'input'; page: number; revision: number; targets: string[]; removals: { command: string; alias: string }[] }
   | { kind: 'rss'; view: 'list' | 'item' | 'input'; page: number; items: RssSubscriptionView[]; selected?: RssSubscriptionView }
@@ -145,10 +148,11 @@ function memberPresent(member: ChatMember): boolean {
 
 function commandOf(ctx: Context, resolve: (name: string) => string | undefined): { name: string; argument: string } | undefined {
   const message = ctx.update.message;
-  if (!message?.text) return undefined;
-  const match = /^\/([^\s/@]+)(?:@([a-z0-9_]+))?(?=\s|$)([\s\S]*)$/i.exec(message.text);
+  const text = message?.text ?? message?.caption;
+  if (!text) return undefined;
+  const match = /^\/([^\s/@]+)(?:@([a-z0-9_]+))?(?=\s|$)([\s\S]*)$/i.exec(text);
   if (!match || match[2] && match[2].toLowerCase() !== ctx.me.username.toLowerCase()
-    || message.entities?.some(entity => ['code', 'pre'].includes(entity.type) && entity.offset === 0)) return undefined;
+    || (message?.entities ?? message?.caption_entities)?.some(entity => ['code', 'pre'].includes(entity.type) && entity.offset === 0)) return undefined;
   const name = aliasNameSchema.safeParse(match[1]);
   if (!name.success) return undefined;
   return { name: commands.some(command => command.name === name.data) ? name.data : resolve(name.data) ?? name.data, argument: match[3]!.trim() };
@@ -176,6 +180,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
   let stopped = false;
   const languageOf = (ctx: Context) => configuration.resolveLanguage(ctx.from!.id, ctx.from?.language_code);
   const call = <T>(operation: () => Promise<T>) => telegramCall(health, signal, operation);
+  const ai = createAiTelegramAdapter(bot, { ai: deps.ai, executor, access, configuration, health, signal, token: config.botToken });
 
   const edit = (operation: () => Promise<unknown>) => call(async () => {
     try { await operation(); }
@@ -461,10 +466,11 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     }
     const language = languageOf(ctx);
     const t = translator(language);
-    const panel = current ?? await createPanel(ctx, { kind: 'groups', language, generation: 0, page: bounds.page, revision: data.revision, ids: [] });
+    const panel = current ?? await createPanel(ctx, { kind: 'groups', language, generation: 0, page: bounds.page, revision: data.revision, groups: [] });
     if (panel.value.kind !== 'groups') throw new AppError('FORBIDDEN');
     if (current) refreshGeneration(panel);
-    Object.assign(panel.value, { language, page: bounds.page, revision: data.revision, ids: selection ? [] : data.items.map(group => group.id) });
+    Object.assign(panel.value, { language, page: bounds.page, revision: data.revision,
+      groups: selection ? [] : data.items.map(group => ({ id: group.id, groupRevision: group.groupRevision })) });
     if (selection) {
       await displayPanel(panel, pageSelection(panel, bounds, selection.window), supportedMessage(ctx)!.message_id);
       return;
@@ -785,10 +791,6 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
   function currencyLabel(currency: CurrencyDefinition, locale: Locale): string {
     return `${currency.code} ${currency.kind === 'fiat' ? new Intl.DisplayNames(locale, { type: 'currency' }).of(currency.code) : currency.name}`;
   }
-  function quoteNumber(value: string): string {
-    const number = new Decimal(value);
-    return number.isZero() || number.abs().gte('0.000001') ? number.toDecimalPlaces(6).toFixed() : number.toSignificantDigits(6).toFixed();
-  }
   async function showRate(ctx: Context, input?: RateInput, current?: CorePanel, page = 0, directory = false, supplied?: RateResult, selection?: { window?: number }): Promise<void> {
     const language = languageOf(ctx); const t = translator(language);
     const result = supplied ?? (input ? await lookupData(ctx, await executor.execute<RateResult>(invocation(ctx), 'rate.convert', input)) : undefined);
@@ -809,6 +811,12 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       if (selection) { await displayPanel(panel, pageSelection(panel, bounds, selection.window)); return; }
       keyboard.add(...navigation(panel, bounds).inline_keyboard.flat());
     } else if (result?.kind === 'converted') {
+      const { Decimal } = await import('decimal.js');
+      throwIfAborted(signal);
+      const quoteNumber = (value: string): string => {
+        const number = new Decimal(value);
+        return number.isZero() || number.abs().gte('0.000001') ? number.toDecimalPlaces(6).toFixed() : number.toSignificantDigits(6).toFixed();
+      };
       text += `\n\n${result.amount} ${currencyLabel(result.from, language)}\n≈ ${quoteNumber(result.result)} ${currencyLabel(result.to, language)}`;
       text += '\n\n' + t('bot:rate.unitRate', { from: result.from.code, rate: quoteNumber(result.unitRate), to: result.to.code });
       if (result.stale) text += '\n\n' + t('bot:rate.stale');
@@ -1366,6 +1374,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     }
     if (metadata.admin && !admin) { await sendError(ctx, 'FORBIDDEN'); return; }
     if (metadata.private && !privateChat) { await send(ctx, t('bot:privateOnly')); return; }
+    if (await ai.command(ctx, name, argument)) return;
     switch (name) {
       case 'start': {
         const info = await resultData(ctx, await executor.execute(invocation(ctx), 'core.info', {}));
@@ -1394,24 +1403,23 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       case 'alias': await aliasCommand(ctx, argument); return;
       case 'cancel': {
         sessions.delete(sessionKey(ctx));
+        const aiCancelled = ai.cancel(ctx);
         for (const opening of stickerOpenings) if (opening.key === sessionKey(ctx)) opening.controller.abort();
         // Retire sources before waiting for UI edits or an active conversion's cleanup.
         const closed = panels.closeOwned(sessionKey(ctx)!, 'cancelled', panel => {
           if (panel.value.kind === 'sticker') stickers.release(invocation(ctx), panel.value.info.source);
           return panel.value.kind !== 'approval';
         });
-        if (privateChat) await executor.execute(invocation(ctx), 'sticker.cancel', {});
-        await closed;
+        await Promise.all([closed, aiCancelled, ...(privateChat ? [executor.execute(invocation(ctx), 'sticker.cancel', {})] : [])]);
         await send(ctx, t('bot:cancelled')); return;
       }
       case 'stats': {
         const status = await resultData(ctx, await executor.execute<RuntimeStatus>(invocation(ctx), 'core.status', {}));
         if (!status) return;
-        await send(ctx, t('bot:stats', {
-          uptime: Math.floor(status.uptimeSeconds), updates: status.updateCount, groups: status.authorizedGroupCount,
-          polling: t(`common:states.${status.polling}`), http: t(`common:states.${status.http}`),
-          apiError: status.lastApiError ? plainValue(status.lastApiError.code, 64) : t('bot:noError'),
-        }));
+        await call(() => bot.api.sendRichMessage(message.chat.id, statusMessage(status, languageOf(ctx)), {
+          message_thread_id: messageTopicId(message),
+          reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        }, signal));
         return;
       }
       case 'addgroup': {
@@ -1421,7 +1429,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
           await send(ctx, t('bot:groups.usage')); return;
         }
         await mutationReceipt(ctx, 'groups.authorize', await executor.execute<GroupMutationResult>(invocation(ctx), 'groups.authorize', {
-          chatId, revision: access.snapshot().revision,
+          ...access.state(chatId),
         }));
         return;
       }
@@ -1510,12 +1518,13 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
         await showGroups(ctx, selection ? panel.value.page : Number(parsed.argument), panel, undefined, selection); return;
       }
       const chatId = Number(parsed.argument);
-      if (!panel.value.ids.includes(chatId)) return;
-      if (panel.value.revision !== access.snapshot().revision) {
+      const group = panel.value.groups.find(group => group.id === chatId);
+      if (!group) return;
+      if (group.groupRevision !== access.groupRevision(chatId)) {
         await showGroups(ctx, panel.value.page, panel, t('common:errors.CONFLICT'));
         return;
       }
-      const result = await executor.execute<GroupMutationResult>(invocation(ctx), 'groups.revoke', { chatId, revision: panel.value.revision });
+      const result = await executor.execute<GroupMutationResult>(invocation(ctx), 'groups.revoke', { chatId, revision: panel.value.revision, groupRevision: group.groupRevision });
       if (result.status === 'pending_confirmation') await confirmation(ctx, result.confirmation);
       else {
         if ('error' in result && result.error.code === 'CANCELLED') throw new AppError('CANCELLED');
@@ -1558,7 +1567,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       const t = translator(language);
       const context = createInvocation({ actorId, source: 'telegram', botId: ctx.me.id,
         chat: { id: actorId, type: 'private' }, language, signal });
-      const prepared = await executor.prepare(context, 'groups.authorize', { chatId: event.chat.id, revision: access.snapshot().revision });
+      const prepared = await executor.prepare(context, 'groups.authorize', { chatId: event.chat.id, revision: result.revision, groupRevision: result.groupRevision });
       if (prepared.status === 'failed' || prepared.status === 'rejected') {
         if (prepared.error.code === 'CANCELLED') throw new AppError('CANCELLED');
         continue;
@@ -1577,6 +1586,8 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
   bot.use(async (ctx, next) => {
     const work = (async () => {
       health.recordUpdate();
+      if (await ai.stoppedGeneration(ctx)) return;
+      if (await ai.callback(ctx)) return;
       if (ctx.callbackQuery) {
         const parsed = panelCallback(ctx.callbackQuery.data ?? '');
         const reopen = reopenCallback(ctx.callbackQuery.data ?? '');
@@ -1605,7 +1616,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
             }
             if ((panel.value.kind === 'groups' || panel.value.kind === 'approval' || panel.value.kind === 'alias' || parsed.operation === 'corelang')
               && !access.isAdmin(ctx.from!.id)) { invalidated = true; throw new AppError('FORBIDDEN'); }
-            if (panel.value.kind === 'groups' && parsed.operation === 'revoke' && !panel.value.ids.includes(Number(parsed.argument))) throw new AppError('FORBIDDEN');
+            if (panel.value.kind === 'groups' && parsed.operation === 'revoke' && !panel.value.groups.some(group => group.id === Number(parsed.argument))) throw new AppError('FORBIDDEN');
             if (panel.value.kind === 'alias' && (parsed.operation === 'aliastarget' && !panel.value.targets[Number(parsed.argument)]
               || parsed.operation === 'aliasdelete' && !panel.value.removals[Number(parsed.argument)])) throw new AppError('FORBIDDEN');
             if (panel.value.kind === 'rss' && parsed.operation === 'rssitem' && !panel.value.items[Number(parsed.argument)]) throw new AppError('FORBIDDEN');
@@ -1661,9 +1672,10 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       }
       if (ctx.callbackQuery) { await handleCallback(ctx); return; }
       if (command) { await handleCommand(ctx, command.name, command.argument); return; }
-      if (message.text?.startsWith('/')) {
+      const content = message.text ?? message.caption;
+      if (content?.startsWith('/')) {
         // Commands explicitly addressed to a different bot are never ours.
-        if (/^\/[^\s@]+@[a-z0-9_]+/i.test(message.text)) return;
+        if (/^\/[^\s@]+@[a-z0-9_]+/i.test(content)) return;
         await send(ctx, translator(languageOf(ctx))('bot:unknownCommand'));
       } else if (await subconvInput(ctx)) return;
       // A pending private conversion input must never fall through to another module's bare-text intake.
@@ -1671,11 +1683,13 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       else if (await aliasInput(ctx)) return;
       else if (await rssInput(ctx)) return;
       else if (await weatherInput(ctx)) return;
+      else if (deps.ai && await ai.blockedReply(ctx)) return;
       else if (message.chat.type === 'private' && (message.sticker || message.text && stickerSetName(message.text, false))) {
         const session = sessions.get(sessionKey(ctx));
         if (!session?.aliasInput && !session?.rssInput && !session?.weatherInput && !session?.subconvInput) await stickerCommand(ctx, message.sticker ? '' : message.text!);
       }
       else if (sessions.get(sessionKey(ctx))?.subconvInput) return;
+      else if (await ai.input(ctx)) return;
       else if (message.chat.type === 'private' && message.text && isWeatherIntent(message.text)) await weatherCommand(ctx, message.text);
       else if (message.chat.type === 'private' && message.text) await send(ctx, translator(languageOf(ctx))('bot:fallback'));
     } catch (error) {
@@ -1710,6 +1724,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       stopped = true;
       shutdown.abort();
       sessions.stop();
+      await ai.stop();
       await Promise.allSettled([...inFlight]);
       await panels.stop();
     },

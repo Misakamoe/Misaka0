@@ -67,7 +67,7 @@ function expectNativeCommands(rich: unknown, commands: string[]): void {
   expect(inline.filter(text => typeof text !== 'string' && text.type === 'code')).toEqual([]);
 }
 function group(id: number, title = `Group ${id}`): GroupPage['items'][number] {
-  return { id, title, authorizedBy: 1, authorizedAt: '2026-11-08T00:00:00.000Z', present: true };
+  return { id, title, authorizedBy: 1, authorizedAt: '2026-11-08T00:00:00.000Z', present: true, groupRevision: 1 };
 }
 type ApiRecord = { method: string; payload: Record<string, unknown>; signal: AbortSignal | undefined };
 const cleanups: (() => Promise<void>)[] = [];
@@ -123,7 +123,8 @@ function fixture() {
   const access = {
     isAdmin: vi.fn((id: number) => config.adminIds.includes(id)), isAllowed: vi.fn((id: number) => allowed.has(id)),
     snapshot: vi.fn(() => ({ revision: 3, groups: {} })), count: () => allowed.size,
-    membership: vi.fn(async () => ({ kind: 'waiting', changed: true, chatId: -200 })),
+    groupRevision: vi.fn(() => 1), state: vi.fn((chatId: number) => ({ chatId, revision: 3, groupRevision: 1 })),
+    membership: vi.fn(async () => ({ kind: 'waiting', changed: true, chatId: -200, revision: 3, groupRevision: 1 })),
     migrate: vi.fn(async () => true),
   };
   const success = <T>(data: T): ActionResult<T> => ({ status: 'succeeded', invocationId: 'test', data });
@@ -254,7 +255,8 @@ describe('offline Telegram admission and commands', () => {
     expect(markdown).toMatch(/\|.+\|/);
     expect(markdown).not.toContain('| /help |');
     expect(markdown).not.toContain('`');
-    expect(markdown.match(/^\| [^\n]+ \| \/\w+[^\n]* \|$/gm)).toHaveLength(6);
+    expect(markdown.match(/^\| [^\n]+ \| \/\w+[^\n]* \|$/gm)).toHaveLength(9);
+    for (const command of ['/ai', '/chats', '/memory', '/tasks']) expect(markdown).toContain(command);
     expect(markdown).not.toMatch(/^\/\w+/m);
     expect(markdown).toContain('Installed native modules: 6');
     expect(markdown).not.toContain('Untrusted');
@@ -270,6 +272,23 @@ describe('offline Telegram admission and commands', () => {
     expect(f.sent().some(call => String(call.payload.text).includes('User ID: 1'))).toBe(true);
     expect(f.sent().some(call => String(call.payload.text).includes('Natural-language AI'))).toBe(false);
     expect(f.execute.mock.calls[0]![0]).toMatchObject({ actorId: 1, source: 'telegram', botId: me.id, chat: { id: 1, type: 'private', threadId: 42 }, language: 'en' });
+  });
+
+  it('sends stats as literal native RichText only after core.status, without forwarding resource parameters', async () => {
+    const f = fixture();
+    await f.bot.handleUpdate(message('/stats /private/cgroup/path', { thread: 42 }));
+    expect(f.execute).toHaveBeenCalledWith(expect.objectContaining({ actorId: 1, source: 'telegram', chat: { id: 1, type: 'private', threadId: 42 } }), 'core.status', {});
+    expect(f.sent()).toHaveLength(1);
+    expect(f.sent()[0]!.method).toBe('sendRichMessage');
+    expect(f.sent()[0]!.payload).toMatchObject({ message_thread_id: 42, rich_message: { skip_entity_detection: true } });
+    expect(richText(f.last(1, 42))).toContain('Runtime status');
+    expect(richText(f.last(1, 42))).toContain('Resource snapshot\nUnavailable');
+    expect(richText(f.last(1, 42))).not.toContain('/private/cgroup/path');
+    expect(f.sent()[0]!.payload).not.toHaveProperty('parse_mode');
+    f.execute.mockResolvedValueOnce({ status: 'rejected', invocationId: 'test', error: { code: 'FORBIDDEN' } });
+    await f.bot.handleUpdate(message('/stats'));
+    expect(richText(f.last())).not.toContain('Runtime status');
+    expect(richText(f.last())).not.toContain('Resource snapshot');
   });
 
   it('gives superadmins localized guidance in unauthorized groups without authorizing or executing commands', async () => {
@@ -291,7 +310,7 @@ describe('offline Telegram admission and commands', () => {
     await f.bot.handleUpdate(message('/addgroup -300', { chat: -200 }));
     expect(f.execute).not.toHaveBeenCalled();
     await f.bot.handleUpdate(message('/addgroup', { chat: -200 }));
-    expect(f.execute).toHaveBeenCalledWith(expect.objectContaining({ chat: { id: -200, type: 'supergroup' } }), 'groups.authorize', { chatId: -200, revision: 3 });
+    expect(f.execute).toHaveBeenCalledWith(expect.objectContaining({ chat: { id: -200, type: 'supergroup' } }), 'groups.authorize', { chatId: -200, revision: 3, groupRevision: 1 });
   });
 
   it('does not answer unauthorized ordinary, anonymous, bot, other-bot or unaddressed chatter mentions', async () => {
@@ -347,7 +366,7 @@ describe('offline Telegram admission and commands', () => {
     expect(f.execute).not.toHaveBeenCalled();
     expect(f.sent()).toHaveLength(2);
     expect(f.sent()[0]!.payload.text).toContain('Unknown command');
-    expect(f.sent()[1]!.payload.text).toContain('AI is not connected');
+    expect(f.sent()[1]!.payload.text).toBe(translator('en')('bot:fallback'));
   });
 
   it.each([
@@ -504,7 +523,7 @@ describe('safe callbacks and bounded interaction', () => {
     expect(buttonRows(pane)).toHaveLength(1);
     const firstRow = buttonRows(pane)[0]!;
     expect(firstRow).toHaveLength(3);
-    expect(firstRow.map(button => button.text)).toEqual(['\u25c1 Prev', '1/3', 'Next \u25b7']);
+    expect(firstRow.map(button => button.text)).toEqual(['\u25c1 Prev', '1/4', 'Next \u25b7']);
     expect(firstRow[0]).not.toHaveProperty('callback_data');
     expect(firstRow[1]).toHaveProperty('callback_data', buttonData(pane, 'pick'));
     await f.bot.handleUpdate(f.click('page:1', pane));
@@ -515,11 +534,17 @@ describe('safe callbacks and bounded interaction', () => {
     expect(buttonRows(pane)[0]![2]).toHaveProperty('callback_data');
     await f.bot.handleUpdate(f.click('page:2', pane));
     expect(richText(pane)).toContain('/rss -');
+    expect(buttonRows(pane)[0]![2]).toHaveProperty('callback_data');
+    await f.bot.handleUpdate(f.click('page:3', pane));
+    expectNativeCommands(f.calls.filter(call => call.method === 'editMessageText').at(-1)!.payload.rich_message,
+      ['/ai', '/chats', '/memory', '/tasks', '/aiconfig', '/help']);
+    expect(richText(pane).split('\n').filter(line => /^\/\w+(?: \([^\n]+\))? - /.test(line))).toHaveLength(5);
     expect(buttonRows(pane)[0]![2]).not.toHaveProperty('callback_data');
+    await f.bot.handleUpdate(f.click('page:2', pane));
     await f.bot.handleUpdate(f.click('page:1', pane));
     await f.bot.handleUpdate(f.click('page:0', pane));
     expect(f.sent()).toHaveLength(2);
-    expect(f.calls.filter(call => call.method === 'editMessageText')).toHaveLength(4);
+    expect(f.calls.filter(call => call.method === 'editMessageText')).toHaveLength(6);
     expect(f.execute).not.toHaveBeenCalled();
   });
 
@@ -562,7 +587,7 @@ describe('safe callbacks and bounded interaction', () => {
     const pane = f.last(chat);
     const names = () => [...richText(pane).matchAll(/^\/(\w+)(?: \([^\n]+\))? - /gm)].map(match => match[1]);
     const shown = names();
-    for (let page = 1; page < 3 && callbacks(pane).some(data => data.endsWith(`:page:${page}`)); page++) {
+    for (let page = 1; page < 4 && callbacks(pane).some(data => data.endsWith(`:page:${page}`)); page++) {
       await f.bot.handleUpdate(f.click('pick', pane, { user, chat }));
       await f.bot.handleUpdate(f.click(`page:${page}`, pane, { user, chat }));
       shown.push(...names());
@@ -576,6 +601,10 @@ describe('safe callbacks and bounded interaction', () => {
     }
     expected.push('rss', 'rate', 'weather', 'forecast');
     if (privateChat) expected.push('sticker', 'subconv');
+    expected.push('ai');
+    if (privateChat) expected.push('chats', 'memory');
+    expected.push('tasks');
+    if (privateChat && admin) expected.push('aiconfig');
     expect(shown).toEqual(expected);
   });
 
@@ -588,15 +617,15 @@ describe('safe callbacks and bounded interaction', () => {
     await f.bot.handleUpdate(f.click('pick', pane, { user: 2, thread: 9 }));
     expect(pane.rich_message).toEqual(original);
     await f.bot.handleUpdate(f.click('pick', pane, { thread: 9 }));
-    expect(richText(pane)).toContain('Select a page (currently 1/3)');
-    expect(buttonRows(pane)[0]!.map(button => button.text)).toEqual(['1', '2', '3']);
+    expect(richText(pane)).toContain('Select a page (currently 1/4)');
+    expect(buttonRows(pane)[0]!.map(button => button.text)).toEqual(['1', '2', '3', '4']);
     expect(buttonRows(pane).at(-1)![0]!.text).toBe('Back to list');
     const selection = structuredClone(pane.rich_message);
     await f.bot.handleUpdate(stale);
     expect(pane.rich_message).toEqual(selection);
     await f.bot.handleUpdate(f.click('page:1', pane, { thread: 9 }));
     expect(richText(pane)).toContain('/stats -');
-    expect(buttonRows(pane)[0]!.map(button => button.text)).toEqual(['\u25c1 Prev', '2/3', 'Next \u25b7']);
+    expect(buttonRows(pane)[0]!.map(button => button.text)).toEqual(['\u25c1 Prev', '2/4', 'Next \u25b7']);
     await f.bot.handleUpdate(f.click('pick', pane, { thread: 9 }));
     expect(buttonRows(pane)[0]![1]).toMatchObject({ text: '2', style: 'primary' });
     await f.bot.handleUpdate(f.click('page:1', pane, { thread: 9 }));
@@ -681,7 +710,7 @@ describe('safe callbacks and bounded interaction', () => {
     await f.bot.handleUpdate(callback(data, { thread: 9 }, pane));
     expect(richText(pane)).toContain('/stats -');
     await f.bot.handleUpdate(f.click('pick', pane, { thread: 9 }));
-    expect(richText(pane)).toContain('Select a page (currently 2/3)');
+    expect(richText(pane)).toContain('Select a page (currently 2/4)');
     await vi.advanceTimersByTimeAsync(600_001);
     await f.bot.handleUpdate(f.click('page:0', pane, { thread: 9 }));
     expect(richText(pane)).toContain('/help (');
@@ -779,7 +808,7 @@ describe('safe callbacks and bounded interaction', () => {
     f.groups.push(group(-100));
     await f.bot.handleUpdate(message('/listgroups'));
     await f.bot.handleUpdate(f.click('revoke:-100'));
-    expect(f.execute.mock.calls.at(-1)!.slice(1)).toEqual(['groups.revoke', { chatId: -100, revision: 3 }]);
+    expect(f.execute.mock.calls.at(-1)!.slice(1)).toEqual(['groups.revoke', { chatId: -100, revision: 3, groupRevision: 1 }]);
     expect(f.confirm).not.toHaveBeenCalled();
     const approval = f.last();
     const confirm = f.click('confirm', approval);
@@ -1203,7 +1232,7 @@ describe('Unicode aliases and safe panel reopen', () => {
     await f.bot.handleUpdate(update);
     expect(f.execute).toHaveBeenCalledWith(expect.objectContaining({ actorId: 1, botId: me.id, source: 'telegram',
       chat: { id: 1, type: 'private', threadId: 9 }, invocationId: `telegram:${me.id}:${update.update_id}` }),
-    'groups.authorize', { chatId: -200, revision: 3 });
+    'groups.authorize', { chatId: -200, revision: 3, groupRevision: 1 });
   });
 
   it('applies original permissions and resolves the exact-current-group addgroup exception before admission', async () => {
@@ -1218,7 +1247,7 @@ describe('Unicode aliases and safe panel reopen', () => {
     expect(f.execute).not.toHaveBeenCalled();
     await f.bot.handleUpdate(message('/授权', { chat: -200, thread: 9 }));
     expect(f.execute).toHaveBeenCalledWith(expect.objectContaining({ actorId: 1, chat: { id: -200, type: 'supergroup', threadId: 9 } }),
-      'groups.authorize', { chatId: -200, revision: 3 });
+      'groups.authorize', { chatId: -200, revision: 3, groupRevision: 1 });
     await f.bot.handleUpdate(message('/帮助', { chat: -200 }));
     expect(f.sent().at(-1)!.payload.text).toContain('/addgroup@offline_bot');
     expect(f.execute).toHaveBeenCalledOnce();
@@ -1481,10 +1510,10 @@ describe('system membership and Telegram effects', () => {
     await f.bot.handleUpdate(update);
     expect(f.access.membership).toHaveBeenCalledWith(expect.objectContaining({ actorId: 10, isMember: true, wasMember: false, chatId: -200 }), expect.any(AbortSignal));
     expect(f.prepare).toHaveBeenCalledTimes(2);
-    expect(f.prepare.mock.calls[0]).toEqual([expect.objectContaining({ actorId: 1, chat: { id: 1, type: 'private' }, language: 'zh-CN' }), 'groups.authorize', { chatId: -200, revision: 3 }]);
+    expect(f.prepare.mock.calls[0]).toEqual([expect.objectContaining({ actorId: 1, chat: { id: 1, type: 'private' }, language: 'zh-CN' }), 'groups.authorize', { chatId: -200, revision: 3, groupRevision: 1 }]);
     expect(f.sent().find(call => call.payload.chat_id === -200)!.payload.text).toContain('尚未授权');
     expect(richText(f.sent().find(call => call.payload.chat_id === 2)!.payload.rich_message)).toContain('waiting for approval');
-    f.access.membership.mockResolvedValueOnce({ kind: 'duplicate', changed: false, chatId: -200 });
+    f.access.membership.mockResolvedValueOnce({ kind: 'duplicate', changed: false, chatId: -200, revision: 3, groupRevision: 1 });
     await f.bot.handleUpdate(update);
     expect(f.sent()).toHaveLength(3);
     expect(f.execute).not.toHaveBeenCalled();
@@ -1502,12 +1531,12 @@ describe('system membership and Telegram effects', () => {
 
   it('delegates admin invitation and leave to the internal membership entry only', async () => {
     const f = fixture();
-    f.access.membership.mockResolvedValueOnce({ kind: 'authorized', changed: true, chatId: -200 });
+    f.access.membership.mockResolvedValueOnce({ kind: 'authorized', changed: true, chatId: -200, revision: 3, groupRevision: 1 });
     await f.bot.handleUpdate(membership(1));
     const left = membership(1);
     left.my_chat_member!.old_chat_member = { status: 'member', user: me };
     left.my_chat_member!.new_chat_member = { status: 'left', user: me };
-    f.access.membership.mockResolvedValueOnce({ kind: 'left', changed: true, chatId: -200 });
+    f.access.membership.mockResolvedValueOnce({ kind: 'left', changed: true, chatId: -200, revision: 3, groupRevision: 1 });
     await f.bot.handleUpdate(left);
     expect(f.access.membership).toHaveBeenCalledTimes(2);
     expect(f.execute).not.toHaveBeenCalled();

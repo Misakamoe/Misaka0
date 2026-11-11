@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { systemMetricsSchema } from './system-metrics.js';
 
 export const supportedLocales = ['zh-CN', 'zh-TW', 'en', 'ja'] as const;
 export const languagePreferences = ['auto', ...supportedLocales] as const;
@@ -39,17 +40,21 @@ export const groupSchema = z.strictObject({
 export type AuthorizedGroup = z.infer<typeof groupSchema>;
 export const groupPageInputSchema = z.strictObject({ page: z.number().int().min(0).max(100_000).default(0) });
 export const groupPageSchema = z.strictObject({
-  items: z.array(groupSchema).max(10),
+  items: z.array(groupSchema.extend({ groupRevision: revisionSchema })).max(10),
   page: z.number().int().nonnegative(),
   pageSize: z.literal(10),
   total: z.number().int().nonnegative(),
   revision: revisionSchema,
 });
 export type GroupPage = z.infer<typeof groupPageSchema>;
-export const groupMutationSchema = z.strictObject({ chatId: groupIdSchema, revision: revisionSchema });
+export const groupStateInputSchema = z.strictObject({ chatId: groupIdSchema });
+export const groupStateSchema = z.strictObject({ chatId: groupIdSchema, revision: revisionSchema, groupRevision: revisionSchema });
+export type GroupState = z.infer<typeof groupStateSchema>;
+export const groupMutationSchema = z.strictObject({ chatId: groupIdSchema, revision: revisionSchema, groupRevision: revisionSchema.optional() });
 export const groupMutationResultSchema = z.strictObject({
   chatId: groupIdSchema,
   revision: revisionSchema,
+  groupRevision: revisionSchema,
   changed: z.boolean(),
   notificationSent: z.boolean(),
   left: z.boolean(),
@@ -69,6 +74,7 @@ export const statusSchema = z.strictObject({
   polling: componentStateSchema,
   http: componentStateSchema,
   lastApiError: z.strictObject({ code: z.string(), at: z.iso.datetime() }).nullable(),
+  resources: systemMetricsSchema.optional(),
 });
 export type RuntimeStatus = z.infer<typeof statusSchema>;
 
@@ -84,7 +90,7 @@ export const moduleListSchema = z.array(moduleMetadataSchema);
 export const moduleIdSchema = z.strictObject({ id: moduleMetadataSchema.shape.id });
 export const errorCodeSchema = z.enum([
   'INVALID_INPUT', 'FORBIDDEN', 'UNAUTHORIZED', 'NOT_FOUND', 'CONFLICT', 'CONFIRMATION_EXPIRED',
-  'CONFIRMATION_REQUIRED', 'AI_DISABLED', 'CANCELLED', 'TIMEOUT', 'OUTCOME_UNKNOWN',
+  'CONFIRMATION_REQUIRED', 'AI_DISABLED', 'AI_PRICING_REQUIRED', 'CANCELLED', 'TIMEOUT', 'OUTCOME_UNKNOWN',
   'UNAVAILABLE', 'RATE_LIMITED', 'INTERNAL_ERROR', 'INVALID_ORIGIN', 'CSRF_INVALID',
   'AUTH_EXPIRED', 'AUTH_INVALID', 'STORAGE_ERROR', 'INVALID_OUTPUT', 'CAPACITY',
 ]);

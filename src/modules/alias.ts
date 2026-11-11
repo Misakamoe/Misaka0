@@ -1,17 +1,14 @@
 import { z } from 'zod';
 import {
-  aliasMutationResultSchema, aliasMutationSchema, aliasNameSchema, aliasSnapshotSchema, canonicalCommandSchema,
+  aliasNameSchema, aliasSnapshotSchema, canonicalCommandSchema,
   type AliasMutationResult, type AliasSnapshot,
 } from '../../shared/schemas/alias.js';
-import { emptyInputSchema, revisionSchema, type ModuleMetadata } from '../../shared/schemas/index.js';
-import type { ActionExecutor } from '../actions.js';
+import { revisionSchema } from '../../shared/schemas/index.js';
 import { AppError } from '../errors.js';
 import { JsonDocument, type JsonStorage } from '../storage.js';
 
-export const aliasMetadata: ModuleMetadata = {
-  id: 'alias', nameKey: 'web:modules.aliasName', descriptionKey: 'web:modules.aliasDescription',
-  schema_version: 1, configurable: false,
-};
+export { aliasMetadata } from './metadata.js';
+export { registerAliasActions } from './module-actions.js';
 
 type AliasDocument = AliasSnapshot & { schema_version: 1 };
 const emptyAliases: readonly string[] = Object.freeze([]);
@@ -50,10 +47,10 @@ export class AliasService {
   resolve(name: string): string | undefined {
     const parsed = aliasNameSchema.safeParse(name);
     if (!parsed.success) return undefined;
-    // Derive from the committed snapshot, so a reverse cache can never outlive a failed write.
-    const reverse = new Map(Object.entries(this.file.snapshot().aliases)
-      .flatMap(([command, aliases]) => aliases.map(alias => [alias, command] as const)));
-    return reverse.get(parsed.data);
+    for (const [command, aliases] of Object.entries(this.file.snapshot().aliases)) {
+      if (aliases.includes(parsed.data)) return command;
+    }
+    return undefined;
   }
 
   forCommand(command: string): readonly string[] {
@@ -78,38 +75,26 @@ export class AliasService {
     if (!name.success) throw new AppError('INVALID_INPUT', ['alias']);
     if (!revisionSchema.safeParse(revision).success) throw new AppError('INVALID_INPUT', ['revision']);
     const result = await this.file.update(candidate => {
-      if (!remove && this.commands.has(name.data)) throw new AppError('CONFLICT', ['alias']);
-      const reverse = new Map(Object.entries(candidate.aliases)
-        .flatMap(([key, aliases]) => aliases.map(value => [value, key] as const)));
-      const existing = reverse.get(name.data);
       if (remove) {
-        if (existing !== target.data) throw new AppError('NOT_FOUND');
         const aliases = candidate.aliases[target.data]!.filter(value => value !== name.data);
         if (aliases.length) candidate.aliases[target.data] = aliases;
         else delete candidate.aliases[target.data];
       } else {
-        if (existing === target.data) return false;
-        if (existing !== undefined) throw new AppError('CONFLICT', ['alias']);
         const aliases = Object.hasOwn(candidate.aliases, target.data) ? candidate.aliases[target.data]! : [];
-        if (aliases.length >= 8) throw new AppError('INVALID_INPUT', ['alias']);
         candidate.aliases[target.data] = [...aliases, name.data];
       }
-    }, { revision, signal });
+    }, { revision, signal, preflight: current => {
+      if (!remove && this.commands.has(name.data)) throw new AppError('CONFLICT', ['alias']);
+      const existing = Object.entries(current.aliases).find(([, aliases]) => aliases.includes(name.data))?.[0];
+      if (remove) {
+        if (existing !== target.data) throw new AppError('NOT_FOUND');
+      } else {
+        if (existing === target.data) return false;
+        if (existing !== undefined) throw new AppError('CONFLICT', ['alias']);
+        if ((current.aliases[target.data]?.length ?? 0) >= 8) throw new AppError('INVALID_INPUT', ['alias']);
+      }
+      return true;
+    } });
     return { command: target.data, alias: name.data, changed: result.changed, revision: result.snapshot.revision };
   }
-}
-
-export function registerAliasActions(executor: Pick<ActionExecutor, 'register'>, service: AliasService): void {
-  const common = {
-    permission: 'superadmin', scopes: ['private'], sources: ['telegram', 'http'], aiVisible: false, timeoutMs: 15_000,
-  } as const;
-  executor.register({ ...common, id: 'alias.list', input: emptyInputSchema, output: aliasSnapshotSchema, effect: 'read',
-    execute: () => { const { revision, aliases } = service.snapshot(); return { revision, aliases }; },
-  });
-  executor.register({ ...common, id: 'alias.add', input: aliasMutationSchema, output: aliasMutationResultSchema, effect: 'permission',
-    execute: (input, context) => service.add(input.command, input.alias, input.revision, context.signal),
-  });
-  executor.register({ ...common, id: 'alias.remove', input: aliasMutationSchema, output: aliasMutationResultSchema, effect: 'permission',
-    execute: (input, context) => service.remove(input.command, input.alias, input.revision, context.signal),
-  });
 }

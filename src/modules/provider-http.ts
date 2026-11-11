@@ -1,7 +1,7 @@
 import { request } from 'node:https';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import { AppError } from '../errors.js';
-import { publicAddress, resolveFeedAddresses, resolvePublicAddresses } from './rss-feed.js';
+import { publicAddress, resolveFeedAddresses, resolvePublicAddresses } from '../network.js';
 
 export type ProviderErrorCode = 'NOT_CONFIGURED' | 'AUTH' | 'QUOTA' | 'NETWORK' | 'TIMEOUT' | 'INVALID_RESPONSE' | 'NOT_FOUND';
 export class ProviderError extends Error {

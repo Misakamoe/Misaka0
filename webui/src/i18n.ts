@@ -19,7 +19,7 @@ await i18n.use(initReactI18next).init({
     ja: { common: jaCommon, web: jaWeb },
   },
   lng: negotiateLocale(navigator.languages?.join(',') || navigator.language) ?? 'zh-CN',
-  fallbackLng: 'zh-CN',
+  fallbackLng: 'en',
   supportedLngs: supportedLocales,
   defaultNS: 'web',
   interpolation: { escapeValue: false },

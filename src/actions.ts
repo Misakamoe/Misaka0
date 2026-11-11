@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   coreSettingsMetadata, coreSettingsSchema, emptyInputSchema, groupMutationResultSchema,
-  groupMutationSchema, groupPageInputSchema, groupPageSchema, infoSchema, inputJsonSchema,
+  groupMutationSchema, groupPageInputSchema, groupPageSchema, groupStateInputSchema, groupStateSchema, infoSchema, inputJsonSchema,
   localeSchema, moduleListSchema, preferenceInputSchema, preferenceSchema, settingsSnapshotSchema,
   settingsUpdateSchema, statusSchema, userIdSchema,
   type ActionResult, type Confirmation, type Locale, type RuntimeStatus,
@@ -10,13 +10,16 @@ import {
 import type { AccessService } from './access.js';
 import type { ConfigurationService } from './configuration.js';
 import { AppError, safeError, throwIfAborted } from './errors.js';
+import { registerAiActions } from './ai/actions.js';
+import type { AiService } from './ai/service.js';
 import { modules } from './modules/index.js';
-import { registerAliasActions, type AliasService } from './modules/alias.js';
-import { registerRssActions, type RssService } from './modules/rss.js';
-import { registerRateActions, type RateService } from './modules/rate.js';
-import { registerWeatherActions, type WeatherService } from './modules/weather.js';
-import { registerStickerActions, type StickerService } from './modules/sticker.js';
-import { registerSubconvActions, type SubconvService } from './modules/subconv.js';
+import { registerAliasActions, registerRssActions, registerRateActions, registerWeatherActions, registerStickerActions, registerSubconvActions } from './modules/module-actions.js';
+import type { AliasService } from './modules/alias.js';
+import type { RssService } from './modules/rss.js';
+import type { RateService } from './modules/rate.js';
+import type { WeatherService } from './modules/weather.js';
+import type { StickerService } from './modules/sticker.js';
+import type { SubconvService } from './modules/subconv.js';
 
 export type InvocationSource = 'telegram' | 'http' | 'ai';
 export interface InvocationInput {
@@ -30,6 +33,10 @@ export interface InvocationInput {
   invocationId?: string;
   signal?: AbortSignal;
   deadline?: number;
+  aiRunId?: string;
+  aiGrantId?: string;
+  aiSettingsRevision?: number;
+  automationId?: string;
 }
 export interface InvocationContext extends Readonly<InvocationInput> {
   readonly chat: Readonly<InvocationInput['chat']>;
@@ -50,7 +57,9 @@ export function createInvocation(input: InvocationInput): InvocationContext {
     || (input.chat.type === 'private' ? input.chat.id !== input.actorId : input.chat.id >= 0)
     || input.chat.threadId !== undefined && (!Number.isSafeInteger(input.chat.threadId) || input.chat.threadId < 1)
     || input.invocationId !== undefined && !/^[A-Za-z0-9_.:-]{1,128}$/.test(input.invocationId)
-    || input.deadline !== undefined && !Number.isFinite(input.deadline)) throw new AppError('FORBIDDEN');
+    || input.deadline !== undefined && !Number.isFinite(input.deadline)
+    || [input.aiRunId, input.aiGrantId, input.automationId].some(value => value !== undefined && !/^[A-Za-z0-9_.:-]{1,128}$/.test(value))
+    || input.aiSettingsRevision !== undefined && (!Number.isSafeInteger(input.aiSettingsRevision) || input.aiSettingsRevision < 0)) throw new AppError('FORBIDDEN');
   const context: InvocationContext = Object.freeze({
     ...input,
     chat: Object.freeze({ ...input.chat }),
@@ -73,6 +82,9 @@ export interface ActionDefinition<I, O> {
   sources: readonly InvocationSource[];
   effect: Effect;
   aiVisible: boolean;
+  aiDescription?: string;
+  aiOutput?: z.ZodType;
+  modelOutput?: (output: O, context: InvocationContext) => unknown;
   timeoutMs: number;
   target?: (input: I, context: InvocationContext) => { kind: 'user' | 'chat'; id: number };
   confirmation?: (input: I, context: InvocationContext) => boolean;
@@ -108,10 +120,19 @@ export interface ActionServices {
   effects: TelegramEffects;
   status: () => RuntimeStatus;
   aiEnabled?: boolean;
+  ai?: AiService;
+  aiNativeDelivery?: (context: InvocationContext, file: { bytes: Uint8Array; name: string; mimeType: string }) => Promise<void>;
+  aiPolicy?: {
+    available: (context: InvocationContext) => boolean;
+    authorize: (context: InvocationContext, actionId: string, effect: Effect) => void;
+    approvalExempt?: (context: InvocationContext, actionId: string) => boolean;
+  };
+  onResult?: (context: InvocationContext, actionId: string, result: ActionResult) => void;
   groupAdmin?: (chatId: number, userId: number, signal: AbortSignal) => Promise<boolean>;
   audit?: (record: AuditRecord) => void;
   now?: () => number;
   capacity?: number;
+  byteCapacity?: number;
 }
 
 type AnyAction = ActionDefinition<unknown, unknown>;
@@ -124,22 +145,34 @@ interface Approval {
   source: InvocationSource;
   chatId: number;
   threadId?: number;
-  accessRevision: number;
-  settingsRevision: number;
+  groupRevisions: { chatId: number; revision: number }[];
+  settingsRevision?: number;
+  aiPolicyKey?: string;
   expires: number;
+  original: InvocationContext;
+  bytes: number;
 }
 interface Execution {
   fingerprint: string;
   promise: Promise<ActionResult>;
   expires: number;
   active: boolean;
+  bytes: number;
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+const MAX_ACTION_BYTES = 262_144;
+const CONTROL_ACTIONS = new Set(['ai.run.stop', 'ai.run.status', 'ai.admin.disable', 'sticker.cancel', 'core.status']);
+function canonical(value: unknown, depth = 0, budget = { nodes: 0, bytes: 0 }): string {
+  if (++budget.nodes > 16_384 || depth > 24) throw new AppError('INVALID_OUTPUT');
+  if (typeof value === 'string') budget.bytes += Buffer.byteLength(value);
+  if (budget.bytes > MAX_ACTION_BYTES) throw new AppError('CAPACITY');
+  if (Array.isArray(value)) return `[${value.map(item => canonical(item, depth + 1, budget)).join(',')}]`;
   if (value && typeof value === 'object') {
     if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) throw new AppError('INVALID_OUTPUT');
-    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`;
+    return `{${Object.keys(value).sort().map(key => {
+      budget.bytes += Buffer.byteLength(key);
+      return `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key], depth + 1, budget)}`;
+    }).join(',')}}`;
   }
   if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
   throw new AppError('INVALID_OUTPUT');
@@ -153,18 +186,23 @@ export class ActionExecutor {
   private readonly runningTasks = new Set<Promise<ActionResult>>();
   private readonly now: () => number;
   private readonly capacity: number;
+  private readonly byteCapacity: number;
+  private retainedBytes = 0;
+  private approvalBytes = 0;
   private closed = false;
 
   constructor(private readonly services: ActionServices) {
     this.now = services.now ?? Date.now;
     this.capacity = services.capacity ?? 5_000;
+    this.byteCapacity = services.byteCapacity ?? 8 * 1024 * 1024;
     this.registerCore();
     registerAliasActions(this, services.aliases);
     registerRssActions(this, services.rss);
     registerRateActions(this, services.rate);
     registerWeatherActions(this, services.weather);
     registerStickerActions(this, services.stickers);
-    registerSubconvActions(this, services.subconv);
+    registerSubconvActions(this, services.subconv, services.aiNativeDelivery);
+    if (services.ai) registerAiActions(this, services.ai);
   }
 
   resolveAlias(name: string): string | undefined { return this.services.aliases.resolve(name); }
@@ -176,6 +214,8 @@ export class ActionExecutor {
     const schema = inputJsonSchema(definition.input);
     if (schema.type !== 'object' || schema.additionalProperties !== false) throw new AppError('INVALID_INPUT');
     z.toJSONSchema(definition.output, { target: 'draft-7', unrepresentable: 'throw' });
+    if (Boolean(definition.modelOutput) !== Boolean(definition.aiOutput)) throw new AppError('INVALID_INPUT');
+    if (definition.aiOutput) z.toJSONSchema(definition.aiOutput, { target: 'draft-7', unrepresentable: 'throw' });
     this.registry.set(definition.id, definition as AnyAction);
   }
 
@@ -193,14 +233,27 @@ export class ActionExecutor {
         const result = await existing.promise;
         return (result.status === 'succeeded' ? { ...result, replayed: true } : result) as ActionResult<T>;
       }
-      if (this.executions.size >= this.capacity) throw new AppError('CAPACITY');
+      const reservedBytes = MAX_ACTION_BYTES + Buffer.byteLength(canonical(input)) + Buffer.byteLength(key) + 256;
+      const reserve = this.capacity > 16 && this.byteCapacity >= 4 * MAX_ACTION_BYTES && !CONTROL_ACTIONS.has(id);
+      const countLimit = this.capacity - (reserve ? Math.min(64, Math.floor(this.capacity / 8)) : 0);
+      const byteLimit = this.byteCapacity - (reserve ? Math.min(1_048_576, Math.floor(this.byteCapacity / 4)) : 0);
+      if (this.executions.size >= countLimit || this.retainedBytes + reservedBytes > byteLimit) throw new AppError('CAPACITY');
+      this.retainedBytes += reservedBytes;
       const promise = this.needsConfirmation(action, context, input)
-        ? Promise.resolve(this.approval(context, action, input))
+        ? Promise.resolve().then(() => this.approval(context, action, input))
         : this.run(action, context, input);
-      const record: Execution = { fingerprint, promise, expires: this.now() + 600_000, active: true };
+      const record: Execution = { fingerprint, promise, expires: this.now() + 600_000, active: true, bytes: reservedBytes };
       this.executions.set(key, record);
-      try { return await promise as ActionResult<T>; }
-      finally { record.active = false; record.expires = this.now() + 600_000; }
+      let finalBytes = 256;
+      try {
+        const result = await promise;
+        finalBytes += Buffer.byteLength(canonical(result)) + Buffer.byteLength(key);
+        return result as ActionResult<T>;
+      } finally {
+        this.retainedBytes -= record.bytes - finalBytes;
+        record.bytes = finalBytes;
+        record.active = false; record.expires = this.now() + 600_000;
+      }
     } catch (error) { return this.reject(context, id, error) as ActionResult<T>; }
   }
 
@@ -214,13 +267,21 @@ export class ActionExecutor {
     } catch (error) { return this.reject(context, id, error) as ActionResult<T>; }
   }
 
-  pending(context: InvocationContext, token: string): Confirmation {
+  pending(context: InvocationContext, token: string, binding?: { runId: string; actionId: string; invocationId: string }): Confirmation {
     this.assertContext(context);
     this.prune();
     const item = this.approvals.get(token);
     if (!/^[a-f0-9]{40}$/.test(token)) throw new AppError('CONFIRMATION_EXPIRED');
     this.checkApproval(context, item);
+    if (binding && (item.original.source !== 'ai' || item.original.aiRunId !== binding.runId
+      || item.original.invocationId !== binding.invocationId || item.action.id !== binding.actionId)) throw new AppError('CONFIRMATION_EXPIRED');
     return { ...item.confirmation };
+  }
+
+  pendingDetails(context: InvocationContext, token: string): { confirmation: Confirmation; input: unknown } {
+    if (context.source === 'ai') throw new AppError('FORBIDDEN');
+    const confirmation = this.pending(context, token);
+    return { confirmation, input: structuredClone(this.approvals.get(token)!.input) };
   }
 
   async confirm<T = unknown>(context: InvocationContext, token: string): Promise<ActionResult<T>> {
@@ -229,24 +290,28 @@ export class ActionExecutor {
       this.pending(context, token);
       const item = this.approvals.get(token)!;
       this.approvals.delete(token);
+      this.approvalBytes -= item.bytes;
       id = item.action.id;
-      await this.policy(item.action, context, item.input);
+      const execution = this.approvedInvocation(context, item);
+      await this.policy(item.action, execution, item.input);
       this.checkApproval(context, item);
-      return await this.run(item.action, context, item.input) as ActionResult<T>;
+      return await this.run(item.action, execution, item.input) as ActionResult<T>;
     } catch (error) { return this.reject(context, id, error) as ActionResult<T>; }
   }
 
-  async discoverTools(context: InvocationContext): Promise<{ id: string; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown> }[]> {
+  async discoverTools(context: InvocationContext): Promise<{ id: string; description: string; effect: Effect; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown> }[]> {
     this.assertContext(context);
-    if (!this.services.aiEnabled) return [];
+    if (!this.aiAvailable(context)) return [];
     const aiContext = createInvocation({ ...context, source: 'ai' });
     const tools = [];
     for (const action of this.registry.values()) {
       try {
         this.basePolicy(action, aiContext);
-        if (action.permission === 'group_admin' && (!this.services.groupAdmin
+        if ((action.permission === 'group_admin' || action.permission === 'chat_manager' && context.chat.type !== 'private' && !this.services.access.isAdmin(context.actorId)) && (!this.services.groupAdmin
           || !await this.services.groupAdmin(context.chat.id, context.actorId, context.signal))) continue;
-        tools.push({ id: action.id, inputSchema: inputJsonSchema(action.input), outputSchema: z.toJSONSchema(action.output, { target: 'draft-7' }) });
+        this.basePolicy(action, aiContext);
+        tools.push({ id: action.id, description: action.aiDescription ?? action.id, effect: action.effect,
+          inputSchema: inputJsonSchema(action.input), outputSchema: z.toJSONSchema(action.aiOutput ?? action.output, { target: 'draft-7' }) });
       } catch { throwIfAborted(context.signal); }
     }
     return tools;
@@ -261,9 +326,15 @@ export class ActionExecutor {
   async close(): Promise<void> {
     this.closed = true;
     this.approvals.clear();
+    this.approvalBytes = 0;
     for (const controller of this.controllers) controller.abort();
     await Promise.all([...this.runningTasks]);
     this.executions.clear();
+    this.retainedBytes = 0;
+  }
+
+  private aiAvailable(context: InvocationContext): boolean {
+    return this.services.aiPolicy ? this.services.aiPolicy.available(context) : Boolean(this.services.aiEnabled);
   }
 
   private assertContext(context: InvocationContext): void {
@@ -281,18 +352,20 @@ export class ActionExecutor {
   private parse(action: AnyAction, rawInput: unknown): unknown {
     const result = action.input.safeParse(rawInput);
     if (!result.success) throw new AppError('INVALID_INPUT', [...new Set(result.error.issues.map(issue => issue.path.filter(part => typeof part !== 'symbol').join('.')).filter(Boolean))]);
-    canonical(result.data);
+    if (Buffer.byteLength(canonical(result.data)) > MAX_ACTION_BYTES) throw new AppError('CAPACITY');
     return result.data;
   }
 
   private basePolicy(action: AnyAction, context: InvocationContext): void {
     this.assertContext(context);
-    if (context.source === 'ai' && !this.services.aiEnabled) throw new AppError('AI_DISABLED');
+    if (context.source === 'ai' && !this.aiAvailable(context)) throw new AppError('AI_DISABLED');
     if (!action.sources.includes(context.source) || context.source === 'ai' && !action.aiVisible) throw new AppError('FORBIDDEN');
     const scope = context.chat.type === 'private' ? 'private' : 'group';
     if (!action.scopes.includes(scope)) throw new AppError('FORBIDDEN');
     if (action.permission === 'superadmin' && !this.services.access.isAdmin(context.actorId)) throw new AppError('FORBIDDEN');
+    if (context.source === 'ai') this.services.aiPolicy?.authorize(context, action.id, action.effect);
     if (scope === 'group' && !this.services.access.isAllowed(context.chat.id)
+      && !['ai.run.stop', 'ai.run.status'].includes(action.id)
       && !(action.id === 'groups.authorize' && this.services.access.isAdmin(context.actorId) && context.source === 'telegram')) throw new AppError('FORBIDDEN');
   }
 
@@ -307,6 +380,7 @@ export class ActionExecutor {
 
   private async policy(action: AnyAction, context: InvocationContext, input: unknown): Promise<void> {
     this.targetPolicy(action, context, input);
+    if (context.source === 'ai' && this.services.ai && !context.aiRunId) throw new AppError('FORBIDDEN');
     if (action.permission === 'group_admin' || action.permission === 'chat_manager' && context.chat.type !== 'private' && !this.services.access.isAdmin(context.actorId)) {
       if (context.chat.type === 'private' || !this.services.groupAdmin) throw new AppError('FORBIDDEN');
       let allowed = false;
@@ -320,30 +394,47 @@ export class ActionExecutor {
   private checkApproval(context: InvocationContext, item: Approval | undefined): asserts item is Approval {
     if (!item || item.actorId !== context.actorId || item.botId !== context.botId
       || item.source !== context.source || context.source === 'ai' || item.chatId !== context.chat.id || item.threadId !== context.chat.threadId
-      || item.expires <= this.now() || item.accessRevision !== this.services.access.snapshot().revision
-      || item.settingsRevision !== this.services.configuration.settings().revision) throw new AppError('CONFIRMATION_EXPIRED');
-    this.targetPolicy(item.action, context, item.input);
-    const target = item.action.target?.(item.input, context) ?? { kind: 'user', id: context.actorId };
+      || item.expires <= this.now() || item.groupRevisions.some(group => group.revision !== this.services.access.groupRevision(group.chatId))
+      || item.settingsRevision !== undefined && item.settingsRevision !== this.services.configuration.settings().revision
+      || item.aiPolicyKey !== undefined && item.aiPolicyKey !== this.services.ai?.approvalPolicyKey(item.original, item.action.id)) throw new AppError('CONFIRMATION_EXPIRED');
+    const execution = this.approvedInvocation(context, item);
+    this.targetPolicy(item.action, execution, item.input);
+    const target = item.action.target?.(item.input, execution) ?? { kind: 'user', id: context.actorId };
     if (`${target.kind}:${target.id}` !== item.confirmation.target) throw new AppError('CONFIRMATION_EXPIRED');
   }
 
   private needsConfirmation(action: AnyAction, context: InvocationContext, input: unknown): boolean {
-    return action.effect === 'destructive' || action.effect === 'write' || Boolean(action.confirmation?.(input, context));
+    const needed = action.effect === 'destructive' || action.effect === 'write'
+      || context.source === 'ai' && (action.effect === 'permission' || context.chat.type !== 'private' && action.effect === 'personal_write')
+      || Boolean(action.confirmation?.(input, context));
+    return needed && !(context.source === 'ai' && this.services.aiPolicy?.approvalExempt?.(context, action.id));
+  }
+
+  private approvedInvocation(context: InvocationContext, item: Approval): InvocationContext {
+    return item.original.source === 'ai' ? createInvocation({ ...item.original, signal: context.signal, deadline: context.deadline }) : context;
   }
 
   private approval(context: InvocationContext, action: AnyAction, input: unknown): ActionResult {
     this.prune();
-    if (this.approvals.size >= this.capacity) throw new AppError('CAPACITY');
+    const bytes = Buffer.byteLength(canonical(input)) + 1024;
+    if (this.approvals.size >= this.capacity || this.approvalBytes + bytes > 1024 * 1024) throw new AppError('CAPACITY');
     const token = randomBytes(20).toString('hex');
     const expires = this.now() + 600_000;
     const target = action.target?.(input, context) ?? { kind: 'user', id: context.actorId };
+    const groupIds = new Set<number>();
+    if (context.chat.type !== 'private') groupIds.add(context.chat.id);
+    if (target.kind === 'chat' && target.id < 0) groupIds.add(target.id);
     const confirmation: Confirmation = { token, actionId: action.id, expiresAt: new Date(expires).toISOString(), target: `${target.kind}:${target.id}` };
     this.approvals.set(token, {
       confirmation, action, input: structuredClone(input), actorId: context.actorId, botId: context.botId,
       source: context.source === 'ai' ? context.confirmationSource ?? 'telegram' : context.source,
       chatId: context.chat.id, threadId: context.chat.threadId,
-      accessRevision: this.services.access.snapshot().revision, settingsRevision: this.services.configuration.settings().revision, expires,
+      groupRevisions: [...groupIds].map(chatId => ({ chatId, revision: this.services.access.groupRevision(chatId) })), expires,
+      ...(action.id === 'core.settings.update' ? { settingsRevision: this.services.configuration.settings().revision } : {}),
+      original: context, bytes,
+      ...(this.services.ai && (context.source === 'ai' || action.id.startsWith('ai.')) ? { aiPolicyKey: this.services.ai.approvalPolicyKey(context, action.id) } : {}),
     });
+    this.approvalBytes += bytes;
     const result: ActionResult = { status: 'pending_confirmation', invocationId: context.invocationId, confirmation };
     this.audit(context, action.id, result, 0);
     return result;
@@ -380,8 +471,9 @@ export class ActionExecutor {
       throwIfAborted(controller.signal);
       const parsed = action.output.safeParse(output);
       if (!parsed.success) throw new AppError('INVALID_OUTPUT');
-      canonical(parsed.data);
-      result = { status: 'succeeded', invocationId: original.invocationId, data: structuredClone(parsed.data) };
+      const projected = original.source === 'ai' && action.modelOutput ? action.aiOutput!.parse(action.modelOutput(parsed.data, context)) : parsed.data;
+      if (Buffer.byteLength(canonical(projected)) > MAX_ACTION_BYTES) throw new AppError('INVALID_OUTPUT');
+      result = { status: 'succeeded', invocationId: original.invocationId, data: structuredClone(projected) };
     } catch (error) {
       const cancelled = controller.signal.aborted;
       result = {
@@ -394,6 +486,7 @@ export class ActionExecutor {
       this.controllers.delete(controller);
     }
     this.audit(original, action.id, result, this.now() - started);
+    try { this.services.onResult?.(original, action.id, result); } catch { /* Observers cannot retry or change an already completed Action. */ }
     return result;
   }
 
@@ -412,25 +505,26 @@ export class ActionExecutor {
 
   private prune(): void {
     const now = this.now();
-    for (const [key, item] of this.approvals) if (item.expires <= now) this.approvals.delete(key);
-    for (const [key, item] of this.executions) if (!item.active && item.expires <= now) this.executions.delete(key);
+    for (const [key, item] of this.approvals) if (item.expires <= now) { this.approvalBytes -= item.bytes; this.approvals.delete(key); }
+    for (const [key, item] of this.executions) if (!item.active && item.expires <= now) { this.retainedBytes -= item.bytes; this.executions.delete(key); }
   }
 
   private registerCore(): void {
     const common = { scopes: ['private', 'group'], sources: ['telegram', 'http', 'ai'], timeoutMs: 15_000 } as const;
     const humanAdmin = { scopes: ['private'], sources: ['telegram', 'http'], permission: 'superadmin', aiVisible: false, timeoutMs: 30_000 } as const;
     this.register({ ...common, id: 'core.info', input: emptyInputSchema, output: infoSchema, permission: 'any', effect: 'read', aiVisible: true,
-      execute: () => ({ runtime: 'grammy' as const, version: '0.1.0', moduleCount: modules.length, aiAvailable: false }) });
+      execute: (_input, context) => ({ runtime: 'grammy' as const, version: '0.1.0', moduleCount: modules.length, aiAvailable: this.aiAvailable(context) }) });
     this.register({ ...common, id: 'modules.list', input: emptyInputSchema, output: moduleListSchema, permission: 'any', effect: 'read', aiVisible: true,
       execute: () => modules.map(module => module.metadata) });
     this.register({ ...humanAdmin, id: 'core.status', input: emptyInputSchema, output: statusSchema, effect: 'read', execute: () => this.services.status() });
     this.register({ ...humanAdmin, id: 'groups.list', input: groupPageInputSchema, output: groupPageSchema, effect: 'read', execute: input => this.services.access.list(input.page) });
+    this.register({ ...humanAdmin, id: 'groups.state', input: groupStateInputSchema, output: groupStateSchema, effect: 'read', execute: input => this.services.access.state(input.chatId) });
     this.register({ ...humanAdmin, scopes: ['private', 'group'], id: 'groups.authorize', input: groupMutationSchema, output: groupMutationResultSchema,
       effect: 'permission', target: input => ({ kind: 'chat', id: input.chatId }),
       execute: async (input, context) => {
         const group = await this.services.effects.describeGroup(input.chatId, context.signal);
         if (!group.present) throw new AppError('FORBIDDEN');
-        const change = await this.services.access.authorize(input.chatId, group.title, context.actorId, input.revision, context.signal);
+        const change = await this.services.access.authorize(input.chatId, group.title, context.actorId, input.revision, context.signal, input.groupRevision);
         const notificationSent = change.changed && await this.services.effects.notifyGroup(input.chatId, 'authorized', this.services.configuration.settings().effective.defaultLanguage, context.signal);
         return { chatId: input.chatId, ...change, notificationSent, left: false };
       },
@@ -438,7 +532,7 @@ export class ActionExecutor {
     this.register({ ...humanAdmin, id: 'groups.revoke', input: groupMutationSchema, output: groupMutationResultSchema,
       effect: 'destructive', target: input => ({ kind: 'chat', id: input.chatId }),
       execute: async (input, context) => {
-        const change = await this.services.access.revoke(input.chatId, context.actorId, input.revision, context.signal);
+        const change = await this.services.access.revoke(input.chatId, context.actorId, input.revision, context.signal, input.groupRevision);
         const notificationSent = change.changed && await this.services.effects.notifyGroup(input.chatId, 'revoked', this.services.configuration.settings().effective.defaultLanguage, context.signal);
         const left = change.changed && await this.services.effects.leaveGroup(input.chatId, context.signal);
         return { chatId: input.chatId, ...change, notificationSent, left };

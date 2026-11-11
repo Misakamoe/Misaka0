@@ -1,9 +1,32 @@
 {
   "appName": "Misaka",
+  "resources": {
+    "title": "资源快照", "sampledAt": "采样时间", "window": "CPU 采样窗口",
+    "unavailable": "不可用", "warmup": "预热中（首次 CPU 采样）", "unlimited": "无限制", "limited": "{{value}}（有限制）", "cores": "{{value}} 核",
+    "process": "机器人进程", "system": "内核可见系统", "cgroup": "cgroup v2 资源",
+    "cpu": "CPU", "rss": "驻留内存（RSS）", "heap": "JavaScript 堆", "buffers": "外部内存 / 缓冲区", "cpus": "CPU 容量", "load": "平均负载", "memory": "内存", "swap": "交换空间", "pids": "任务数（PID）", "availability": "可用性",
+    "heapValue": "已用 {{used}} / 已分配 {{total}} / 上限 {{limit}}",
+    "buffersValue": "外部内存 {{external}} / ArrayBuffers {{buffers}}（已包含在外部内存中）",
+    "cpusValue": "可见逻辑 CPU {{logical}} / 可用并行度 {{available}}",
+    "loadValue": "1 分钟 {{one}} / 5 分钟 {{five}} / 15 分钟 {{fifteen}}",
+    "memoryValue": "可用 {{available}} / 总量 {{total}}",
+    "cgroupCpuValue": "用量 {{usage}} / 配额 {{quota}}；{{scope}}",
+    "cgroupMemoryValue": "当前 {{current}} / 峰值 {{peak}} / 上限 {{limit}}；{{scope}}",
+    "boundedValue": "当前 {{current}} / 上限 {{limit}}",
+    "pidsValue": "当前 {{current}} / 上限 {{limit}}；{{scope}}",
+    "cpuNote": "进程和 cgroup CPU：100% = 一个核心，用量可超过 100%。",
+    "systemNote": "内核可见总量不是容器配额。系统 CPU 为全部可见 CPU 的 0-100%；负载不是百分比。",
+    "cgroupNote": "各项资源独立选取当前组或可见的限制祖先组，包含后代及可能的其他进程，各项不一定来自同一组；不可见祖先仍可能施加限制。",
+    "qualificationNote": "单次快照不能证明机器人或重型功能适合 256 MiB 部署。",
+    "v1Unavailable": "不可用：尚不支持 cgroup v1。",
+    "states": { "available": "可用", "partial": "部分可用", "unavailable": "不可用" },
+    "scopes": { "current": "当前组", "ancestor": "可见的限制祖先组", "unavailable": "范围不可用" }
+  },
   "languages": { "auto": "自动", "zh-CN": "简体中文", "zh-TW": "繁体中文", "en": "English", "ja": "日本語" },
   "actions": { "save": "保存更改", "saving": "正在保存...", "cancel": "取消", "confirm": "确认", "close": "关闭", "retry": "重试", "previous": "上一页", "next": "下一页", "add": "添加", "remove": "移除", "moveUp": "上移", "moveDown": "下移", "logout": "退出登录", "refresh": "刷新" },
   "errors": {
-    "INVALID_INPUT": "请检查标出的字段。", "FORBIDDEN": "你没有执行此操作的权限。", "UNAUTHORIZED": "请先登录。", "NOT_FOUND": "此操作或模块尚未接入。", "CONFLICT": "数据已在其他入口修改，请重新加载后再保存。", "CONFIRMATION_EXPIRED": "操作已过期或已被使用，请重新发起。", "CONFIRMATION_REQUIRED": "请确认后再继续。", "AI_DISABLED": "AI 入口尚未安装或启用。", "CANCELLED": "操作已取消。", "TIMEOUT": "操作超时。", "OUTCOME_UNKNOWN": "无法确定操作结果，请先检查当前状态，不要直接重试。", "UNAVAILABLE": "服务暂时不可用。", "RATE_LIMITED": "请求过于频繁，请稍后重试。", "INTERNAL_ERROR": "操作失败，请稍后重试。", "INVALID_ORIGIN": "请求来自不受信任的页面。", "CSRF_INVALID": "页面安全凭据已过期，请刷新页面。", "AUTH_EXPIRED": "登录已过期，请重新登录。", "AUTH_INVALID": "无法验证登录信息，请重新登录。", "STORAGE_ERROR": "无法保存更改，原有状态已保留。", "INVALID_OUTPUT": "服务返回了无效结果。", "CAPACITY": "服务繁忙，请稍后重试。"
+    "AI_PRICING_REQUIRED": "此预设使用金额限制，但尚未配置已审核价格。请填写价格，或在 AI 高级设置中明确改用有上限的用量模式。",
+    "INVALID_INPUT": "请检查标出的字段。", "FORBIDDEN": "你没有执行此操作的权限。", "UNAUTHORIZED": "请先登录。", "NOT_FOUND": "此操作或模块尚未接入。", "CONFLICT": "数据已在其他入口修改，请重新加载后再保存。", "CONFIRMATION_EXPIRED": "操作已过期或已被使用，请重新发起。", "CONFIRMATION_REQUIRED": "请确认后再继续。", "AI_DISABLED": "当前配置与范围中的 AI 已禁用或不可用。已有数据控件不会授予新的 AI 访问权限。", "CANCELLED": "操作已取消。", "TIMEOUT": "操作超时。", "OUTCOME_UNKNOWN": "无法确定操作结果，请先检查当前状态，不要直接重试。", "UNAVAILABLE": "服务暂时不可用。", "RATE_LIMITED": "请求过于频繁，请稍后重试。", "INTERNAL_ERROR": "操作失败，请稍后重试。", "INVALID_ORIGIN": "请求来自不受信任的页面。", "CSRF_INVALID": "页面安全凭据已过期，请刷新页面。", "AUTH_EXPIRED": "登录已过期，请重新登录。", "AUTH_INVALID": "无法验证登录信息，请重新登录。", "STORAGE_ERROR": "无法保存更改，原有状态已保留。", "INVALID_OUTPUT": "服务返回了无效结果。", "CAPACITY": "服务繁忙，请稍后重试。"
   },
   "states": { "disabled": "未启用", "starting": "启动中", "running": "运行中", "stopping": "停止中", "stopped": "已停止", "failed": "失败" },
   "yes": "是",

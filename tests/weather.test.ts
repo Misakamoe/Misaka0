@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ProviderError, type ProviderJson } from '../src/modules/provider-http.js';
-import { isWeatherIntent, parseWeatherIntent, WeatherService } from '../src/modules/weather.js';
+import { isWeatherIntent, parseWeatherIntent, WeatherService, WEATHER_MAX_TASKS } from '../src/modules/weather.js';
 import { coreFixture, invocation } from './support/core.js';
 
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -57,6 +57,47 @@ describe('weather service and location privacy', () => {
     const result = await f.weather.query({ location, mode: 'current', days: 3 }, 'en', new AbortController().signal);
     expect(result.location.label).toBe(location.label);
     expect(f.json).toHaveBeenCalledTimes(1);
+  });
+  it('bounds retained weather bytes before its entry-count limit and isolates returned objects', async () => {
+    const f = await fixture();
+    f.json.mockResolvedValue({ ...current, metadata: { attributions: Array.from({ length: 8 }, (_, i) => `https://example.com/${i}/${'x'.repeat(460)}`) } });
+    const signal = new AbortController().signal;
+    const input = { location, mode: 'current' as const, days: 3 };
+    const first = await f.weather.query(input, 'en', signal);
+    first.attributions[0] = 'https://changed.example/';
+    expect((await f.weather.query(input, 'en', signal)).attributions[0]).not.toBe(first.attributions[0]);
+    for (let i = 1; i < 20; i++) await f.weather.query({ ...input, location: { ...location, latitude: i } }, 'en', signal);
+    expect(f.json).toHaveBeenCalledTimes(20);
+    await f.weather.query(input, 'en', signal);
+    expect(f.json).toHaveBeenCalledTimes(21);
+  });
+  it('shares bounded requests without letting one caller cancel another and drains actual work', async () => {
+    const f = await fixture();
+    const release = Promise.withResolvers<void>();
+    f.json.mockImplementation(async () => { await release.promise; return current; });
+    const signal = new AbortController().signal;
+    const controller = new AbortController();
+    const input = { location, mode: 'current' as const, days: 3 };
+    const first = f.weather.query(input, 'en', controller.signal);
+    const cancelled = expect(first).rejects.toThrow('CANCELLED');
+    const second = f.weather.query({ ...input, location: { ...location, label: 'Other caller' } }, 'en', signal);
+    const other = Array.from({ length: WEATHER_MAX_TASKS - 1 }, (_, i) => f.weather.query({ ...input, location: { ...location, latitude: i } }, 'en', signal));
+    await expect(f.weather.query({ ...input, location: { ...location, latitude: 80 } }, 'en', signal)).rejects.toThrow('CAPACITY');
+    expect(f.json).toHaveBeenCalledTimes(WEATHER_MAX_TASKS);
+    controller.abort(); await cancelled;
+    expect(f.json.mock.calls.every(([, request]) => !request.aborted)).toBe(true);
+    release.resolve();
+    expect((await second).location.label).toBe('Other caller');
+    await Promise.all(other);
+    const gate = Promise.withResolvers<void>();
+    f.json.mockImplementation(async () => { await gate.promise; return current; });
+    const pending = f.weather.query({ ...input, location: { ...location, latitude: 70 } }, 'en', signal);
+    const rejected = expect(pending).rejects.toThrow('CANCELLED');
+    let stopped = false;
+    const stop = f.weather.stop().then(() => { stopped = true; });
+    await Promise.resolve(); expect(stopped).toBe(false);
+    gate.resolve(); await rejected; await stop;
+    await expect(f.weather.query(input, 'en', signal)).rejects.toThrow('CANCELLED');
   });
   it('keeps duplicate place names as choices and rejects an incorrect parent region', async () => {
     const f = await fixture();

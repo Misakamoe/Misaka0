@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { AccessService } from '../src/access.js';
 import { ConfigurationService } from '../src/configuration.js';
-import { JSON_DOCUMENT_MAX_BYTES, JsonDocument, JsonStorage } from '../src/storage.js';
+import { JSON_DOCUMENT_MAX_BYTES, JsonDocument, JsonStorage, jsonDocumentByteLength } from '../src/storage.js';
 import { AliasService } from '../src/modules/alias.js';
 import { commands } from '../src/telegram/commands.js';
 import { coreFixture } from './support/core.js';
@@ -17,6 +17,12 @@ async function fixture(options: Parameters<typeof coreFixture>[0] = {}) {
 }
 
 describe('atomic versioned storage', () => {
+  it.each([
+    {}, [], { empty: [], object: {} }, { omitted: undefined, values: [undefined, null, true, false, 1.25, -0, 1e30] },
+    { nested: [{ quote: '"\\\n\r\t\b\f', unicode: '\u6d77\ud83d\ude00', lone: '\ud800' }, {}, []], revision: 9 },
+  ])('counts exact pretty JSON bytes without a whole-document string: %j', value => {
+    expect(jsonDocumentByteLength(value)).toBe(Buffer.byteLength(`${JSON.stringify(value, null, 2)}\n`));
+  });
   it('starts with native defaults, restricts all seven files, and restores durable data without sessions', async () => {
     const f = await fixture();
     expect(f.access.count()).toBe(0);
@@ -114,6 +120,19 @@ describe('atomic versioned storage', () => {
     const reloaded = new JsonDocument(storage, 'settings.json', schema);
     await reloaded.load({ schema_version: 1, revision: 0, value: '' });
     expect(reloaded.snapshot()).toEqual(snapshot);
+    const clone = vi.spyOn(globalThis, 'structuredClone');
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const mutate = vi.fn();
+    const unchanged = await document.update(mutate, { revision: snapshot.revision, preflight: current => {
+      expect(Object.isFrozen(current)).toBe(true);
+      return current.value !== value;
+    } });
+    const cloned = clone.mock.calls.length; const serialized = stringify.mock.calls.length;
+    clone.mockRestore(); stringify.mockRestore();
+    expect(unchanged).toEqual({ snapshot, changed: false });
+    expect(unchanged.snapshot).toBe(snapshot);
+    expect(mutate).not.toHaveBeenCalled();
+    expect(cloned).toBe(0); expect(serialized).toBe(0);
     beforeCommit.mockClear();
     expect(Buffer.byteLength(JSON.stringify({ ...snapshot, revision: 2, value: value + 'x' }))).toBeLessThan(JSON_DOCUMENT_MAX_BYTES);
     await expect(document.update(candidate => { candidate.value += 'x'; })).rejects.toMatchObject({ code: 'STORAGE_ERROR' });
@@ -123,6 +142,38 @@ describe('atomic versioned storage', () => {
     expect(await readdir(directory)).toEqual(['settings.json']);
     await document.update(candidate => { candidate.value = 'recovered'; });
     expect(document.snapshot()).toEqual({ schema_version: 1, revision: 2, value: 'recovered' });
+  });
+
+  it('checks queued no-op revisions before preflight and serializes a validated write only once', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'misaka-storage-noop-'));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const storage = new JsonStorage(directory); cleanups.push(() => storage.close());
+    await storage.initialize();
+    const schema = z.strictObject({ schema_version: z.literal(1), revision: z.number().int().nonnegative(), value: z.string() });
+    const document = new JsonDocument(storage, 'settings.json', schema);
+    await document.load({ schema_version: 1, revision: 0, value: 'before' });
+    const entered = Promise.withResolvers<void>(); const release = Promise.withResolvers<void>();
+    const first = document.update(async candidate => { entered.resolve(); await release.promise; candidate.value = 'after'; });
+    await entered.promise;
+    const preflight = vi.fn(() => false);
+    const second = document.update(() => {}, { revision: 0, preflight });
+    const conflict = expect(second).rejects.toMatchObject({ code: 'CONFLICT' });
+    const stringify = vi.spyOn(JSON, 'stringify');
+    release.resolve(); await first;
+    const calls = stringify.mock.calls.filter(([value]) => typeof value === 'object' && value !== null && 'schema_version' in value);
+    stringify.mockRestore();
+    await conflict;
+    expect(calls).toHaveLength(1);
+    expect(preflight).not.toHaveBeenCalled();
+    expect(document.snapshot()).toEqual({ schema_version: 1, revision: 1, value: 'after' });
+    const unchanged = await document.update(() => {});
+    expect(unchanged.changed).toBe(false);
+    expect(unchanged.snapshot.revision).toBe(1);
+    const cancelled = new AbortController(); cancelled.abort();
+    await expect(document.update(() => {}, { preflight, signal: cancelled.signal })).rejects.toMatchObject({ code: 'CANCELLED' });
+    await storage.close();
+    await expect(document.update(() => {}, { preflight })).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(preflight).not.toHaveBeenCalled();
   });
 
   it.each(['{"schema_version":9,"revision":0,"groups":{}}', 'not json', '{"schema_version":1,"revision":0,"groups":[]}'])('retains corrupt/unknown-version original %s', async contents => {
@@ -160,6 +211,57 @@ describe('atomic versioned storage', () => {
 
 describe('system membership and migration', () => {
   const joinEvent = { chatId: -100, title: 'Example', actorId: 10, isMember: true, wasMember: false, updateId: 10, at: '2026-11-08T00:00:00.000Z' };
+
+  it('loads legacy access JSON without rewriting it and persists target generations on later mutations', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'misaka-legacy-access-'));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const group = { id: -100, title: 'Legacy', authorizedBy: 1, authorizedAt: joinEvent.at, present: true };
+    const legacy = { schema_version: 1, revision: 7, groups: { '-100': group },
+      membership: { '-100': { updateId: 10, present: true } }, migrations: { '-99': -100 } };
+    const contents = JSON.stringify(legacy);
+    await writeFile(join(directory, 'access.json'), contents);
+    const storage = new JsonStorage(directory); await storage.initialize();
+    cleanups.push(() => storage.close());
+    const access = new AccessService(storage, [1]); await access.initialize();
+    expect(access.snapshot()).toEqual(legacy);
+    expect(await readFile(join(directory, 'access.json'), 'utf8')).toBe(contents);
+    expect(access.state(-100)).toEqual({ chatId: -100, revision: 7, groupRevision: 0 });
+    await access.authorize(-200, 'Independent', 1, 7);
+    expect(access.groupRevision(-100)).toBe(0);
+    await access.revoke(-100, 1, 7, undefined, 0);
+    expect(access.groupRevision(-100)).toBe(1);
+    const restored = new AccessService(storage, [1]); await restored.initialize();
+    expect(restored.groupRevision(-100)).toBe(1);
+    expect(restored.snapshot().membership).toEqual(legacy.membership);
+    expect(restored.snapshot().migrations).toEqual(legacy.migrations);
+    await restored.authorize(-100, 'Legacy', 1, restored.snapshot().revision, undefined, 1);
+    expect(restored.groupRevision(-100)).toBe(2);
+  });
+
+  it('preserves legacy global CAS and enforces target CAS independently of other group writes', async () => {
+    const f = await fixture();
+    await f.access.authorize(-100, 'First', 1, 0);
+    await expect(f.access.authorize(-200, 'Second', 1, 0)).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(f.access.authorize(-200, 'Second', 1, 0, undefined, 0)).resolves.toMatchObject({ changed: true });
+    await expect(f.access.revoke(-100, 1, 0, undefined, 0)).rejects.toMatchObject({ code: 'CONFLICT' });
+    await f.access.revoke(-100, 1, 0, undefined, 1);
+    await expect(f.access.authorize(-100, 'First', 1, f.access.snapshot().revision, undefined, 1)).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(f.access.isAllowed(-100)).toBe(false);
+  });
+
+  it('does not advance a target generation for membership bookkeeping or duplicate updates', async () => {
+    const f = await fixture();
+    await f.access.membership({ ...joinEvent, actorId: 1 });
+    const revision = f.access.groupRevision(-100);
+    await f.access.membership({ ...joinEvent, updateId: 11, wasMember: true });
+    expect(f.access.groupRevision(-100)).toBe(revision);
+    await f.access.membership({ ...joinEvent, updateId: 11, isMember: false });
+    expect(f.access.groupRevision(-100)).toBe(revision);
+    await f.access.membership({ ...joinEvent, updateId: 12, isMember: false, wasMember: true });
+    expect(f.access.groupRevision(-100)).toBe(revision + 1);
+    await f.access.membership({ ...joinEvent, updateId: 13 });
+    expect(f.access.groupRevision(-100)).toBe(revision + 2);
+  });
 
   it('waits once for an ordinary invite, does not turn Telegram administrators into superadmins', async () => {
     const f = await fixture();

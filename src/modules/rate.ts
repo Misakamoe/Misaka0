@@ -1,15 +1,13 @@
-import { Decimal } from 'decimal.js';
 import { z } from 'zod';
-import { revisionSchema, type ModuleMetadata } from '../../shared/schemas/index.js';
-import { rateCurrenciesSchema, rateInputSchema, ratePageInputSchema, rateResultSchema, type RateCurrencies, type RateInput, type RateResult } from '../../shared/schemas/rate.js';
-import type { ActionExecutor } from '../actions.js';
+import { revisionSchema } from '../../shared/schemas/index.js';
+import type { RateCurrencies, RateInput, RateResult } from '../../shared/schemas/rate.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { JsonDocument, type JsonStorage } from '../storage.js';
-import { CurrencyCatalog, CurrencyParseError, parseAmount, type CurrencyDefinition, type CurrencyParse } from './currency.js';
+import type { CurrencyCatalog, CurrencyDefinition, CurrencyParse } from './currency.js';
 import { cancellable, createProviderJson, list, number, object, ProviderError, string, type ProviderJson } from './provider-http.js';
 
-export const rateMetadata: ModuleMetadata = { id: 'rate', nameKey: 'web:rate.name', descriptionKey: 'web:rate.description', schema_version: 1, configurable: false };
-const Money = Decimal.clone({ precision: 48, toExpNeg: -30, toExpPos: 40 });
+export { rateMetadata } from './metadata.js';
+export { registerRateActions } from './module-actions.js';
 const codeSchema = z.string().regex(/^[A-Z]{3}$/);
 const fiatSchema = z.strictObject({ codes: z.array(z.tuple([codeSchema, z.string().max(160)])).max(400), rates: z.record(codeSchema, z.number().positive().max(1e15)), updatedAt: z.number().nonnegative(), nextAt: z.number().nonnegative() });
 const coinSchema = z.strictObject({ usd: z.number().min(1e-18).max(1e15), updatedAt: z.number().nonnegative(), fetchedAt: z.number().nonnegative() });
@@ -27,7 +25,9 @@ export class RateService {
   private fiatError: ProviderError = new ProviderError('NOT_CONFIGURED');
   private cryptoError: ProviderError = new ProviderError('NETWORK');
   private catalogValue?: CurrencyCatalog;
-  private catalogFiat?: unknown;
+  private catalogCodes?: readonly (readonly [string, string])[];
+  private catalogDate?: string;
+  private runtimeTask?: Promise<typeof import('./rate-runtime.js')>;
   constructor(storage: JsonStorage, private readonly options: RateOptions = {}) {
     this.file = new JsonDocument(storage, 'rates.json', fileSchema);
     this.json = options.json ?? createProviderJson(['v6.exchangerate-api.com', 'api.coingecko.com']);
@@ -35,12 +35,17 @@ export class RateService {
   }
   async initialize(): Promise<void> { await this.file.load({ schema_version: 1, revision: 0, fiat: null, crypto: {} }); }
   snapshot() { return this.file.snapshot(); }
-  private catalog(): CurrencyCatalog {
-    const fiat = this.snapshot().fiat;
-    if (!this.catalogValue || this.catalogFiat !== fiat) {
-      const english = new Intl.DisplayNames('en', { type: 'currency' });
-      this.catalogValue = new CurrencyCatalog(fiat?.codes ?? Intl.supportedValuesOf('currency').map(code => [code, english.of(code)!] as const), this.now());
-      this.catalogFiat = fiat;
+  private runtime() { return this.runtimeTask ??= import('./rate-runtime.js'); }
+  private async catalog(): Promise<CurrencyCatalog> {
+    const { CurrencyCatalog, englishCurrencyNames } = await this.runtime();
+    throwIfAborted(this.abort.signal);
+    const codes = this.snapshot().fiat?.codes;
+    const date = new Date(this.now()).toISOString().slice(0, 10);
+    if (!this.catalogValue || this.catalogDate !== date || codes?.length !== this.catalogCodes?.length
+      || codes?.some(([code, name], index) => code !== this.catalogCodes?.[index]?.[0] || name !== this.catalogCodes?.[index]?.[1])) {
+      this.catalogValue = new CurrencyCatalog(codes ?? Intl.supportedValuesOf('currency').map(code => [code, englishCurrencyNames.of(code)!] as const), this.now());
+      this.catalogCodes = codes;
+      this.catalogDate = date;
     }
     return this.catalogValue;
   }
@@ -64,7 +69,8 @@ export class RateService {
       const last = number(data.time_last_update_unix); const next = number(data.time_next_update_unix);
       if (data.base_code !== 'USD' || rates.USD !== 1 || !last || !next || next <= last || last * 1000 > this.now() + 600_000) throw new ProviderError('INVALID_RESPONSE');
       const declared = new Map(list(codes.supported_codes).filter(Array.isArray).map(row => [string(row[0]), string(row[1])]));
-      const english = new Intl.DisplayNames('en', { type: 'currency' });
+      const { englishCurrencyNames: english } = await this.runtime();
+      throwIfAborted(this.abort.signal);
       const fiat = fiatSchema.safeParse({ rates, updatedAt: last * 1000, nextAt: Math.min(next * 1000, this.now() + 86_400_000),
         codes: Object.keys(rates).map(code => [code, declared.get(code) || (/^[A-Z]{3}$/.test(code) ? english.of(code) : '') || code]),
       });
@@ -107,14 +113,18 @@ export class RateService {
   }
   async currencies(page: number, signal: AbortSignal): Promise<RateCurrencies> {
     throwIfAborted(signal); throwIfAborted(this.abort.signal);
-    try { await this.refreshFiat(signal); } catch (error) { throwIfAborted(signal); if (!this.snapshot().fiat) throw this.safe(error); }
-    const entries = this.catalog().list();
+    try { await this.refreshFiat(signal); } catch (error) { throwIfAborted(signal); if (!this.snapshot().fiat) throw await this.safe(error); }
+    const entries = (await this.catalog()).list();
+    throwIfAborted(signal); throwIfAborted(this.abort.signal);
     const selected = Math.max(0, Math.min(page, Math.ceil(entries.length / 10) - 1));
     return { items: [...entries.slice(selected * 10, selected * 10 + 10)], total: entries.length, page: selected, pageSize: 10 };
   }
-  private safe(error: unknown): AppError {
+  private async safe(error: unknown): Promise<AppError> {
     if (error instanceof AppError) return error;
-    if (error instanceof CurrencyParseError) return new AppError('INVALID_INPUT', [`rate.${error.code}`]);
+    if (this.runtimeTask) {
+      const runtime = await this.runtimeTask.catch(() => undefined);
+      if (runtime && error instanceof runtime.CurrencyParseError) return new AppError('INVALID_INPUT', [`rate.${error.code}`]);
+    }
     return new AppError('UNAVAILABLE', [`provider.${error instanceof ProviderError ? error.code : 'NETWORK'}`]);
   }
   async convert(input: RateInput, signal: AbortSignal): Promise<RateResult> {
@@ -122,7 +132,9 @@ export class RateService {
     try {
       let fiatFailure: unknown;
       try { await this.refreshFiat(signal); } catch (error) { throwIfAborted(signal); fiatFailure = error; }
-      const catalog = this.catalog();
+      const catalog = await this.catalog();
+      const { CurrencyParseError, parseAmount, Money } = await this.runtime();
+      throwIfAborted(signal); throwIfAborted(this.abort.signal);
       let parsed: CurrencyParse;
       if (input.query) parsed = catalog.parse(input.query);
       else {
@@ -150,12 +162,7 @@ export class RateService {
       if ([from, to].some(currency => currency.kind === 'crypto')) sources.push({ name: 'CoinGecko', updatedAt: new Date(Math.min(...[from, to].filter(item => item.kind === 'crypto').map(item => state.crypto[item.code]!.updatedAt))).toISOString(), url: 'https://www.coingecko.com' });
       return { kind: 'converted', amount: parsed.amount, from, to, result: new Money(parsed.amount).mul(rate).toSignificantDigits(24).toFixed(),
         unitRate: rate.toSignificantDigits(18).toFixed(), stale: Boolean(needsFiat && fiat && this.now() >= fiat.nextAt), sources };
-    } catch (error) { throwIfAborted(signal); throw this.safe(error); }
+    } catch (error) { throwIfAborted(signal); throw await this.safe(error); }
   }
-  async stop(): Promise<void> { this.abort.abort(); await Promise.allSettled([this.fiatTask, this.cryptoTask]); }
-}
-export function registerRateActions(executor: Pick<ActionExecutor, 'register'>, service: RateService): void {
-  const common = { permission: 'any', scopes: ['private', 'group'], sources: ['telegram', 'http'], effect: 'read', timeoutMs: 40_000, aiVisible: false } as const;
-  executor.register({ ...common, id: 'rate.convert', input: rateInputSchema, output: rateResultSchema, execute: (input, context) => service.convert(input, context.signal) });
-  executor.register({ ...common, id: 'rate.currencies', input: ratePageInputSchema, output: rateCurrenciesSchema, execute: (input, context) => service.currencies(input.page, context.signal) });
+  async stop(): Promise<void> { this.abort.abort(); await Promise.allSettled([this.fiatTask, this.cryptoTask, this.runtimeTask]); this.catalogValue = undefined; this.catalogCodes = undefined; }
 }

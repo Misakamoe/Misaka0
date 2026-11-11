@@ -1,14 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import { gunzipSync } from 'node:zlib';
-import { parentPort, workerData } from 'node:worker_threads';
 import sharp, { type Sharp } from 'sharp';
-import { DotLottie } from '@lottiefiles/dotlottie-web';
 import type { StickerConversionRequest, ConvertedSticker } from './sticker-media.js';
 
 export interface RenderJob {
   request: StickerConversionRequest;
   maxOutputBytes: number;
-  video?: { pixels: Uint8Array; width: number; height: number; count: number };
+  video?: { width: number; height: number; count: number };
 }
 export type RenderReply = { ok: true; result: ConvertedSticker } | { ok: false; code: 'INVALID_INPUT' | 'CAPACITY' | 'UNAVAILABLE' | 'TIMEOUT' };
 
@@ -134,13 +132,111 @@ function staticFormat(data: Buffer): 'png' | 'webp' | 'jpeg' {
   return png ? 'png' : 'webp';
 }
 
-async function convert(job: RenderJob): Promise<ConvertedSticker> {
+// Encode independent full canvases. Each frame gets its own palette: equal dimensions
+// do not imply equal colours. Disposal-to-background prevents transparent ghosting.
+export async function encodeGif(frames: AsyncIterable<{ pixels: Uint8Array; delay: number }>, width: number, height: number, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  const add = (data: Buffer) => {
+    bytes += data.length;
+    if (bytes > maxBytes) throw new Error('CAPACITY');
+    chunks.push(data);
+  };
+  const header = Buffer.alloc(13);
+  header.write('GIF89a'); header.writeUInt16LE(width, 6); header.writeUInt16LE(height, 8);
+  add(header);
+  add(Buffer.from([33, 255, 11, ...Buffer.from('NETSCAPE2.0'), 3, 1, 0, 0, 0]));
+  for await (const { pixels, delay } of frames) {
+    const image = sharp(pixels, { raw: { width, height, channels: 4 }, limitInputPixels: 262144 });
+    let frame: Buffer;
+    // Explicit quality reduction: at most 128 colours/frame, no dithering, GIF's
+    // binary alpha. Reserve an unused transparent index even on opaque frames so
+    // disposal-to-background can clear them before the next transparent canvas.
+    try { frame = await image.gif({ colours: 128, dither: 0, effort: 3 }).toBuffer(); }
+    finally { image.destroy(); }
+    if (frame.toString('ascii', 0, 3) !== 'GIF' || frame.readUInt16LE(6) !== width || frame.readUInt16LE(8) !== height) return invalid();
+    let offset = 13;
+    let palette: Buffer | undefined;
+    let paletteBits = frame[10]! & 7;
+    if (frame[10]! & 128) { const end = offset + 3 * (2 << paletteBits); palette = frame.subarray(offset, end); offset = end; }
+    let transparency = 0;
+    let transparentIndex = 0;
+    while (frame[offset] === 33) {
+      const label = frame[offset + 1];
+      offset += 2;
+      if (label === 249) { transparency = frame[offset + 1]! & 1; transparentIndex = frame[offset + 4]!; }
+      while (frame[offset]) offset += frame[offset]! + 1;
+      offset++;
+    }
+    if (frame[offset] !== 44 || frame[offset + 9]! & 64) return invalid();
+    const descriptor = Buffer.from(frame.subarray(offset, offset + 10));
+    offset += 10;
+    if (descriptor[9]! & 128) {
+      paletteBits = descriptor[9]! & 7;
+      const end = offset + 3 * (2 << paletteBits); palette = frame.subarray(offset, end); offset = end;
+    }
+    if (!palette || frame.at(-1) !== 59) return invalid();
+    if (!transparency) {
+      // libvips may pad the colour table to 256 even for 128-colour output.
+      // Find a genuinely unused index by walking LZW, never guessing from RGBs.
+      const used = new Uint8Array(256);
+      const prefix = new Uint16Array(4096);
+      const suffix = new Uint8Array(4096);
+      const minimum = frame[offset]!;
+      if (minimum < 2 || minimum > 8) return invalid();
+      const clear = 1 << minimum;
+      let bits = minimum + 1; let next = clear + 2; let previous = -1;
+      let position = offset + 1; let remaining = 0; let packed = 0; let available = 0; let decoded = 0;
+      const byte = () => {
+        if (!remaining) remaining = frame[position++]!;
+        if (!remaining || position >= frame.length) return invalid();
+        remaining--; return frame[position++]!;
+      };
+      for (;;) {
+        while (available < bits) { packed |= byte() << available; available += 8; }
+        const code = packed & ((1 << bits) - 1); packed >>>= bits; available -= bits;
+        if (code === clear) { bits = minimum + 1; next = clear + 2; previous = -1; continue; }
+        if (code === clear + 1) break;
+        if (code > next || code === next && previous < 0) return invalid();
+        let entry = code === next ? previous : code;
+        let length = code === next ? 2 : 1;
+        while (entry >= clear) {
+          if (entry >= next || ++length > 4096) return invalid();
+          used[suffix[entry]!] = 1; entry = prefix[entry]!;
+        }
+        used[entry] = 1; decoded += length;
+        if (decoded > width * height) return invalid();
+        if (previous >= 0 && next < 4096) {
+          prefix[next] = previous; suffix[next] = entry; next++;
+          if (next === 1 << bits && bits < 12) bits++;
+        }
+        previous = code;
+      }
+      if (decoded !== width * height) return invalid();
+      transparentIndex = used.findIndex((value, index) => !value && index < palette!.length / 3);
+      if (transparentIndex < 0) {
+        if (paletteBits >= 7) return invalid();
+        transparentIndex = palette.length / 3;
+        const expanded = Buffer.alloc(palette.length * 2);
+        palette.copy(expanded); palette = expanded; paletteBits++;
+      }
+      transparency = 1;
+    }
+    descriptor[9] = 128 | paletteBits;
+    const control = Buffer.from([33, 249, 4, 8 | transparency, 0, 0, transparentIndex, 0]);
+    control.writeUInt16LE(Math.max(1, Math.round(delay / 10)), 4);
+    add(control); add(descriptor); add(palette); add(frame.subarray(offset, -1));
+  }
+  add(Buffer.from([59]));
+  return Buffer.concat(chunks, bytes);
+}
+
+export async function convert(job: RenderJob, videoFrames?: AsyncIterable<Uint8Array>): Promise<ConvertedSticker> {
   const { request } = job;
-  const source = Buffer.from(request.data);
+  const source = Buffer.from(request.data.buffer, request.data.byteOffset, request.data.byteLength);
   let image: Sharp;
   let width = request.width;
   let height = request.height;
-  let delays: number[] = [];
   if (request.kind === 'static') {
     const format = staticFormat(source);
     image = sharp(source, { limitInputPixels: 262144, failOn: 'warning', sequentialRead: true }).timeout({ seconds: 12 });
@@ -150,7 +246,6 @@ async function convert(job: RenderJob): Promise<ConvertedSticker> {
     image = image.autoOrient().resize({ width, height, fit: 'inside', withoutEnlargement: true });
   } else {
     let pixels: Buffer;
-    let count: number;
     if (request.kind === 'animated') {
       const animation = lottie(source);
       const ratio = Math.min(width / animation.width, height / animation.height, 1);
@@ -163,6 +258,7 @@ async function convert(job: RenderJob): Promise<ConvertedSticker> {
         if (!url.startsWith('blob:nodedata:')) throw new Error('INVALID_INPUT');
         return fetchLocal(input, init);
       };
+      const { DotLottie } = await import('@lottiefiles/dotlottie-web');
       try {
         const wasm = await readFile(new URL(import.meta.resolve('@lottiefiles/dotlottie-web/dotlottie-player.wasm')));
         const url = URL.createObjectURL(new Blob([wasm], { type: 'application/wasm' }));
@@ -182,27 +278,41 @@ async function convert(job: RenderJob): Promise<ConvertedSticker> {
         if (!Number.isFinite(player.totalFrames) || player.totalFrames <= 0 || player.totalFrames > 181
           || Math.abs(player.duration - animation.duration) > 0.02) return invalid();
         const fps = Math.min(animation.fps, 30);
-        count = request.format === 'png' ? 1 : Math.max(1, Math.min(90, Math.ceil(Math.min(animation.duration, 3) * fps - 1e-6)));
-        pixels = Buffer.alloc(width * height * 4 * count);
-        for (let i = 0; i < count; i++) {
-          player.setFrame(Math.min(player.totalFrames - 1, i * animation.fps / fps));
-          const buffer = player.buffer;
-          if (!buffer || buffer.length !== width * height * 4) return invalid();
-          pixels.set(buffer, i * buffer.length);
-          delays.push(Math.max(10, (Math.round(Math.min(animation.duration, (i + 1) / fps) * 100) - Math.round(i / fps * 100)) * 10));
+        const count = request.format === 'png' ? 1 : Math.max(1, Math.min(90, Math.ceil(Math.min(animation.duration, 3) * fps - 1e-6)));
+        async function* frames() {
+          for (let i = 0; i < count; i++) {
+            player.setFrame(Math.min(player.totalFrames - 1, i * animation.fps / fps));
+            const buffer = player.buffer;
+            if (!buffer || buffer.length !== width * height * 4) return invalid();
+            yield { pixels: buffer, delay: Math.max(10, (Math.round(Math.min(animation.duration, (i + 1) / fps) * 100) - Math.round(i / fps * 100)) * 10) };
+          }
         }
+        if (request.format === 'gif') return { data: await encodeGif(frames(), width, height, job.maxOutputBytes), format: 'gif', width, height };
+        player.setFrame(0);
+        if (!player.buffer || player.buffer.length !== width * height * 4) return invalid();
+        pixels = Buffer.from(player.buffer);
       } finally { player.destroy(); }
     } else {
       const video = job.video;
-      if (!video || !dimension(video.width) || !dimension(video.height) || !Number.isInteger(video.count)
-        || video.count < 1 || video.count > 90 || video.pixels.length !== video.width * video.height * 4 * video.count) return invalid();
+      if (!video || !videoFrames || !dimension(video.width) || !dimension(video.height) || !Number.isInteger(video.count)
+        || video.count < 1 || video.count > 90) return invalid();
       width = video.width;
       height = video.height;
-      count = request.format === 'png' ? 1 : video.count;
-      pixels = Buffer.from(video.pixels.buffer, video.pixels.byteOffset, width * height * 4 * count);
-      delays = Array.from({ length: count }, (_, i) => (Math.round((i + 1) * 100 / 30) - Math.round(i * 100 / 30)) * 10);
+      let count = 0;
+      const incoming = videoFrames;
+      async function* frames() {
+        for await (const frame of incoming) {
+          if (frame.length !== width * height * 4 || ++count > video!.count) return invalid();
+          yield { pixels: frame, delay: (Math.round(count * 100 / 30) - Math.round((count - 1) * 100 / 30)) * 10 };
+        }
+        if (count !== video!.count) return invalid();
+      }
+      if (request.format === 'gif') return { data: await encodeGif(frames(), width, height, job.maxOutputBytes), format: 'gif', width, height };
+      pixels = Buffer.alloc(0);
+      for await (const frame of frames()) pixels = Buffer.from(frame.pixels.buffer, frame.pixels.byteOffset, frame.pixels.byteLength);
+      if (count !== 1) return invalid();
     }
-    image = sharp(pixels, { raw: { width, height: height * count, channels: 4, pageHeight: height }, limitInputPixels: 262144 * 90 });
+    image = sharp(pixels, { raw: { width, height, channels: 4 }, limitInputPixels: 262144 });
   }
   try {
     image.timeout({ seconds: 12 }).toColourspace('srgb');
@@ -223,7 +333,7 @@ async function convert(job: RenderJob): Promise<ConvertedSticker> {
     if (request.format === 'jpg') image.jpeg({ quality: 90 });
     else if (request.format === 'png') image.png();
     else if (request.format === 'webp') image.webp({ lossless: true, effort: 3 });
-    else image.gif({ delay: delays, loop: 0, effort: 3, colours: 256, dither: 0, keepDuplicateFrames: true });
+    else return invalid();
     const output = await image.toBuffer({ resolveWithObject: true });
     width = output.info.width;
     height = output.info.pageHeight ?? output.info.height;
@@ -231,16 +341,4 @@ async function convert(job: RenderJob): Promise<ConvertedSticker> {
     if (output.data.length > job.maxOutputBytes) throw new Error('CAPACITY');
     return { data: output.data, format: request.format, width, height };
   } finally { image.destroy(); }
-}
-
-if (parentPort) {
-  const port = parentPort;
-  void convert(workerData as RenderJob).then(result => port.postMessage({ ok: true, result } satisfies RenderReply))
-    .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : '';
-      const code = message === 'CAPACITY' || message === 'UNAVAILABLE' ? message
-        : /timeout/i.test(message) ? 'TIMEOUT' : 'INVALID_INPUT';
-      port.postMessage({ ok: false, code } satisfies RenderReply);
-    })
-    .finally(() => port.close());
 }

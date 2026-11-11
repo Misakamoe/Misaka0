@@ -41,6 +41,7 @@ async function fixture(options: {
   graceMs?: number;
   runnerFactory?: ApplicationOptions['runnerFactory'];
   webFactory?: ApplicationOptions['webFactory'];
+  statusMetrics?: ApplicationOptions['statusMetrics'];
 } = {}) {
   const directory = await mkdtemp('/tmp/kilo/lifecycle-');
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
@@ -100,6 +101,7 @@ async function fixture(options: {
   const transportClosed = vi.fn(() => { trace.push('transport:closed'); });
   const app = createApplication(config, {
     bot, runnerFactory, webFactory, shutdownGraceMs: options.graceMs ?? 10, onTransportClosed: transportClosed,
+    statusMetrics: options.statusMetrics,
     storage: { beforeCommit: async (filename, signal) => {
       trace.push(`store:${filename}`); await options.storage?.beforeCommit?.(filename, signal);
     } },
@@ -121,6 +123,22 @@ async function fixture(options: {
 }
 
 describe('application construction and startup', () => {
+  it('starts one cached status sampler and drains it before closing the runtime', async () => {
+    const release = Promise.withResolvers<void>();
+    const metrics = { start: vi.fn(async () => {}), snapshot: vi.fn(() => undefined), stop: vi.fn(async () => release.promise) };
+    const f = await fixture({ web: false, statusMetrics: metrics });
+    expect(metrics.start).not.toHaveBeenCalled();
+    await f.app.start();
+    expect(metrics.start).toHaveBeenCalledOnce();
+    f.app.status(); expect(metrics.snapshot).toHaveBeenCalledOnce();
+    const closing = f.app.stop();
+    await vi.waitFor(() => expect(metrics.stop).toHaveBeenCalledOnce());
+    expect(f.transportClosed).not.toHaveBeenCalled();
+    release.resolve(); await closing;
+    expect(f.transportClosed).toHaveBeenCalledOnce();
+    await f.app.stop(); expect(metrics.stop).toHaveBeenCalledOnce();
+  });
+
   it('imports and constructs without API calls, listeners, storage writes, or polling', async () => {
     const signals = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
     vi.resetModules();
@@ -204,7 +222,7 @@ describe('application construction and startup', () => {
   it('passes only actual update types, concurrency16 and no sink timeout or runner retry sleep', async () => {
     const f = await fixture({ web: false, dropPending: true });
     await f.app.start();
-    expect(ALLOWED_UPDATES).toEqual(['message', 'callback_query', 'my_chat_member']);
+    expect(ALLOWED_UPDATES).toEqual(['message', 'callback_query', 'my_chat_member', 'stopped_message_generation']);
     expect(RUNNER_CONCURRENCY).toBe(16);
     expect(f.runnerOptions).toEqual({ sink: { concurrency: 16 }, runner: {
       fetch: { timeout: 30, allowed_updates: ALLOWED_UPDATES }, maxRetryTime: 0, silent: true,

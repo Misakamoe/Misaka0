@@ -1,9 +1,32 @@
 {
   "appName": "Misaka",
+  "resources": {
+    "title": "資源快照", "sampledAt": "取樣時間", "window": "CPU 取樣時間窗",
+    "unavailable": "無法取得", "warmup": "暖機中（首次 CPU 取樣）", "unlimited": "無限制", "limited": "{{value}}（有限制）", "cores": "{{value}} 核心",
+    "process": "機器人程序", "system": "核心可見系統", "cgroup": "cgroup v2 資源",
+    "cpu": "CPU", "rss": "常駐記憶體（RSS）", "heap": "JavaScript 堆積", "buffers": "外部記憶體 / 緩衝區", "cpus": "CPU 容量", "load": "平均負載", "memory": "記憶體", "swap": "交換空間", "pids": "工作數（PID）", "availability": "可用性",
+    "heapValue": "已用 {{used}} / 已配置 {{total}} / 上限 {{limit}}",
+    "buffersValue": "外部記憶體 {{external}} / ArrayBuffers {{buffers}}（已包含於外部記憶體）",
+    "cpusValue": "可見邏輯 CPU {{logical}} / 可用平行度 {{available}}",
+    "loadValue": "1 分鐘 {{one}} / 5 分鐘 {{five}} / 15 分鐘 {{fifteen}}",
+    "memoryValue": "可用 {{available}} / 總量 {{total}}",
+    "cgroupCpuValue": "用量 {{usage}} / 配額 {{quota}}；{{scope}}",
+    "cgroupMemoryValue": "目前 {{current}} / 峰值 {{peak}} / 上限 {{limit}}；{{scope}}",
+    "boundedValue": "目前 {{current}} / 上限 {{limit}}",
+    "pidsValue": "目前 {{current}} / 上限 {{limit}}；{{scope}}",
+    "cpuNote": "程序和 cgroup CPU：100% = 一個核心，用量可超過 100%。",
+    "systemNote": "核心可見總量不是容器配額。系統 CPU 為全部可見 CPU 的 0-100%；負載不是百分比。",
+    "cgroupNote": "各項資源獨立選取目前群組或可見的限制祖先群組，包含後代及可能的其他程序，各項不一定來自同一群組；不可見祖先仍可能施加限制。",
+    "qualificationNote": "單次快照不能證明機器人或重型功能適合 256 MiB 部署。",
+    "v1Unavailable": "無法取得：尚不支援 cgroup v1。",
+    "states": { "available": "可用", "partial": "部分可用", "unavailable": "無法取得" },
+    "scopes": { "current": "目前群組", "ancestor": "可見的限制祖先群組", "unavailable": "範圍無法取得" }
+  },
   "languages": { "auto": "自動", "zh-CN": "簡體中文", "zh-TW": "繁體中文", "en": "English", "ja": "日本語" },
   "actions": { "save": "儲存變更", "saving": "正在儲存...", "cancel": "取消", "confirm": "確認", "close": "關閉", "retry": "重試", "previous": "上一頁", "next": "下一頁", "add": "新增", "remove": "移除", "moveUp": "上移", "moveDown": "下移", "logout": "登出", "refresh": "重新整理" },
   "errors": {
-    "INVALID_INPUT": "請檢查標示的欄位。", "FORBIDDEN": "你沒有執行此操作的權限。", "UNAUTHORIZED": "請先登入。", "NOT_FOUND": "此操作或模組尚未提供。", "CONFLICT": "資料已在其他地方變更，請重新載入後再儲存。", "CONFIRMATION_EXPIRED": "此操作已過期或已使用，請重新發起。", "CONFIRMATION_REQUIRED": "請確認後再繼續。", "AI_DISABLED": "AI 功能尚未安裝或啟用。", "CANCELLED": "操作已取消。", "TIMEOUT": "操作逾時。", "OUTCOME_UNKNOWN": "無法確定操作結果，請先檢查目前狀態，不要直接重試。", "UNAVAILABLE": "服務暫時無法使用。", "RATE_LIMITED": "請求過於頻繁，請稍後重試。", "INTERNAL_ERROR": "操作失敗，請稍後重試。", "INVALID_ORIGIN": "請求來自不受信任的頁面。", "CSRF_INVALID": "頁面安全權杖已過期，請重新整理頁面。", "AUTH_EXPIRED": "登入階段已過期，請重新登入。", "AUTH_INVALID": "無法驗證登入資訊，請重新登入。", "STORAGE_ERROR": "無法儲存變更，原有狀態已保留。", "INVALID_OUTPUT": "服務傳回了無效結果。", "CAPACITY": "服務忙碌中，請稍後重試。"
+    "AI_PRICING_REQUIRED": "此預設使用金額限制，但尚未設定已審核價格。請填寫價格，或在 AI 進階設定中明確改用有上限的用量模式。",
+    "INVALID_INPUT": "請檢查標示的欄位。", "FORBIDDEN": "你沒有執行此操作的權限。", "UNAUTHORIZED": "請先登入。", "NOT_FOUND": "此操作或模組尚未提供。", "CONFLICT": "資料已在其他地方變更，請重新載入後再儲存。", "CONFIRMATION_EXPIRED": "此操作已過期或已使用，請重新發起。", "CONFIRMATION_REQUIRED": "請確認後再繼續。", "AI_DISABLED": "目前設定與範圍中的 AI 已停用或不可用。已有資料控制項不會授予新的 AI 存取權限。", "CANCELLED": "操作已取消。", "TIMEOUT": "操作逾時。", "OUTCOME_UNKNOWN": "無法確定操作結果，請先檢查目前狀態，不要直接重試。", "UNAVAILABLE": "服務暫時無法使用。", "RATE_LIMITED": "請求過於頻繁，請稍後重試。", "INTERNAL_ERROR": "操作失敗，請稍後重試。", "INVALID_ORIGIN": "請求來自不受信任的頁面。", "CSRF_INVALID": "頁面安全權杖已過期，請重新整理頁面。", "AUTH_EXPIRED": "登入階段已過期，請重新登入。", "AUTH_INVALID": "無法驗證登入資訊，請重新登入。", "STORAGE_ERROR": "無法儲存變更，原有狀態已保留。", "INVALID_OUTPUT": "服務傳回了無效結果。", "CAPACITY": "服務忙碌中，請稍後重試。"
   },
   "states": { "disabled": "未啟用", "starting": "啟動中", "running": "執行中", "stopping": "停止中", "stopped": "已停止", "failed": "失敗" },
   "yes": "是",

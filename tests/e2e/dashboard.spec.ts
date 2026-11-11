@@ -203,9 +203,12 @@ test('group authorization validates IDs and revocation needs a one-time server c
   await page.getByLabel('Telegram chat ID').fill('-1007777');
   await page.getByRole('button', { name: 'Authorize group' }).click();
   await expect(page.getByRole('row', { name: /New group/ })).toBeVisible();
+  expect(mock.state.calls.filter(call => call.path.startsWith('/api/groups') && call.method !== 'GET').map(call => ({ path: call.path, body: call.body })))
+    .toEqual([{ path: '/api/groups/state', body: { chatId: -1007777 } }, { path: '/api/groups', body: { chatId: -1007777, revision: 1, groupRevision: 0 } }]);
   const revoke = page.getByRole('row', { name: /Engineering/ }).getByRole('button', { name: 'Revoke access' });
   await revoke.click();
   await expect(page.getByRole('dialog')).toContainText('-1001234567890');
+  expect(mock.state.calls.findLast(call => call.path === '/api/groups/revoke')?.body).toEqual({ chatId: -1001234567890, revision: 1, groupRevision: 5 });
   expect(mock.state.confirmations).toBe(0);
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   expect(mock.state.groups).toHaveLength(2);
@@ -313,7 +316,7 @@ test('Mini App uses one in-memory bearer without cookies, reacts to theme/safe a
   const cdp = await context.newCDPSession(page);
   await cdp.send('Network.setCookieControls', { enableThirdPartyCookieRestriction: true });
   await context.clearCookies();
-  const mock = await mockApi(page, { miniapp: true });
+  const mock = await mockApi(page, { miniapp: true, oidc: false });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Runtime status' })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');

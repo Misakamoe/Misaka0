@@ -57,13 +57,36 @@ describe('startup configuration isolation', () => {
     expect(String(failure)).not.toContain('secret-value');
   });
 
-  it('requires complete HTTPS OIDC configuration only when web is enabled', async () => {
-    await expect(loadConfig({ cwd, env: { ...environment, MISAKA_WEB_ENABLED: 'true' } })).rejects.toBeInstanceOf(ConfigurationError);
-    const webEnv = { ...environment, MISAKA_WEB_ENABLED: 'true', MISAKA_PUBLIC_BASE_URL: 'https://bot.example/', MISAKA_OIDC_CLIENT_ID: '12345', MISAKA_OIDC_CLIENT_SECRET: 'test-secret' };
+  it('requires HTTPS for web but allows Mini App login without OIDC credentials', async () => {
+    await expect(loadConfig({ cwd, env: { ...environment, MISAKA_WEB_ENABLED: 'true' } })).rejects.toMatchObject({ fields: ['MISAKA_PUBLIC_BASE_URL'] });
+    const webEnv = { ...environment, MISAKA_WEB_ENABLED: 'true', MISAKA_PUBLIC_BASE_URL: 'https://bot.example/' };
     const config = await loadConfig({ cwd, env: webEnv });
     expect(config.web.publicBaseUrl).toBe('https://bot.example');
+    expect(config.web.oidcClientId).toBeUndefined();
+    expect(config.web.oidcClientSecret).toBeUndefined();
+    expect(config.botToken).toBe(testToken);
+    expect((await loadConfig({ cwd, env: { ...webEnv, MISAKA_OIDC_CLIENT_ID: '', MISAKA_OIDC_CLIENT_SECRET: '' } })).web).toEqual(config.web);
     for (const bad of ['http://bot.example', 'https://user:secret@bot.example', 'https://bot.example/elsewhere', 'https://bot.example/?code=secret', 'javascript:alert(1)']) {
       await expect(loadConfig({ cwd, env: { ...webEnv, MISAKA_PUBLIC_BASE_URL: bad } })).rejects.toMatchObject({ fields: ['MISAKA_PUBLIC_BASE_URL'] });
+    }
+  });
+
+  it('accepts a complete optional OIDC pair', async () => {
+    const config = await loadConfig({ cwd, env: { ...environment, MISAKA_WEB_ENABLED: 'true', MISAKA_PUBLIC_BASE_URL: 'https://bot.example/',
+      MISAKA_OIDC_CLIENT_ID: '12345', MISAKA_OIDC_CLIENT_SECRET: 'test-secret' } });
+    expect(config.web).toMatchObject({ oidcClientId: '12345', oidcClientSecret: 'test-secret' });
+  });
+
+  it.each([
+    ['12345', undefined, 'MISAKA_OIDC_CLIENT_SECRET'], [undefined, 'test-secret', 'MISAKA_OIDC_CLIENT_ID'],
+    ['12345', '', 'MISAKA_OIDC_CLIENT_SECRET'], ['', 'test-secret', 'MISAKA_OIDC_CLIENT_ID'],
+    ['0', 'test-secret', 'MISAKA_OIDC_CLIENT_ID'], ['1e5', 'test-secret', 'MISAKA_OIDC_CLIENT_ID'],
+    ['12345', 'secret\0value', 'MISAKA_OIDC_CLIENT_SECRET'], ['12345', 'secret\nvalue', 'MISAKA_OIDC_CLIENT_SECRET'],
+    ['12345', 'secret value', 'MISAKA_OIDC_CLIENT_SECRET'], ['12345', '   ', 'MISAKA_OIDC_CLIENT_SECRET'],
+  ])('rejects incomplete or invalid configured OIDC pair %# even with web disabled', async (id, secret, field) => {
+    for (const enabled of ['true', 'false']) {
+      await expect(loadConfig({ cwd, env: { ...environment, MISAKA_WEB_ENABLED: enabled, MISAKA_PUBLIC_BASE_URL: 'https://bot.example/',
+        MISAKA_OIDC_CLIENT_ID: id, MISAKA_OIDC_CLIENT_SECRET: secret } })).rejects.toMatchObject({ fields: expect.arrayContaining([field]) });
     }
   });
   it('keeps lookup service keys in frozen startup configuration and permits absent optional providers', async () => {
@@ -73,6 +96,24 @@ describe('startup configuration isolation', () => {
     expect(config.providers?.qweatherHost).toBe('test.re.qweatherapi.com');
     expect(config.providers?.openWeatherKey).toBeUndefined();
     expect(Object.isFrozen(config.providers)).toBe(true);
+  });
+
+  it('keeps AI encryption and named credentials startup-only with no plaintext fallback', async () => {
+    const config = await loadConfig({ cwd, env: { ...environment,
+      MISAKA_AI_MASTER_KEY: 'ab'.repeat(32), MISAKA_AI_SECRET_DEEPSEEK: 'TEST_ONLY_AI_KEY',
+      OPENAI_API_KEY: 'ignored-unprefixed-key' } });
+    expect(config.ai?.masterKey).toBe('ab'.repeat(32));
+    expect(config.ai?.secrets).toEqual({ DEEPSEEK: 'TEST_ONLY_AI_KEY' });
+    expect(Object.isFrozen(config.ai)).toBe(true);
+    expect(Object.isFrozen(config.ai?.secrets)).toBe(true);
+    expect((await loadConfig({ cwd, env: environment })).ai?.masterKey).toBeUndefined();
+    for (const [name, value] of [['MISAKA_AI_MASTER_KEY', 'invalid-private-key'],
+      ['MISAKA_AI_SECRET_OPENAI', 'private\ninjected'], ['MISAKA_AI_SECRET_bad-name', 'private-secret']]) {
+      let error: unknown;
+      try { await loadConfig({ cwd, env: { ...environment, [name!]: value } }); } catch (failure) { error = failure; }
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect(String(error)).not.toContain(value!);
+    }
   });
 
   it('protects old data and detects symlink ancestors even for nonexistent target directories', async () => {

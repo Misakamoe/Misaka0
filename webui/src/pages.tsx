@@ -1,10 +1,11 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { Confirmation, GroupPage, LanguagePreference, ModuleMetadata, Preference, RuntimeStatus, SettingsDescriptor } from '../../shared/schemas';
+import type { Confirmation, GroupPage, GroupState, LanguagePreference, ModuleMetadata, Preference, RuntimeStatus, SettingsDescriptor } from '../../shared/schemas';
 import { languagePreferences } from '../../shared/schemas';
 import { action, ApiError, errorCode, query } from './api';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { FormSnapshot } from './SchemaForm';
+import { ResourceMetrics } from './ResourceMetrics';
 
 const SchemaForm = lazy(() => import('./SchemaForm').then((module) => ({ default: module.SchemaForm })));
 
@@ -42,6 +43,7 @@ export function StatusPage() {
     </dl>
     <section className="log-line"><h2>{t('status.lastError')}</h2>{data.lastApiError ? <><p>{t(`common:errors.${data.lastApiError.code}`, { defaultValue: t('common:errors.UNAVAILABLE') })}</p><p className="help">{t('status.errorAt', { time: new Intl.DateTimeFormat(i18n.language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(data.lastApiError.at)) })}</p></> : <p>{t('status.noError')}</p>}</section>
     <p className="help section-footnote">{t('status.footnote')}</p>
+    <ResourceMetrics snapshot={data.resources} />
   </>;
 }
 
@@ -70,14 +72,15 @@ export function GroupsPage({ onDirty }: { onDirty(value: boolean): void }) {
       const id = Number(chatId);
       if (!/^-\d+$/.test(chatId) || !Number.isSafeInteger(id) || id >= 0) { setError('chatId'); return; }
       void mutate(async () => {
-        await query('/api/groups', 'PUT', { chatId: id, revision: data.revision });
+        const state = await query<GroupState>('/api/groups/state', 'POST', { chatId: id });
+        await query('/api/groups', 'PUT', state);
         setChatId(''); onDirty(false); setNotice('state.saved'); refresh();
       });
     }}><div><label htmlFor="chat-id">{t('groups.chatId')}</label><input id="chat-id" inputMode="text" placeholder="-1001234567890" value={chatId} disabled={busy} aria-describedby="chat-id-help" aria-invalid={error === 'chatId'} onChange={(event) => { setChatId(event.target.value); onDirty(Boolean(event.target.value)); setError(undefined); }} /><p className="help" id="chat-id-help">{t('groups.chatIdHelp')}</p></div><button type="submit" className="primary" disabled={busy || !chatId}>{t(busy ? 'common:actions.saving' : 'groups.authorize')}</button></form>
     <div className="section-tools"><span className="help">{t('groups.total', { count: data.total })}</span><button disabled={busy} onClick={refresh}>{t('common:actions.refresh')}</button></div>
     {data.items.length ? <div className="table-scroll" tabIndex={0} role="region" aria-label={t('groups.title')}><table><thead><tr><th>{t('groups.group')}</th><th>{t('groups.authorized')}</th><th>{t('groups.presence')}</th><th>{t('groups.actions')}</th></tr></thead><tbody>
       {data.items.map((group) => <tr key={group.id}><th scope="row"><span>{group.title || t('groups.unknownTitle')}</span><code>{group.id}</code></th><td><time dateTime={group.authorizedAt}>{date(group.authorizedAt)}</time><code>{group.authorizedBy}</code></td><td>{t(group.present ? 'common:yes' : 'common:no')}</td><td><button className="danger-text" disabled={busy} onClick={() => { void mutate(async () => {
-        const result = await action('/api/groups/revoke', 'POST', { chatId: group.id, revision: data.revision });
+        const result = await action('/api/groups/revoke', 'POST', { chatId: group.id, revision: data.revision, groupRevision: group.groupRevision });
         if (result.status !== 'pending_confirmation') throw new ApiError('CONFIRMATION_REQUIRED');
         setConfirmation(result.confirmation);
       }); }}>{t('groups.revoke')}</button></td></tr>)}

@@ -43,6 +43,23 @@ async function fixture() {
 }
 
 describe('persistent RSS subscriptions and delivery', () => {
+  it('validates an unchanged persisted queue without cloning or serializing it at startup', async () => {
+    const f = await fixture();
+    await f.rss.add(target, { url }, 'en');
+    f.setResponse({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [formattedEntry(1)] } });
+    await f.poll();
+    const before = await readFile(join(f.directory, 'rss.json'), 'utf8');
+    const restored = new RssService(f.storage, { allowed: () => true, send: f.send, fetcher: f.fetcher });
+    cleanup.push(() => restored.stop());
+    const clone = vi.spyOn(globalThis, 'structuredClone'); const stringify = vi.spyOn(JSON, 'stringify');
+    await restored.initialize();
+    const cloned = clone.mock.calls.length;
+    const serialized = stringify.mock.calls.filter(([value]) => typeof value === 'object' && value !== null && 'schema_version' in value).length;
+    clone.mockRestore(); stringify.mockRestore();
+    expect(cloned).toBe(0); expect(serialized).toBe(0);
+    expect(restored.snapshot()).toEqual(f.rss.snapshot());
+    expect(await readFile(join(f.directory, 'rss.json'), 'utf8')).toBe(before);
+  });
   it('adapts each feed interval within its bounds and honors a longer upstream retry delay', async () => {
     const f = await fixture();
     await f.rss.add(target, { url }, 'en');

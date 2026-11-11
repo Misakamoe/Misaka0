@@ -5,6 +5,10 @@
 !LICENSE
 !tsconfig.json
 !tsconfig.build.json
+!scripts/
+!scripts/build-sandbox.mjs
+!scripts/sandbox-runner.c
+!scripts/sandbox-smoke.mjs
 !src/
 !src/**
 !shared/
