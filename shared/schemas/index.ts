@@ -91,6 +91,9 @@ export const moduleIdSchema = z.strictObject({ id: moduleMetadataSchema.shape.id
 export const errorCodeSchema = z.enum([
   'INVALID_INPUT', 'FORBIDDEN', 'UNAUTHORIZED', 'NOT_FOUND', 'CONFLICT', 'CONFIRMATION_EXPIRED',
   'CONFIRMATION_REQUIRED', 'AI_DISABLED', 'AI_PRICING_REQUIRED', 'CANCELLED', 'TIMEOUT', 'OUTCOME_UNKNOWN',
+  'AI_SEARCH_UNAVAILABLE', 'AI_PROVIDER_AUTH', 'AI_PROVIDER_QUOTA', 'AI_PROVIDER_UNSUPPORTED',
+  'AI_CONTEXT_LIMIT', 'AI_OUTPUT_LIMIT', 'AI_TOOL_LIMIT', 'AI_DAILY_LIMIT', 'AI_BUDGET_LIMIT', 'AI_RESPONSE_INCOMPLETE',
+  'AI_INPUT_DISABLED', 'AI_OUTPUT_UNSUPPORTED', 'AI_MEDIA_COUNT_UNAVAILABLE',
   'UNAVAILABLE', 'RATE_LIMITED', 'INTERNAL_ERROR', 'INVALID_ORIGIN', 'CSRF_INVALID',
   'AUTH_EXPIRED', 'AUTH_INVALID', 'STORAGE_ERROR', 'INVALID_OUTPUT', 'CAPACITY',
 ]);
@@ -100,11 +103,18 @@ export const safeErrorSchema = z.strictObject({
   fields: z.array(z.string()).optional(),
 });
 export type SafeError = z.infer<typeof safeErrorSchema>;
+export const confirmationSubjectSchema = z.strictObject({
+  kind: z.literal('rss'),
+  id: z.string().regex(/^[a-f0-9]{12}$/),
+  title: z.string().max(128),
+});
+export type ConfirmationSubject = z.infer<typeof confirmationSubjectSchema>;
 export const confirmationSchema = z.strictObject({
   token: z.string().regex(/^[a-f0-9]{40}$/),
   actionId: z.string(),
   expiresAt: z.iso.datetime(),
   target: z.string(),
+  subject: confirmationSubjectSchema.optional(),
 });
 export type Confirmation = z.infer<typeof confirmationSchema>;
 export type ActionResult<T = unknown> =

@@ -3,7 +3,7 @@ import type { ChatMember, InputRichMessage, Message, MessageEntity, RichMessageB
 import { sequentialize } from '@grammyjs/runner';
 import { languagePreferences, supportedLocales } from '../../shared/schemas/index.js';
 import { aliasNameSchema, type AliasSnapshot, type AliasMutationResult } from '../../shared/schemas/alias.js';
-import { rssIdSchema, type RssList, type RssSubscriptionView } from '../../shared/schemas/rss.js';
+import { RSS_MAX_KEYWORDS, RSS_MAX_KEYWORD_LENGTH, rssIdSchema, type RssList, type RssSubscriptionView } from '../../shared/schemas/rss.js';
 import type { RateCurrencies, RateInput, RateResult } from '../../shared/schemas/rate.js';
 import type { WeatherLocation, WeatherResult, WeatherSearchInput } from '../../shared/schemas/weather.js';
 import { stickerFormatSchema, type StickerDelivery, type StickerResult, type StickerView } from '../../shared/schemas/sticker.js';
@@ -30,6 +30,8 @@ import { commandEntities, panelContent, richButtonRows } from './rich.js';
 import { stickerSetName, telegramStickerFile } from './sticker.js';
 import type { AiTelegramPort } from '../ai/telegram-port.js';
 import { createAiTelegramAdapter } from './ai.js';
+import { createRelayTelegramAdapter } from './relay.js';
+import type { RelayService } from '../modules/relay.js';
 import { statusMessage } from './status.js';
 
 export { createTelegramEffects } from './effects.js';
@@ -42,6 +44,7 @@ export interface TelegramDependencies {
   configuration: ConfigurationService;
   stickers: StickerService;
   ai?: AiTelegramPort;
+  relay?: RelayService;
   health: ApiHealth & { recordUpdate(): void };
   signal: AbortSignal;
 }
@@ -79,7 +82,7 @@ function panelCallback(data: string) {
     const [operation, argument] = subconv[4]!.split(':');
     return { route: subconv[1]!, id: subconv[2]!, generation: Number(subconv[3]), operation: operation!, argument };
   }
-  const match = /^mk:ui:([scgarfwk]):([a-f0-9]{24}):(0|[1-9]\d{0,5}):(page:(?:0|[1-9]\d{0,5})|pick(?::(?:0|[1-9]\d{0,5}))?|lang:[a-zA-Z-]+|corelang:[a-zA-Z-]+|revoke:-[1-9]\d{0,15}|confirm|aliasadd|aliasremove|aliashome|aliastarget:(?:0|[1-9]\d{0,5})|aliasdelete:(?:0|[1-9]\d{0,5})|rssadd|rsshome|rsssilent|rsspause|rssremove|rssitem:(?:0|[1-9]\d{0,5})|fcurrencies|fswap|fchoose:(?:0|[1-9]\d{0,5})|wcurrent|wforecast|wsave|wclear|wlocation:(?:0|[1-9]\d{0,5})|stmode:(?:media|file)|stformat:(?:original|png|jpg|webp|gif)|stpack|stcancel)$/.exec(data);
+  const match = /^mk:ui:([scgarfwk]):([a-f0-9]{24}):(0|[1-9]\d{0,5}):(page:(?:0|[1-9]\d{0,5})|pick(?::(?:0|[1-9]\d{0,5}))?|lang:[a-zA-Z-]+|corelang:[a-zA-Z-]+|revoke:-[1-9]\d{0,15}|confirm|aliasadd|aliasremove|aliashome|aliastarget:(?:0|[1-9]\d{0,5})|aliasdelete:(?:0|[1-9]\d{0,5})|rssadd|rsshome|rsssilent|rsspause|rssremove|rssinclude|rssexclude|rssfilterclear|rssclearfield|rssitem:(?:0|[1-9]\d{0,5})|fcurrencies|fswap|fchoose:(?:0|[1-9]\d{0,5})|wcurrent|wforecast|wsave|wclear|wlocation:(?:0|[1-9]\d{0,5})|stmode:(?:media|file)|stformat:(?:original|png|jpg|webp|gif)|stpack|stcancel)$/.exec(data);
   if (!match) return undefined;
   const [operation, argument] = match[4]!.split(':');
   if ((operation === 'page' || operation === 'pick') && Number(argument) > 100_000) return undefined;
@@ -111,7 +114,8 @@ function operationAllowed(panel: CorePanel, operation: string): boolean {
        || operation === 'aliastarget' && panel.value.view === 'add' || operation === 'aliasdelete' && panel.value.view === 'remove';
     case 'rss': return ['rsshome', 'rssadd'].includes(operation)
       || panel.value.view === 'list' && ['page', 'pick', 'rssitem'].includes(operation)
-      || panel.value.view === 'item' && ['rsssilent', 'rsspause', 'rssremove'].includes(operation);
+      || panel.value.view === 'input' && panel.value.selected !== undefined && operation === 'rssclearfield'
+      || panel.value.view === 'item' && ['rsssilent', 'rsspause', 'rssremove', 'rssinclude', 'rssexclude', 'rssfilterclear'].includes(operation);
     case 'rate': return operation === 'fcurrencies' || operation === 'page' || operation === 'pick'
       || operation === 'fswap' && panel.value.result?.kind === 'converted' || operation === 'fchoose' && panel.value.result?.kind === 'ambiguous';
     case 'weather': return operation === 'wlocation' && panel.value.view === 'locations'
@@ -148,6 +152,7 @@ function memberPresent(member: ChatMember): boolean {
 
 function commandOf(ctx: Context, resolve: (name: string) => string | undefined): { name: string; argument: string } | undefined {
   const message = ctx.update.message;
+  if (message?.forward_origin || message?.external_reply) return undefined;
   const text = message?.text ?? message?.caption;
   if (!text) return undefined;
   const match = /^\/([^\s/@]+)(?:@([a-z0-9_]+))?(?=\s|$)([\s\S]*)$/i.exec(text);
@@ -181,6 +186,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
   const languageOf = (ctx: Context) => configuration.resolveLanguage(ctx.from!.id, ctx.from?.language_code);
   const call = <T>(operation: () => Promise<T>) => telegramCall(health, signal, operation);
   const ai = createAiTelegramAdapter(bot, { ai: deps.ai, executor, access, configuration, health, signal, token: config.botToken });
+  const relay = createRelayTelegramAdapter(bot, { relay: deps.relay, executor, access, configuration, health, signal });
 
   const edit = (operation: () => Promise<unknown>) => call(async () => {
     try { await operation(); }
@@ -194,10 +200,9 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       actorId: panel.binding.userId, botId: panel.binding.botId, source: 'telegram', language: panel.value.language,
       chat: { id: panel.binding.chatId, type: 'private', threadId: panel.binding.threadId },
     }), panel.value.info.source);
-    if (sessions.get(panel.binding.key)?.aliasInput?.panelId === panel.id) sessions.delete(panel.binding.key);
-    if (sessions.get(panel.binding.key)?.rssInput?.panelId === panel.id) sessions.delete(panel.binding.key);
-    if (sessions.get(panel.binding.key)?.weatherInput?.panelId === panel.id) sessions.delete(panel.binding.key);
-    if (sessions.get(panel.binding.key)?.subconvInput?.panelId === panel.id) clearSubconvInput(panel.binding.key);
+    for (const field of ['aliasInput', 'rssInput', 'weatherInput', 'subconvInput'] as const) {
+      sessions.clearInput(panel.binding.key, field, panel.id);
+    }
     if (panel.value.kind === 'subconv') {
       panel.value.source = ''; panel.value.customParams = []; delete panel.value.result; delete panel.value.input; delete panel.value.signature; delete panel.value.lastView;
       if (stopped || signal.aborted || panel.messageId === undefined) return;
@@ -389,6 +394,37 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     await send(ctx, translator(languageOf(ctx))(code === 'CONFIRMATION_EXPIRED' ? 'bot:expired' : `common:errors.${code}`));
   }
 
+  const suppressedAlbums = new Map<string, number>();
+  const albumKey = (ctx: Context) => ctx.update.message?.media_group_id
+    ? `${sessionKey(ctx)}:${ctx.update.message.media_group_id}` : undefined;
+  function suppressAlbum(ctx: Context): void {
+    const key = albumKey(ctx);
+    if (key) {
+      if (!suppressedAlbums.has(key) && suppressedAlbums.size >= 128) throw new AppError('CAPACITY');
+      suppressedAlbums.set(key, Date.now() + 120_000);
+    }
+  }
+
+  async function inputPrompt(ctx: Context, panel: CorePanel, text: string): Promise<number> {
+    const rich = panelContent(text, commandEntities(text));
+    if (supportedMessage(ctx)!.chat.type !== 'private') {
+      rich.blocks.unshift({ type: 'paragraph', text: { type: 'text_mention', user: ctx.from!, text: plainValue(ctx.from!.first_name, 64) } });
+    }
+    const prompt = await call(() => bot.api.sendRichMessage(panel.binding.chatId, rich, {
+      message_thread_id: panel.binding.threadId, reply_markup: { force_reply: true, selective: true },
+    }, signal));
+    panels.get(panel.id, { ...binding(ctx), messageId: panel.messageId! });
+    return prompt.message_id;
+  }
+
+  function inputReply(ctx: Context, messageId: number): boolean {
+    const message = ctx.update.message;
+    const reply = message?.reply_to_message;
+    return !!message && !message.forward_origin && !message.external_reply && !!reply && reply.message_id === messageId
+      && reply.from?.id === ctx.me.id && reply.from.is_bot && reply.chat.id === message.chat.id
+      && messageTopicId(reply) === messageTopicId(message);
+  }
+
   async function confirmation(ctx: Context, pending: Confirmation): Promise<void> {
     if (!['groups.authorize', 'groups.revoke'].includes(pending.actionId)) throw new AppError('INVALID_OUTPUT');
     const owner = binding(ctx);
@@ -543,7 +579,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
   async function showAliases(ctx: Context, view: 'main' | 'add' | 'remove' = 'main', requestedPage = 0, current?: CorePanel, notice?: string, selection?: { window?: number }): Promise<void> {
     const snapshot = await resultData(ctx, await executor.execute<AliasSnapshot>(invocation(ctx, 'alias-view'), 'alias.list', {}));
     if (!snapshot) return;
-    sessions.delete(sessionKey(ctx));
+    sessions.clearInput(sessionKey(ctx), 'aliasInput');
     const language = languageOf(ctx);
     const t = translator(language);
     const panel = current ?? await createPanel(ctx, { kind: 'alias', language, generation: 0, view, page: 0, revision: snapshot.revision, targets: [], removals: [] });
@@ -600,9 +636,8 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
 
   async function aliasInput(ctx: Context): Promise<boolean> {
     const pending = sessions.get(sessionKey(ctx))?.aliasInput;
-    if (!pending || !ctx.message?.text) return false;
-    if (ctx.message.reply_to_message && ctx.message.reply_to_message.message_id !== pending.messageId) return false;
-    sessions.delete(sessionKey(ctx));
+    if (!pending || !ctx.message?.text || pending.promptMessageId === undefined || !inputReply(ctx, pending.promptMessageId)) return false;
+    sessions.clearInput(sessionKey(ctx), 'aliasInput', pending.panelId);
     if (ctx.message.chat.type !== 'private' || !access.isAdmin(ctx.from!.id)) { await sendError(ctx, 'FORBIDDEN'); return true; }
     let panel: CorePanel;
     try { panel = panels.get(pending.panelId, { ...binding(ctx), messageId: pending.messageId }); }
@@ -634,10 +669,11 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       refreshGeneration(panel);
       panel.value.language = languageOf(ctx);
       panel.value.view = 'input'; panel.value.targets = []; panel.value.removals = [];
-      sessions.set(sessionKey(ctx), { aliasInput: { panelId: panel.id, messageId: panel.messageId, command, revision: panel.value.revision } });
       const t = translator(languageOf(ctx));
       const text = t('bot:alias.input', { command });
       await displayPanel(panel, { text, entities: commandEntities(text), keyboard: new InlineKeyboard().text(t('common:actions.cancel'), callbackData(panel, 'aliashome')) });
+      const promptMessageId = await inputPrompt(ctx, panel, text);
+      sessions.setInput(sessionKey(ctx), 'aliasInput', { panelId: panel.id, messageId: panel.messageId!, promptMessageId, command, revision: panel.value.revision });
       return;
     }
     if (operation === 'aliasdelete') {
@@ -672,7 +708,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       if (detail.status === 'succeeded') selected = detail.data;
       else notice = rssNotice(ctx, detail);
     }
-    sessions.delete(sessionKey(ctx));
+    sessions.clearInput(sessionKey(ctx), 'rssInput');
     const panel = current ?? await createPanel(ctx, { kind: 'rss', language, generation: 0, view: 'list', page: snapshot.page, items: [] });
     if (panel.value.kind !== 'rss') throw new AppError('FORBIDDEN');
     if (current) refreshGeneration(panel);
@@ -697,9 +733,16 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
         failures: selected.failures, checks: selected.totalChecks, totalFailures: selected.totalFailures, pending: selected.pending, uncertain: selected.uncertain });
       if (selected.lastError) text += '\n\n' + t(`bot:rss.errors.${selected.lastError}`);
       if (selected.deliveryError) text += '\n\n' + t(`bot:rss.deliveryErrors.${selected.deliveryError}`);
+      const keywords = (words: string[]) => words.length ? words.slice(0, 5).map(word => plainValue(word, RSS_MAX_KEYWORD_LENGTH)).join(' / ')
+        + (words.length > 5 ? t('bot:rss.moreKeywords', { count: words.length - 5 }) : '') : t('bot:rss.noKeywords');
+      text += '\n\n' + t('bot:rss.filterSummary', { include: keywords(selected.filters?.include ?? []), exclude: keywords(selected.filters?.exclude ?? []) });
+      text += '\n' + t('bot:rss.filterHelp');
       keyboard.text(t(selected.silent ? 'bot:rss.enableSound' : 'bot:rss.mute'), callbackData(panel, 'rsssilent'))
         .text(t(selected.paused ? 'bot:rss.resume' : 'bot:rss.pause'), callbackData(panel, 'rsspause')).row()
-        .text(t('bot:rss.remove'), callbackData(panel, 'rssremove')).danger().row()
+        .text(t('bot:rss.editInclude'), callbackData(panel, 'rssinclude')).row()
+        .text(t('bot:rss.editExclude'), callbackData(panel, 'rssexclude')).row();
+      if (selected.filters) keyboard.text(t('bot:rss.clearFilters'), callbackData(panel, 'rssfilterclear')).row();
+      keyboard.text(t('bot:rss.remove'), callbackData(panel, 'rssremove')).danger().row()
         .text(t('bot:panels.back'), callbackData(panel, 'rsshome'));
     } else {
       text += '\n\n' + t('bot:rss.description');
@@ -733,28 +776,65 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       if (panel.messageId === undefined) throw new AppError('FORBIDDEN');
       refreshGeneration(panel);
       panel.value.view = 'input'; panel.value.items = []; panel.value.selected = undefined; panel.value.language = languageOf(ctx);
-      sessions.set(sessionKey(ctx), { rssInput: { panelId: panel.id, messageId: panel.messageId } });
       const text = translator(languageOf(ctx))('bot:rss.input');
       await displayPanel(panel, { text, entities: commandEntities(text), keyboard: new InlineKeyboard().text(translator(languageOf(ctx))('common:actions.cancel'), callbackData(panel, 'rsshome')) });
+      const promptMessageId = await inputPrompt(ctx, panel, text);
+      sessions.setInput(sessionKey(ctx), 'rssInput', { panelId: panel.id, messageId: panel.messageId!, promptMessageId });
       return;
     }
     const selected = panel.value.selected;
     if (!selected) throw new AppError('FORBIDDEN');
+    if (operation === 'rssinclude' || operation === 'rssexclude') {
+      const current = await executor.execute<RssSubscriptionView>(invocation(ctx, 'rss-filter-input'), 'rss.get', { id: selected.id });
+      if (current.status !== 'succeeded') { await panels.close(panel, 'expired'); await resultData(ctx, current); return; }
+      if (current.data.revision !== selected.revision) {
+        await showRss(ctx, panel.value.page, panel, translator(languageOf(ctx))('common:errors.CONFLICT'), selected.id); return;
+      }
+      const field = operation === 'rssinclude' ? 'include' : 'exclude';
+      const t = translator(languageOf(ctx));
+      refreshGeneration(panel); panel.value.view = 'input'; panel.value.items = [];
+      const label = t(field === 'include' ? 'bot:rss.includeKeywords' : 'bot:rss.excludeKeywords');
+      const text = t('bot:rss.filterInput', { kind: label, count: RSS_MAX_KEYWORDS, length: RSS_MAX_KEYWORD_LENGTH });
+      const existing = selected.filters?.[field] ?? [];
+      await displayPanel(panel, { text: `${text}\n\n${label}\n${existing.length ? existing.join('\n') : t('bot:rss.noKeywords')}`, keyboard: new InlineKeyboard()
+        .text(t('bot:rss.clearKeywords'), callbackData(panel, 'rssclearfield')).row()
+        .text(t('common:actions.cancel'), callbackData(panel, 'rsshome')) });
+      const promptMessageId = await inputPrompt(ctx, panel, text);
+      sessions.setInput(sessionKey(ctx), 'rssInput', { panelId: panel.id, messageId: panel.messageId!, promptMessageId,
+        filter: { field, id: selected.id, revision: selected.revision } });
+      return;
+    }
+    if (operation === 'rssclearfield') {
+      const pending = sessions.get(sessionKey(ctx))?.rssInput;
+      if (!pending?.filter || pending.panelId !== panel.id || pending.filter.id !== selected.id || pending.filter.revision !== selected.revision) throw new AppError('FORBIDDEN');
+      const filters = { include: selected.filters?.include ?? [], exclude: selected.filters?.exclude ?? [], [pending.filter.field]: [] };
+      const result = await executor.execute(invocation(ctx), 'rss.update', { id: selected.id, revision: selected.revision, filters });
+      await showRss(ctx, panel.value.page, panel, rssNotice(ctx, result), selected.id); return;
+    }
     const input = { id: selected.id, revision: selected.revision,
-      ...(operation === 'rsssilent' ? { silent: !selected.silent } : operation === 'rsspause' ? { paused: !selected.paused } : {}) };
+      ...(operation === 'rsssilent' ? { silent: !selected.silent } : operation === 'rsspause' ? { paused: !selected.paused }
+        : operation === 'rssfilterclear' ? { filters: null } : {}) };
     const result = await executor.execute(invocation(ctx), operation === 'rssremove' ? 'rss.remove' : 'rss.update', input);
     await showRss(ctx, panel.value.page, panel, rssNotice(ctx, result, operation === 'rssremove' ? 'removed' : 'saved'), operation === 'rssremove' ? undefined : selected.id);
   }
 
   async function rssInput(ctx: Context): Promise<boolean> {
     const pending = sessions.get(sessionKey(ctx))?.rssInput;
-    if (!pending || !ctx.message?.text) return false;
-    if (ctx.message.reply_to_message && ctx.message.reply_to_message.message_id !== pending.messageId) return false;
-    sessions.delete(sessionKey(ctx));
+    if (!pending || !ctx.message?.text || pending.promptMessageId === undefined || !inputReply(ctx, pending.promptMessageId)) return false;
+    sessions.clearInput(sessionKey(ctx), 'rssInput', pending.panelId);
     let panel: CorePanel;
     try { panel = panels.get(pending.panelId, { ...binding(ctx), messageId: pending.messageId }); }
     catch { await send(ctx, translator(languageOf(ctx))('bot:expired'), closedKeyboard('r', ctx.from!.id, languageOf(ctx))); return true; }
     if (panel.value.kind !== 'rss' || panel.value.view !== 'input') return true;
+    if (pending.filter) {
+      const selected = panel.value.selected;
+      if (!selected || selected.id !== pending.filter.id || selected.revision !== pending.filter.revision) throw new AppError('CONFLICT');
+      const filters = { include: selected.filters?.include ?? [], exclude: selected.filters?.exclude ?? [],
+        [pending.filter.field]: ctx.message.text.split(/\r\n?|\n/).map(word => word.trim()).filter(Boolean) };
+      const result = await executor.execute(invocation(ctx), 'rss.update', { id: selected.id, revision: pending.filter.revision, filters });
+      await showRss(ctx, panel.value.page, panel, rssNotice(ctx, result), selected.id);
+      return true;
+    }
     const [url, ...title] = ctx.message.text.trim().split(/\s+/);
     const result = await executor.execute(invocation(ctx), 'rss.add', { url, ...(title.length ? { title: title.join(' ') } : {}) });
     await showRss(ctx, 0, panel, rssNotice(ctx, result, 'added'));
@@ -768,6 +848,14 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     if (operation === 'add' && parts.length >= 2) {
       const result = await executor.execute(invocation(ctx), 'rss.add', { url: parts[1], ...(parts.length > 2 ? { title: parts.slice(2).join(' ') } : {}) });
       await showRss(ctx, 0, undefined, rssNotice(ctx, result, 'added')); return;
+    }
+    if (operation === 'filter' && rssIdSchema.safeParse(parts[1]).success
+      && (parts.length === 2 || parts.length === 3 && parts[2] === 'clear')) {
+      if (parts.length === 2) { await showRss(ctx, 0, undefined, undefined, parts[1]); return; }
+      const current = await resultData(ctx, await executor.execute<RssSubscriptionView>(invocation(ctx, 'rss-filter-before'), 'rss.get', { id: parts[1] }));
+      if (!current) return;
+      const result = await executor.execute(invocation(ctx), 'rss.update', { id: current.id, revision: current.revision, filters: null });
+      await showRss(ctx, 0, undefined, rssNotice(ctx, result), current.id); return;
     }
     if (['remove', 'mute', 'pause'].includes(operation ?? '') && rssIdSchema.safeParse(parts[1]).success
       && (operation === 'remove' ? parts.length === 2 : parts.length === 3 && ['on', 'off'].includes(parts[2]!))) {
@@ -797,7 +885,6 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     if (input && !result) return;
     const currencies = directory ? await lookupData(ctx, await executor.execute<RateCurrencies>(invocation(ctx, 'rate-currencies'), 'rate.currencies', { page })) : undefined;
     if (directory && !currencies) return;
-    sessions.delete(sessionKey(ctx));
     const panel = current ?? await createPanel(ctx, { kind: 'rate', language, generation: 0, view: 'result', page: 0 });
     if (panel.value.kind !== 'rate') throw new AppError('FORBIDDEN');
     if (current) refreshGeneration(panel);
@@ -878,14 +965,15 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
   }
   async function weatherPrompt(ctx: Context, mode: 'current' | 'forecast', days: number, current?: CorePanel, notice?: string): Promise<void> {
     const language = languageOf(ctx); const t = translator(language);
-    sessions.delete(sessionKey(ctx));
+    sessions.clearInput(sessionKey(ctx), 'weatherInput');
     const panel = current ?? await createPanel(ctx, { kind: 'weather', language, generation: 0, view: 'input', mode, days, locations: [] });
     if (panel.value.kind !== 'weather') throw new AppError('FORBIDDEN');
     if (current) refreshGeneration(panel);
     Object.assign(panel.value, { language, view: 'input', mode, days, locations: [], result: undefined, defaultRevision: undefined });
     const text = `${t('bot:weather.title')}\n\n${notice ?? t('bot:weather.input')}\n\n${t('bot:weather.privacy')}`;
     await displayPanel(panel, { text, keyboard: new InlineKeyboard(), entities: commandEntities(text) }, supportedMessage(ctx)!.message_id);
-    if (panel.messageId !== undefined) sessions.set(sessionKey(ctx), { weatherInput: { panelId: panel.id, messageId: panel.messageId, mode, days } });
+    const promptMessageId = await inputPrompt(ctx, panel, text);
+    sessions.setInput(sessionKey(ctx), 'weatherInput', { panelId: panel.id, messageId: panel.messageId!, promptMessageId, mode, days });
   }
   async function showWeather(ctx: Context, input: WeatherSearchInput | { location: WeatherLocation }, mode: 'current' | 'forecast', days: number, current?: CorePanel, notice?: string): Promise<void> {
     const language = languageOf(ctx); const t = translator(language);
@@ -900,7 +988,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     }
     const result = location ? await lookupData(ctx, await executor.execute<WeatherResult>(invocation(ctx, 'weather-query'), 'weather.query', { location, mode, days })) : undefined;
     if (location && !result) return;
-    sessions.delete(sessionKey(ctx));
+    sessions.clearInput(sessionKey(ctx), 'weatherInput');
     const panel = current ?? await createPanel(ctx, { kind: 'weather', language, generation: 0, view: 'locations', mode, days, locations: [] });
     if (panel.value.kind !== 'weather') throw new AppError('FORBIDDEN');
     if (current) refreshGeneration(panel);
@@ -966,11 +1054,10 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
   }
   async function weatherInput(ctx: Context): Promise<boolean> {
     const waiting = sessions.get(sessionKey(ctx))?.weatherInput;
-    if (!waiting || (!ctx.message?.text && !ctx.message?.location)) return false;
-    if (ctx.message.reply_to_message && ctx.message.reply_to_message.message_id !== waiting.messageId) return false;
+    if (!waiting || (!ctx.message?.text && !ctx.message?.location) || waiting.promptMessageId === undefined || !inputReply(ctx, waiting.promptMessageId)) return false;
     let panel: CorePanel;
     try { panel = panels.get(waiting.panelId, { ...binding(ctx), messageId: waiting.messageId }); }
-    catch { sessions.delete(sessionKey(ctx)); return true; }
+    catch { sessions.clearInput(sessionKey(ctx), 'weatherInput', waiting.panelId); return true; }
     if (panel.value.kind !== 'weather' || panel.value.view !== 'input') return true;
     if (ctx.message.location) await showWeather(ctx, { latitude: ctx.message.location.latitude, longitude: ctx.message.location.longitude }, waiting.mode, waiting.days, panel);
     else {
@@ -1021,7 +1108,6 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     ...(!closed ? [t(info.kind === 'pack' ? 'bot:sticker.packLimit' : info.sourceKind === 'static' ? 'bot:sticker.hint' : 'bot:sticker.animationHint')] : []),
     ...(notice ? [notice] : [])].join('\n');
     const buttonRows: RichMessageButton[][] = [];
-    const buttonRowLabels: Record<number, RichText> = {};
     if (closed) buttonRows.push([reopenButton('k', panel.binding.userId, panel.value.language)]);
     else if (busy) buttonRows.push([{ text: t('bot:sticker.cancel'), callback_data: callbackData(panel, 'stcancel'), style: 'danger' }]);
     else if (!uncertain) {
@@ -1037,13 +1123,11 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
         return { text: label, callback_data: callbackData(panel, `stformat:${format}`) };
       });
       if (formats.length) {
-        const label = t('bot:sticker.format');
-        const marked = label.replace(/[:：]$/, '');
-        buttonRowLabels[buttonRows.length] = [{ type: 'marked', text: marked }, label.slice(marked.length)];
+        buttonRows.push([{ text: t('bot:sticker.format'), disabled: true }]);
         buttonRows.push(formats);
       }
     }
-    return { text, buttonRows, buttonRowLabels };
+    return { text, buttonRows };
   }
 
   async function renderSticker(panel: CorePanel, notice?: string, replyTo?: number): Promise<void> {
@@ -1145,11 +1229,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
   }
 
   function clearSubconvInput(key: string): void {
-    const data = sessions.get(key);
-    if (!data?.subconvInput) return;
-    delete data.subconvInput;
-    if (Object.keys(data).length) sessions.set(key, data);
-    else sessions.delete(key);
+    sessions.clearInput(key, 'subconvInput');
   }
 
   function subconvView(panel: CorePanel, notice?: string): PanelView {
@@ -1280,8 +1360,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     const pending = sessions.get(sessionKey(ctx))?.subconvInput;
     const message = ctx.update.message;
     const reply = message?.reply_to_message;
-    if (!pending || !message?.text || !reply || reply.message_id !== pending.promptMessageId
-      || reply.from?.id !== ctx.me.id || !reply.from.is_bot || reply.chat.id !== message.chat.id || messageTopicId(reply) !== messageTopicId(message)) return false;
+    if (!pending || !message?.text || !reply || !inputReply(ctx, pending.promptMessageId)) return false;
     if (message.chat.type !== 'private') return false;
     let panel: CorePanel;
     try { panel = panels.get(pending.panelId, { ...binding(ctx), messageId: pending.messageId }); }
@@ -1316,8 +1395,8 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
             reply_markup: { force_reply: true, input_field_placeholder: t(`bot:subconv.fields.${field}`).slice(0, 64) },
           }, signal));
         panels.get(panel.id, { ...binding(ctx), messageId: panel.messageId! });
-        sessions.set(sessionKey(ctx), { ...sessions.get(sessionKey(ctx)), subconvInput: { panelId: panel.id, messageId: panel.messageId!,
-          promptMessageId: prompt.message_id, field, revision: value.snapshot.revision, generation: value.generation } });
+        sessions.setInput(sessionKey(ctx), 'subconvInput', { panelId: panel.id, messageId: panel.messageId!,
+          promptMessageId: prompt.message_id, field, revision: value.snapshot.revision, generation: value.generation });
       } catch (error) {
         delete value.input; value.view = 'main'; refreshGeneration(panel);
         await bestEffort(() => displayPanel(panel, subconvView(panel)));
@@ -1374,6 +1453,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     }
     if (metadata.admin && !admin) { await sendError(ctx, 'FORBIDDEN'); return; }
     if (metadata.private && !privateChat) { await send(ctx, t('bot:privateOnly')); return; }
+    if (await relay.command(ctx, name, argument)) return;
     if (await ai.command(ctx, name, argument)) return;
     switch (name) {
       case 'start': {
@@ -1391,9 +1471,37 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
         return;
       }
       case 'commands': await showCommands(ctx); return;
-      case 'id':
-        await send(ctx, t('bot:id', { userId: ctx.from!.id, chatId: message.chat.id, threadId: messageTopicId(message) ?? t('bot:noThread') }));
+      case 'id': {
+        const reply = message.reply_to_message;
+        if (reply && reply.chat.id !== message.chat.id) throw new AppError('INVALID_INPUT');
+        const sender = reply?.sender_chat;
+        const user = sender ? undefined : reply ? reply.from : ctx.from;
+        const content: RichText[] = [{ type: 'marked', text: t(reply ? 'bot:idInfo.reply' : 'bot:idInfo.self') }];
+        const row = (label: string, value: RichText) => { content.push('\n', `${t(`bot:idInfo.${label}`)} `, value); };
+        const id = (label: string, value: number | undefined, missing = t('bot:idInfo.unavailable')) => {
+          if (value === undefined || !Number.isSafeInteger(value) || value === 0) { row(label, missing); return; }
+          const text = String(value);
+          row(label, [{ type: 'code', text }, ' ', { type: 'button', button: { text: t('bot:idInfo.copy'), copy_text: { text } } }]);
+        };
+        if (sender) {
+          row('name', plainValue(sender.type === 'private' ? [sender.first_name, sender.last_name].filter(Boolean).join(' ') : sender.title, 128));
+          row('type', t(sender.type === 'channel' ? 'bot:idInfo.channel' : 'bot:idInfo.group'));
+          row('username', 'username' in sender && sender.username ? `@${plainValue(sender.username, 64)}` : t('bot:idInfo.unavailable'));
+          id('senderChatId', sender.id);
+          content.push('\n', t('bot:idInfo.anonymous'));
+        } else if (user) {
+          row('name', plainValue([user.first_name, user.last_name].filter(Boolean).join(' '), 128));
+          row('type', t(user.is_bot ? 'bot:idInfo.bot' : 'bot:idInfo.user'));
+          row('username', user.username ? `@${plainValue(user.username, 64)}` : t('bot:idInfo.unavailable'));
+          id('userId', user.id);
+        } else content.push('\n', t('bot:idInfo.missing'));
+        id('chatId', message.chat.id);
+        id('threadId', messageTopicId(message), t('bot:noThread'));
+        await call(() => bot.api.sendRichMessage(message.chat.id, { blocks: [{ type: 'paragraph', text: content }], skip_entity_detection: true }, {
+          message_thread_id: messageTopicId(message), reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        }, signal));
         return;
+      }
       case 'modules': {
         const modules = await resultData(ctx, await executor.execute<ModuleMetadata[]>(invocation(ctx), 'modules.list', {}));
         if (modules) await send(ctx, modules.length ? [t('bot:modulesTitle', { count: modules.length }),
@@ -1410,7 +1518,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
           if (panel.value.kind === 'sticker') stickers.release(invocation(ctx), panel.value.info.source);
           return panel.value.kind !== 'approval';
         });
-        await Promise.all([closed, aiCancelled, ...(privateChat ? [executor.execute(invocation(ctx), 'sticker.cancel', {})] : [])]);
+        await Promise.all([closed, aiCancelled, relay.cancel(ctx), ...(privateChat ? [executor.execute(invocation(ctx), 'sticker.cancel', {})] : [])]);
         await send(ctx, t('bot:cancelled')); return;
       }
       case 'stats': {
@@ -1587,6 +1695,11 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     const work = (async () => {
       health.recordUpdate();
       if (await ai.stoppedGeneration(ctx)) return;
+      if (ctx.callbackQuery && sessionKey(ctx)) {
+        ai.suspendInput(ctx);
+        if (!relay.isCallback(ctx)) relay.suspend(ctx);
+      }
+      if (relay.isCallback(ctx)) { if (await relay.acknowledge(ctx)) await next(); return; }
       if (await ai.callback(ctx)) return;
       if (ctx.callbackQuery) {
         const parsed = panelCallback(ctx.callbackQuery.data ?? '');
@@ -1640,7 +1753,11 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       }
       if (stopped) return;
       throwIfAborted(signal);
-      await next();
+      // Notification-producing relay mutations hold the update lane; interrupt them before joining it.
+      const interruption = supportedMessage(ctx)?.chat.type === 'private' && commandOf(ctx, name => executor.resolveAlias(name))?.name === 'cancel'
+        && !ai.ownsAlbum(ctx) && !relay.ownsAlbum(ctx) ? bestEffort(() => relay.cancel(ctx)) : undefined;
+      // Join immediately to preserve update order, but never finish before interruption cleanup.
+      try { await next(); } finally { await interruption; }
     })();
     inFlight.add(work);
     try { await work; } finally { inFlight.delete(work); }
@@ -1670,25 +1787,54 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
         }
         return;
       }
-      if (ctx.callbackQuery) { await handleCallback(ctx); return; }
-      if (command) { await handleCommand(ctx, command.name, command.argument); return; }
+      if (ctx.callbackQuery) { if (relay.isCallback(ctx)) await relay.callback(ctx); else await handleCallback(ctx); return; }
+      for (const [key, expiry] of suppressedAlbums) if (expiry <= Date.now()) suppressedAlbums.delete(key);
+      const album = albumKey(ctx);
+      if (album && suppressedAlbums.has(album)) return;
+      if (message.external_reply || relay.ownsMessage(ctx)) { suppressAlbum(ctx); return; }
+      if (ai.ownsAlbum(ctx)) { if (!ai.closedAlbum(ctx)) await ai.input(ctx); return; }
+      if (relay.ownsAlbum(ctx)) { await relay.input(ctx); return; }
+      if (command) {
+        ai.suspendInput(ctx);
+        if (command.name !== 'contact') relay.suspend(ctx);
+        await handleCommand(ctx, command.name, command.argument); return;
+      }
       const content = message.text ?? message.caption;
-      if (content?.startsWith('/')) {
+      const literal = message.forward_origin || message.external_reply
+        || (message.entities ?? message.caption_entities)?.some(entity => entity.offset === 0 && ['code', 'pre'].includes(entity.type));
+      if (content?.startsWith('/') && !literal) {
+        ai.suspendInput(ctx);
+        relay.suspend(ctx);
         // Commands explicitly addressed to a different bot are never ours.
         if (/^\/[^\s@]+@[a-z0-9_]+/i.test(content)) return;
         await send(ctx, translator(languageOf(ctx))('bot:unknownCommand'));
-      } else if (await subconvInput(ctx)) return;
-      // A pending private conversion input must never fall through to another module's bare-text intake.
-      else if (sessions.get(sessionKey(ctx))?.subconvInput && !message.reply_to_message) return;
-      else if (await aliasInput(ctx)) return;
-      else if (await rssInput(ctx)) return;
-      else if (await weatherInput(ctx)) return;
-      else if (deps.ai && await ai.blockedReply(ctx)) return;
-      else if (message.chat.type === 'private' && (message.sticker || message.text && stickerSetName(message.text, false))) {
-        const session = sessions.get(sessionKey(ctx));
-        if (!session?.aliasInput && !session?.rssInput && !session?.weatherInput && !session?.subconvInput) await stickerCommand(ctx, message.sticker ? '' : message.text!);
+        return;
       }
-      else if (sessions.get(sessionKey(ctx))?.subconvInput) return;
+      const waiting = sessions.get(sessionKey(ctx));
+      const replyId = message.reply_to_message?.message_id;
+      const field = replyId === undefined ? undefined : (['aliasInput', 'rssInput', 'weatherInput', 'subconvInput'] as const)
+        .find(field => waiting?.[field]?.promptMessageId === replyId);
+      if (field) {
+        suppressAlbum(ctx);
+        const handled = await ({ aliasInput, rssInput, weatherInput, subconvInput }[field])(ctx);
+        if (!handled) await sendError(ctx, 'INVALID_INPUT');
+        return;
+      }
+      if (ai.ownsReply(ctx)) { await ai.input(ctx); return; }
+      // Unaddressed values stay with pending forms even when default relay routing was resumed.
+      if (waiting && !message.reply_to_message) { suppressAlbum(ctx); return; }
+      if (await relay.input(ctx)) return;
+      if (message.reply_to_message || message.external_reply) {
+        if (ai.ownsReply(ctx) || message.chat.type !== 'private' && !message.reply_to_message?.from?.is_bot
+          && !literal && mentionsBot(ctx)) await ai.input(ctx);
+        else { suppressAlbum(ctx); if (deps.ai) await ai.blockedReply(ctx); }
+        return;
+      }
+      // Unsupported attachments and unaddressed values stay with their forms, never a later consumer.
+      if (waiting) { suppressAlbum(ctx); return; }
+      if (message.chat.type === 'private' && (message.sticker || message.text && stickerSetName(message.text, false))) {
+        await stickerCommand(ctx, message.sticker ? '' : message.text!);
+      }
       else if (await ai.input(ctx)) return;
       else if (message.chat.type === 'private' && message.text && isWeatherIntent(message.text)) await weatherCommand(ctx, message.text);
       else if (message.chat.type === 'private' && message.text) await send(ctx, translator(languageOf(ctx))('bot:fallback'));
@@ -1721,10 +1867,11 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       }
     },
     async stop(): Promise<void> {
+      suppressedAlbums.clear();
       stopped = true;
       shutdown.abort();
       sessions.stop();
-      await ai.stop();
+      await Promise.all([ai.stop(), relay.stop()]);
       await Promise.allSettled([...inFlight]);
       await panels.stop();
     },

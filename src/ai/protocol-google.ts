@@ -25,6 +25,7 @@ export async function generate(context: ProtocolContext, request: GenerationRequ
   const body = { contents: records,
       ...(request.system ? { systemInstruction: { parts: [{ text: request.system }] } } : {}),
       ...(request.tools?.length ? { tools: [{ functionDeclarations: request.tools.map(tool => ({ name: tool.name, description: tool.description, parametersJsonSchema: tool.inputSchema })) }] } : {}),
+      ...(request.toolChoice ? { toolConfig: { functionCallingConfig: { mode: 'NONE' } } } : {}),
       generationConfig: { maxOutputTokens: request.maxOutputTokens ?? 4096, candidateCount: 1, responseModalities: modalities,
         ...(context.profile.audioVoice ? { speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: context.profile.audioVoice } } } } : {}) } };
   await enforceInputBudget(context, request, body, options);
@@ -69,7 +70,7 @@ export async function generate(context: ProtocolContext, request: GenerationRequ
       }
       if (candidate.finishReason !== undefined) {
         const finish = string(candidate.finishReason);
-        if (finish !== 'STOP') throw new AiProtocolError(finish === 'MAX_TOKENS' ? 'INCOMPLETE' : 'UNSUPPORTED');
+        if (finish !== 'STOP') throw new AiProtocolError(finish === 'MAX_TOKENS' ? 'OUTPUT_LIMIT' : 'UNSUPPORTED');
         completed = true;
       }
     },

@@ -22,6 +22,8 @@ export const commands = [
   { name: 'forecast', admin: false, private: false },
   { name: 'sticker', admin: false, private: true },
   { name: 'subconv', admin: false, private: true },
+  { name: 'contact', admin: false, private: true },
+  { name: 'relay', admin: true, private: true },
   { name: 'ai', admin: false, private: false },
   { name: 'chats', admin: false, private: true },
   { name: 'memory', admin: false, private: true },

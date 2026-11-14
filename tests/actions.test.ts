@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { emptyInputSchema, type ActionResult } from '../shared/schemas/index.js';
+import { confirmationSchema, emptyInputSchema, type ActionResult, type ConfirmationSubject } from '../shared/schemas/index.js';
+import { aiToolCatalogSchema, type AiToolCatalog } from '../shared/schemas/ai-admin.js';
 import { ActionExecutor, type ActionDefinition, type InvocationContext } from '../src/actions.js';
+import { registerAiActions } from '../src/ai/actions.js';
 import type { AiService } from '../src/ai/service.js';
 import { AppError } from '../src/errors.js';
 import { aliasMetadata } from '../src/modules/alias.js';
@@ -10,10 +12,15 @@ import { rateMetadata } from '../src/modules/rate.js';
 import { weatherMetadata } from '../src/modules/weather.js';
 import { stickerMetadata } from '../src/modules/sticker.js';
 import { subconvMetadata } from '../src/modules/subconv.js';
+import { relayMetadata } from '../src/modules/metadata.js';
+import { modules } from '../src/modules/index.js';
 import { coreFixture, invocation } from './support/core.js';
 
 const cleanups: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => {
+  try { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); }
+  finally { vi.useRealTimers(); }
+});
 async function fixture(options: Parameters<typeof coreFixture>[0] = {}) {
   const result = await coreFixture(options); cleanups.push(result.close); return result;
 }
@@ -40,9 +47,9 @@ describe('shared Action execution and trusted context', () => {
     const ai = data(await f.executor.executeTool(invocation(), 'core.info', {}));
     expect(http).toEqual(telegram);
     expect(ai).toEqual(telegram);
-    expect(ai).toEqual({ runtime: 'grammy', version: '0.1.0', moduleCount: 6, aiAvailable: true });
+    expect(ai).toEqual({ runtime: 'grammy', version: '0.1.0', moduleCount: modules.length, aiAvailable: true });
     expect(f.effects.describeGroup).not.toHaveBeenCalled();
-    expect(data(await f.executor.execute(invocation(), 'modules.list', {}))).toEqual([aliasMetadata, rssMetadata, rateMetadata, weatherMetadata, stickerMetadata, subconvMetadata]);
+    expect(data(await f.executor.execute(invocation(), 'modules.list', {}))).toEqual([aliasMetadata, rssMetadata, rateMetadata, weatherMetadata, stickerMetadata, subconvMetadata, relayMetadata]);
   });
 
   it('rejects unregistered/archived actions and AI sources without disabling human entry points', async () => {
@@ -178,6 +185,423 @@ describe('shared Action execution and trusted context', () => {
     expect(await f.executor.execute(invocation(), 'core.info', {})).toMatchObject({ error: { code: 'CAPACITY' } });
     token(await f.executor.prepare(invocation(), 'groups.authorize', { chatId: -100, revision: 0 }));
     expect(await f.executor.prepare(invocation(), 'groups.authorize', { chatId: -200, revision: 0 })).toMatchObject({ error: { code: 'CAPACITY' } });
+  });
+});
+
+describe('authoritative AI tool catalog', () => {
+  it('requires a trusted HTTP private configured-superadmin context for both entry points', async () => {
+    const f = await fixture({ services: { aiEnabled: true } });
+    registerAiActions(f.executor, {} as AiService);
+    const admin = invocation({ source: 'http' });
+    const catalog = f.executor.listAiToolCatalog(admin);
+    expect(data(await f.executor.execute<AiToolCatalog>(admin, 'ai.admin.tools', {}))).toEqual(catalog);
+    for (const context of [
+      undefined, { ...admin }, invocation(), invocation({ source: 'ai' }),
+      invocation({ source: 'http', actorId: 3, chat: { id: 3, type: 'private' } }),
+      invocation({ source: 'http', chat: { id: -100, type: 'group' } }),
+      invocation({ source: 'http', chat: { id: -100, type: 'supergroup', threadId: 7 } }),
+    ]) {
+      expect(() => f.executor.listAiToolCatalog(context as InvocationContext)).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+      expect(await f.executor.execute(context as InvocationContext, 'ai.admin.tools', {}))
+        .toMatchObject({ status: 'rejected', error: { code: 'FORBIDDEN' } });
+    }
+    for (const input of [{ actorId: 1 }, { source: 'http' }, { scope: 'private' }, { tools: [] }, { confirmed: true }]) {
+      expect(await f.executor.execute(admin, 'ai.admin.tools', input)).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+    }
+    expect(f.executor['registry'].get('ai.admin.tools')).toMatchObject({
+      sources: ['http'], scopes: ['private'], permission: 'superadmin', aiVisible: false, effect: 'read',
+    });
+    vi.spyOn(f.access, 'isAdmin').mockReturnValue(false);
+    expect(() => f.executor.listAiToolCatalog(admin)).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }));
+  });
+
+  it('lists only explicit AI flags without evaluating grants, allowlisting, callbacks or handlers', async () => {
+    const groupAdmin = vi.fn(async () => { throw new Error('Unexpected Telegram lookup'); });
+    const f = await fixture({ services: { aiEnabled: false, groupAdmin } });
+    const available = vi.fn(() => false);
+    const authorize = vi.fn(() => { throw new AppError('FORBIDDEN'); });
+    const approvalExempt = vi.fn(() => true);
+    f.services.aiPolicy = { available, authorize, approvalExempt };
+    const discover = vi.spyOn(f.executor, 'discoverTools');
+    const isAllowed = vi.spyOn(f.access, 'isAllowed');
+    const execute = vi.fn(() => true);
+    const confirmation = vi.fn(() => { throw new Error('Unexpected confirmation callback'); });
+    const confirmationSubject = vi.fn(() => { throw new Error('Unexpected subject callback'); });
+    const target = vi.fn(() => { throw new Error('Unexpected target callback'); });
+    const modelOutput = vi.fn(() => { throw new Error('Unexpected model projection'); });
+    const definition = { ...fixturePolicy, input: emptyInputSchema.describe('PRIVATE_SCHEMA_SENTINEL'),
+      output: z.boolean(), aiDescription: 'PRIVATE_DESCRIPTION_SENTINEL', execute };
+    f.executor.register({ ...definition, id: 'fixture.group', scopes: ['group'], permission: 'group_admin',
+      confirmation, confirmationSubject, target, aiOutput: z.boolean(), modelOutput });
+    f.executor.register({ ...definition, id: 'fixture.hidden', aiVisible: false });
+    f.executor.register({ ...definition, id: 'fixture.implicit', aiVisible: undefined as unknown as boolean });
+    f.executor.register({ ...definition, id: 'fixture.human', sources: ['telegram', 'http'] });
+    const handlers = [...f.executor['registry'].values()].map(action => vi.spyOn(action, 'execute'));
+    const admin = invocation({ source: 'http' });
+    const catalog = f.executor.listAiToolCatalog(admin);
+    const ids = catalog.items.map(item => item.id);
+    expect(ids).toEqual([...ids].sort());
+    expect(catalog.items).toContainEqual({ id: 'fixture.group', group: 'other', effect: 'read',
+      scopes: ['group'], permission: 'group_admin', approval: 'conditional' });
+    expect(catalog.items).toContainEqual({ id: 'alias.add', group: 'alias', effect: 'permission',
+      scopes: ['private'], permission: 'superadmin', approval: 'required' });
+    for (const id of ['fixture.hidden', 'fixture.implicit', 'fixture.human', 'core.status', 'core.settings.get',
+      'groups.authorize', 'preferences.get', 'subconv.settings.set']) expect(ids).not.toContain(id);
+    expect(JSON.stringify(catalog)).not.toContain('PRIVATE_');
+    expect(f.access.count()).toBe(0);
+    expect(f.aliases.snapshot().revision).toBe(0);
+    for (const callback of [available, authorize, approvalExempt, discover, isAllowed, groupAdmin, execute, confirmation, confirmationSubject, target,
+      modelOutput, ...handlers, ...Object.values(f.effects)]) expect(callback).not.toHaveBeenCalled();
+    const groupTool = catalog.items.find(item => item.id === 'fixture.group')!;
+    groupTool.scopes.push('private');
+    expect(f.executor.listAiToolCatalog(admin).items.find(item => item.id === 'fixture.group')!.scopes).toEqual(['group']);
+  });
+
+  it('reads late registrations and assigns canonical groups and static approval hints', async () => {
+    const f = await fixture();
+    const admin = invocation({ source: 'http' });
+    const before = f.executor.listAiToolCatalog(admin);
+    const groups = {
+      'core.future': 'core', 'modules.future': 'core', 'alias.future': 'alias', 'rss.future': 'rss',
+      'rate.future': 'rate', 'weather.future': 'weather', 'sticker.future': 'sticker', 'subconv.future': 'subconv',
+      'ai.search': 'search', 'ai.fetch': 'search', 'ai.memory.future': 'memory', 'ai.automations.future': 'automation',
+      'ai.automation.future': 'automation', 'ai.jobs.future': 'automation', 'ai.skills.future': 'skills',
+      'ai.mcp.stdio.future': 'local', 'ai.sandbox.local.future': 'local', 'ai.mcp.future': 'mcp', 'ai.sandbox.future': 'sandbox',
+      'ai.future': 'ai', 'ai.search.future': 'ai', 'fixture.future': 'other', core: 'other', ai: 'other',
+    };
+    for (const id of Object.keys(groups).reverse()) {
+      f.executor.register({ ...fixturePolicy, id, input: emptyInputSchema, output: z.boolean(), execute: () => true });
+    }
+    const confirmation = vi.fn(() => { throw new Error('Must not run callback'); });
+    for (const effect of ['read', 'personal_write', 'write', 'destructive', 'permission'] as const) {
+      for (const callback of [false, true]) f.executor.register({ ...fixturePolicy, id: `fixture.${effect}.${callback}`, effect,
+        input: emptyInputSchema, output: z.boolean(), execute: () => true, ...(callback ? { confirmation } : {}) });
+    }
+    const catalog = f.executor.listAiToolCatalog(admin);
+    expect(catalog.items).toHaveLength(before.items.length + Object.keys(groups).length + 10);
+    expect(catalog.items.map(item => item.id)).toEqual(catalog.items.map(item => item.id).sort());
+    for (const [id, group] of Object.entries(groups)) expect(catalog.items.find(item => item.id === id)?.group).toBe(group);
+    for (const item of catalog.items.filter(item => item.id.startsWith('fixture.') && item.id !== 'fixture.future')) {
+      expect(item.approval).toBe(['write', 'destructive', 'permission'].includes(item.effect) ? 'required'
+        : item.effect === 'personal_write' || item.id.endsWith('.true') ? 'conditional' : 'none');
+    }
+    expect(confirmation).not.toHaveBeenCalled();
+  });
+
+  it('has a strict, unique, bounded serializable DTO with no schema or private metadata fields', () => {
+    const item = { id: 'core.info', group: 'core', effect: 'read', scopes: ['private', 'group'], permission: 'any', approval: 'none' };
+    expect(aiToolCatalogSchema.parse({ items: [item] })).toEqual({ items: [item] });
+    const budget = Array.from({ length: 256 }, (_, index) => ({ ...item, id: `tool.${index}`.padEnd(64, 'x'),
+      group: 'g'.repeat(32), effect: 'personal_write', permission: 'chat_manager', approval: 'conditional' }));
+    expect(aiToolCatalogSchema.safeParse({ items: budget }).success).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify({ items: budget }))).toBeLessThan(65_536);
+    for (const invalid of [
+      {}, { items: [item], settings: {} }, { items: [item, item] }, { items: [...budget, { ...item, id: 'tool.overflow' }] },
+      ...[{ id: 'x' }, { id: 'x'.repeat(65) }, { id: 'Bad.Id' }, { id: 'bad/id' }, { id: 'bad.\u4e2d' },
+        { group: '' }, { group: 'g'.repeat(33) }, { group: 'bad group' }, { effect: 'unknown' }, { permission: 'admin' },
+        { approval: 'always' }, { scopes: [] }, { scopes: ['private', 'private'] }, { scopes: ['supergroup'] },
+        { scopes: ['private', 'group', 'private'] }, { scopes: 'private' }, { description: 'private' },
+        { inputSchema: {} }, { outputSchema: {} }, { credentialRef: 'private' }, { metadata: {} },
+      ].map(change => ({ items: [{ ...item, ...change }] })),
+    ]) expect(aiToolCatalogSchema.safeParse(invalid).success).toBe(false);
+    expect(z.toJSONSchema(aiToolCatalogSchema, { target: 'draft-7' })).toMatchObject({
+      type: 'object', additionalProperties: false, properties: { items: { maxItems: 256, items: { additionalProperties: false } } },
+    });
+  });
+
+  it('fails closed on invalid registry metadata, duplicate IDs or catalog capacity overflow', async () => {
+    const f = await fixture();
+    const admin = invocation({ source: 'http' });
+    const definition: ActionDefinition<Record<string, never>, boolean> = { ...fixturePolicy, id: 'fixture.mutable',
+      input: emptyInputSchema, output: z.boolean(), execute: () => true };
+    f.executor.register(definition);
+    expect(() => f.executor.register(definition)).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+    definition.id = 'core.info';
+    expect(() => f.executor.listAiToolCatalog(admin)).toThrow(expect.objectContaining({ code: 'INVALID_OUTPUT' }));
+    definition.id = 'fixture.mutable'; definition.scopes = [];
+    expect(() => f.executor.listAiToolCatalog(admin)).toThrow(expect.objectContaining({ code: 'INVALID_OUTPUT' }));
+    definition.scopes = ['private'];
+    const count = f.executor.listAiToolCatalog(admin).items.length;
+    for (let index = count; index < 256; index++) f.executor.register({ ...definition, id: `fixture.capacity.${index}` });
+    expect(f.executor.listAiToolCatalog(admin).items).toHaveLength(256);
+    f.executor.register({ ...definition, id: 'fixture.overflow' });
+    expect(() => f.executor.listAiToolCatalog(admin)).toThrow(expect.objectContaining({ code: 'CAPACITY' }));
+  });
+});
+
+describe('server-owned confirmation subjects', () => {
+  it('keeps old confirmations valid and accepts only strict bounded subject metadata', () => {
+    const confirmation = { token: 'a'.repeat(40), actionId: 'rss.remove', target: 'user:1', expiresAt: new Date().toISOString() };
+    expect(confirmationSchema.parse(confirmation)).toEqual(confirmation);
+    const subject = { kind: 'rss', id: 'abcdef123456', title: '' };
+    expect(confirmationSchema.parse({ ...confirmation, subject })).toEqual({ ...confirmation, subject });
+    for (const invalid of [null, {}, { ...subject, kind: 'user' }, { ...subject, id: 'ABCDEF123456' },
+      { ...subject, id: 'abcdef12345' }, { ...subject, title: 'x'.repeat(129) }, { ...subject, url: 'https://private.example/' }]) {
+      expect(confirmationSchema.safeParse({ ...confirmation, subject: invalid }).success).toBe(false);
+    }
+  });
+
+  it('detaches callback metadata, returned approvals, replay receipts and normalized pending inputs', async () => {
+    const f = await fixture();
+    const subject: ConfirmationSubject = { kind: 'rss', id: 'abcdef123456', title: 'Current title' };
+    const input = { values: ['  normalized  '] };
+    const execute = vi.fn((value: typeof input) => value);
+    const confirmationSubject = vi.fn(() => subject);
+    f.executor.register({ ...fixturePolicy, id: 'fixture.subject', effect: 'write',
+      input: z.strictObject({ values: z.array(z.string().trim()) }), output: z.strictObject({ values: z.array(z.string()) }),
+      confirmationSubject, execute });
+    const context = invocation();
+    const result = await f.executor.execute(context, 'fixture.subject', input);
+    const approval = token(result);
+    if (result.status !== 'pending_confirmation') throw new Error('missing approval');
+    const expected = structuredClone(result.confirmation);
+    input.values[0] = 'Changed caller input'; subject.title = 'Changed callback object';
+    result.confirmation.subject!.title = 'Changed receipt';
+    const pending = f.executor.pending(context, approval);
+    expect(pending).toEqual(expected);
+    pending.subject!.id = '000000000000';
+    const details = f.executor.pendingDetails(context, approval);
+    expect(details).toEqual({ confirmation: expected, input: { values: ['normalized'] } });
+    details.confirmation.subject!.title = 'Changed details';
+    (details.input as typeof input).values.push('Changed pending input');
+    const replay = await f.executor.execute(context, 'fixture.subject', { values: ['normalized'] });
+    expect(replay).toMatchObject({ status: 'pending_confirmation', confirmation: expected });
+    if (replay.status !== 'pending_confirmation') throw new Error('missing replay');
+    replay.confirmation.subject!.title = 'Changed replay';
+    expect(await f.executor.execute(context, 'fixture.subject', { values: ['normalized'] }))
+      .toMatchObject({ status: 'pending_confirmation', confirmation: expected });
+    expect(f.executor.pendingDetails(context, approval)).toEqual({ confirmation: expected, input: { values: ['normalized'] } });
+    expect(confirmationSubject).toHaveBeenCalledOnce();
+    expect(await f.executor.confirm(invocation(), approval)).toMatchObject({ status: 'succeeded', data: { values: ['normalized'] } });
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('rejects invalid or asynchronous callback output before retaining an approval', async () => {
+    const f = await fixture();
+    const valid = { kind: 'rss', id: 'abcdef123456', title: 'Current title' };
+    for (const [index, subject] of [undefined, null, { ...valid, title: 'x'.repeat(129) },
+      { ...valid, url: 'https://private.example/' }, Promise.resolve(valid)].entries()) {
+      f.executor.register({ ...fixturePolicy, id: `fixture.bad_subject.${index}`, effect: 'write', input: emptyInputSchema,
+        output: z.boolean(), execute: () => true, confirmationSubject: () => subject as ConfirmationSubject });
+      expect(await f.executor.prepare(invocation(), `fixture.bad_subject.${index}`, {}))
+        .toMatchObject({ status: 'rejected', error: { code: 'INVALID_OUTPUT' } });
+    }
+    expect(f.executor['approvals'].size).toBe(0); expect(f.executor['approvalBytes']).toBe(0);
+  });
+
+  it('counts subject metadata in the retained approval byte budget and reclaims it on confirmation', async () => {
+    const f = await fixture();
+    const input = { payload: 'x'.repeat(256_000) };
+    f.executor.register({ ...fixturePolicy, id: 'fixture.subject_budget', input: z.strictObject({ payload: z.string() }),
+      output: z.boolean(), execute: () => true, confirmationSubject: () => ({ kind: 'rss', id: 'abcdef123456', title: 'x'.repeat(128) }) });
+    const result = await f.executor.prepare(invocation(), 'fixture.subject_budget', input);
+    const approval = token(result);
+    if (result.status !== 'pending_confirmation') throw new Error('missing approval');
+    const bytes = Buffer.byteLength(JSON.stringify(input)) + Buffer.byteLength(JSON.stringify(result.confirmation)) + 1024;
+    expect(f.executor['approvalBytes']).toBe(bytes);
+    const count = Math.floor(1024 * 1024 / bytes);
+    for (let index = 1; index < count; index++) token(await f.executor.prepare(invocation(), 'fixture.subject_budget', input));
+    expect(await f.executor.prepare(invocation(), 'fixture.subject_budget', input)).toMatchObject({ error: { code: 'CAPACITY' } });
+    expect(f.executor['approvalBytes']).toBe(count * bytes);
+    expect(await f.executor.confirm(invocation(), approval)).toMatchObject({ status: 'succeeded' });
+    expect(f.executor['approvalBytes']).toBe((count - 1) * bytes);
+    token(await f.executor.prepare(invocation(), 'fixture.subject_budget', input));
+  });
+});
+
+describe('idle Action cache reclamation', () => {
+  it('releases expired DTOs and approval inputs at their own TTLs without later requests', async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    expect(vi.getTimerCount()).toBe(0);
+    const input = { payload: 'x'.repeat(65_536) };
+    const execute = vi.fn((value: typeof input) => value);
+    f.executor.register({ ...fixturePolicy, id: 'fixture.idle', input: z.strictObject({ payload: z.string() }),
+      output: z.strictObject({ payload: z.string() }), execute });
+    const context = invocation();
+    expect(await f.executor.execute(context, 'fixture.idle', input)).toMatchObject({ status: 'succeeded', data: input });
+    const retainedBytes = f.executor['retainedBytes'];
+    expect(retainedBytes).toBeGreaterThan(65_536);
+    expect(vi.getTimerCount()).toBe(1);
+    expect(f.executor['expiryTimer']?.hasRef()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(300_000);
+    token(await f.executor.prepare(invocation(), 'fixture.idle', input));
+    const approvalBytes = f.executor['approvalBytes'];
+    expect(approvalBytes).toBeGreaterThan(65_536);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(299_999);
+    expect(await f.executor.execute(context, 'fixture.idle', input)).toMatchObject({ status: 'succeeded', replayed: true, data: input });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(f.executor['retainedBytes']).toBe(retainedBytes);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.executor['executions'].size).toBe(0);
+    expect(f.executor['retainedBytes']).toBe(0);
+    expect(f.executor['approvals'].size).toBe(1);
+    expect(f.executor['approvalBytes']).toBe(approvalBytes);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(299_999);
+    expect(f.executor['approvals'].size).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.executor['approvals'].size).toBe(0);
+    expect(f.executor['approvalBytes']).toBe(0);
+    expect(f.executor['expiryTimer']).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('preserves pending receipt replay and one-time confirmation just before expiry', async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    const execute = vi.fn(() => true);
+    f.executor.register({ ...fixturePolicy, id: 'fixture.idle_approval', input: emptyInputSchema, output: z.boolean(), effect: 'write', execute });
+    const context = invocation();
+    const result = await f.executor.execute(context, 'fixture.idle_approval', {});
+    const approval = token(result);
+    const approvalBytes = f.executor['approvalBytes'];
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(599_999);
+    expect(await f.executor.execute(context, 'fixture.idle_approval', {})).toEqual(result);
+    expect(f.executor['approvalBytes']).toBe(approvalBytes);
+    expect(await f.executor.confirm(invocation(), approval)).toMatchObject({ status: 'succeeded' });
+    expect(f.executor['approvals'].size).toBe(0);
+    expect(f.executor['approvalBytes']).toBe(0);
+    expect(f.executor['executions'].size).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.executor['executions'].size).toBe(0);
+    expect(f.executor['retainedBytes']).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(await f.executor.confirm(invocation(), approval)).toMatchObject({ error: { code: 'CONFIRMATION_EXPIRED' } });
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it.each([0, -10_000])('rechecks an independently frozen or rewound injected clock (shift: %s)', async shift => {
+    vi.useFakeTimers();
+    let now = 20_000;
+    const f = await fixture({ services: { now: () => now } });
+    await f.executor.execute(invocation(), 'core.info', {});
+    token(await f.executor.prepare(invocation(), 'core.info', {}));
+    const retainedBytes = f.executor['retainedBytes'];
+    const approvalBytes = f.executor['approvalBytes'];
+    now += shift;
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(f.executor['executions'].size).toBe(1);
+    expect(f.executor['approvals'].size).toBe(1);
+    expect(f.executor['retainedBytes']).toBe(retainedBytes);
+    expect(f.executor['approvalBytes']).toBe(approvalBytes);
+    expect(f.executor['expiryTimer']?.hasRef()).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+
+    now = 619_999;
+    await vi.advanceTimersByTimeAsync(600_000 - shift);
+    expect(f.executor['executions'].size).toBe(1);
+    expect(f.executor['approvals'].size).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+    now++;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.executor['executions'].size).toBe(0);
+    expect(f.executor['approvals'].size).toBe(0);
+    expect(f.executor['retainedBytes']).toBe(0);
+    expect(f.executor['approvalBytes']).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains active identities through timeout and cleanup, then starts the full replay TTL', async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const execute = vi.fn(async () => { entered.resolve(); await finish.promise; return true; });
+    f.executor.register({ ...fixturePolicy, id: 'fixture.idle_active', input: emptyInputSchema, output: z.boolean(), effect: 'personal_write', execute });
+    const context = invocation();
+    let settled = false;
+    const operation = f.executor.execute(context, 'fixture.idle_active', {}).then(result => { settled = true; return result; });
+    try {
+      await entered.promise;
+      const reservedBytes = f.executor['retainedBytes'];
+      expect(f.executor['expiryTimer']).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(1); // Only the running Action deadline.
+      await f.executor.execute(invocation(), 'core.info', {});
+      token(await f.executor.prepare(invocation(), 'core.info', {}));
+      expect(vi.getTimerCount()).toBe(2);
+      await vi.advanceTimersByTimeAsync(600_001);
+      expect(settled).toBe(false);
+      expect(f.executor['executions'].size).toBe(1);
+      expect([...f.executor['executions'].values()][0]?.active).toBe(true);
+      expect(f.executor['retainedBytes']).toBe(reservedBytes);
+      expect(f.executor['approvals'].size).toBe(0);
+      expect(f.executor['approvalBytes']).toBe(0);
+      expect(f.executor['runningTasks'].size).toBe(1);
+      expect(f.executor['expiryTimer']).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+
+      const duplicate = f.executor.execute(context, 'fixture.idle_active', {});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      expect(execute).toHaveBeenCalledOnce();
+      finish.resolve();
+      const result = await operation;
+      expect(result).toMatchObject({ status: 'failed', error: { code: 'OUTCOME_UNKNOWN' } });
+      expect(await duplicate).toEqual(result);
+      expect([...f.executor['executions'].values()][0]?.active).toBe(false);
+      expect(f.executor['retainedBytes']).toBeLessThan(reservedBytes);
+      expect(f.executor['runningTasks'].size).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(599_999);
+      expect(f.executor['executions'].size).toBe(1);
+      expect(await f.executor.execute(context, 'fixture.idle_active', {})).toEqual(result);
+      expect(execute).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.executor['executions'].size).toBe(0);
+      expect(f.executor['retainedBytes']).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { finish.resolve(); }
+  });
+
+  it.each(['execute', 'confirm'] as const)('clears expiry scheduling on close without preempting awaited %s cleanup', async method => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>();
+    const aborted = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    f.executor.register({ ...fixturePolicy, id: 'fixture.idle_close', input: emptyInputSchema, output: z.boolean(), effect: 'personal_write',
+      execute: async (_input, context) => {
+        context.signal.addEventListener('abort', () => aborted.resolve(), { once: true });
+        entered.resolve(); await finish.promise; return true;
+      } });
+    const operation = method === 'execute' ? f.executor.execute(invocation(), 'fixture.idle_close', {})
+      : f.executor.confirm(invocation(), token(await f.executor.prepare(invocation(), 'fixture.idle_close', {})));
+    try {
+      await entered.promise;
+      expect(f.executor['approvals'].size).toBe(0);
+      expect(f.executor['approvalBytes']).toBe(0);
+      expect(f.executor['expiryTimer']).toBeUndefined();
+      await f.executor.execute(invocation(), 'core.info', {});
+      token(await f.executor.prepare(invocation(), 'core.info', {}));
+      expect(vi.getTimerCount()).toBe(2);
+      const retainedBytes = f.executor['retainedBytes'];
+      let closed = false;
+      const closing = f.executor.close().then(() => { closed = true; });
+      await aborted.promise;
+      expect(f.executor['expiryTimer']).toBeUndefined();
+      expect(f.executor['approvals'].size).toBe(0);
+      expect(f.executor['approvalBytes']).toBe(0);
+      await vi.advanceTimersByTimeAsync(600_001);
+      expect(closed).toBe(false);
+      expect(f.executor['runningTasks'].size).toBe(1);
+      expect(f.executor['retainedBytes']).toBe(retainedBytes);
+      expect(vi.getTimerCount()).toBe(0);
+      finish.resolve();
+      await closing;
+      expect(await operation).toMatchObject({ error: { code: 'OUTCOME_UNKNOWN' } });
+      expect(f.executor['runningTasks'].size).toBe(0);
+      expect(f.executor['executions'].size).toBe(0);
+      expect(f.executor['retainedBytes']).toBe(0);
+      expect(f.executor['expiryTimer']).toBeUndefined();
+      expect(await f.executor.execute(invocation(), 'core.info', {})).toMatchObject({ error: { code: 'CANCELLED' } });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { finish.resolve(); }
   });
 });
 

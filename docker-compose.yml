@@ -6,9 +6,6 @@ services:
     init: true
     restart: unless-stopped
     stop_grace_period: 20s
-    cpus: 1
-    mem_limit: 256m
-    memswap_limit: 256m
     pids_limit: 64
     read_only: true
     security_opt:

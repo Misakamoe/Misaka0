@@ -5,7 +5,7 @@ import { enforceInputBudget } from './protocol-budget.js';
 
 function content(part: PreparedContent, assistant: boolean, chat: boolean, context: ProtocolContext): Record<string, unknown> {
   if (part.type === 'text') return { type: chat ? 'text' : assistant ? 'output_text' : 'input_text', text: part.text };
-  if (assistant || chat) throw new AiProtocolError('UNSUPPORTED', undefined, false);
+  if (assistant) throw new AiProtocolError('UNSUPPORTED', undefined, false);
   const reference = context.media.get(part);
   if (!reference) throw new AiProtocolError('UNSUPPORTED', undefined, false);
   return reference;
@@ -27,9 +27,12 @@ export async function generate(context: ProtocolContext, request: GenerationRequ
   if (chat) return generateChat(context, request, options, output, records, tools);
   let completed = false; let final: Record<string, unknown>[] = [];
   const argumentSizes = new Map<number, number>(); const started = new Set<number>();
-  const body = { model: context.profile.model, input: records, ...(request.system ? { instructions: request.system } : {}), tools,
-    stream: true, store: false, include: ['reasoning.encrypted_content'], truncation: 'disabled', max_output_tokens: request.maxOutputTokens ?? 4096 };
-  await enforceInputBudget(context, request, body, options);
+  const wire = context.files.some(ref => ref.storage === 'inline')
+    ? (await import('./protocol-files.js')).materializeInlineImages(context, records) : records;
+  const body = { model: context.profile.model, input: wire, ...(request.system ? { instructions: request.system } : {}), tools,
+    stream: true, store: false, include: ['reasoning.encrypted_content'], truncation: 'disabled', max_output_tokens: request.maxOutputTokens ?? 4096,
+    ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}) };
+  await enforceInputBudget(context, request, body, options, { ...body, input: records });
   options.signal.throwIfAborted(); context.inferenceStarted = true;
   await context.transport.post({ origin: context.profile.origin, path: `${context.profile.basePath}/responses`, headers: { authorization: `Bearer ${context.profile.apiKey}` },
     body }, {
@@ -37,7 +40,11 @@ export async function generate(context: ProtocolContext, request: GenerationRequ
       if (completed) throw new AiProtocolError('INVALID_RESPONSE');
       const data = object(parseJson(event.data)); const type = string(data.type);
       if (type === 'error' || type === 'response.failed') throw new AiProtocolError('NETWORK');
-      if (type === 'response.incomplete') throw new AiProtocolError('INCOMPLETE');
+      if (type === 'response.incomplete') {
+        const response = data.response === undefined ? {} : object(data.response);
+        const details = response.incomplete_details === undefined ? {} : object(response.incomplete_details);
+        throw new AiProtocolError(details.reason === 'max_output_tokens' ? 'OUTPUT_LIMIT' : 'INCOMPLETE');
+      }
       if (type === 'response.output_text.delta' || type === 'response.refusal.delta') { await output.append(data.delta); return; }
       if (type === 'response.function_call_arguments.delta') {
         const key = index(data.output_index); const size = (argumentSizes.get(key) ?? 0) + Buffer.byteLength(string(data.delta));
@@ -100,8 +107,11 @@ async function generateChat(context: ProtocolContext, request: GenerationRequest
   records: Record<string, unknown>[], tools: Record<string, unknown>[]): Promise<GenerationResult> {
   let done = false; let finish = ''; let reasoning = ''; let reasoningBytes = 0;
   const calls = new Map<number, { id: string; name: string; arguments: string; bytes: number }>();
-  const body = { model: context.profile.model, messages: records, tools, stream: true, stream_options: { include_usage: true }, [context.profile.chatTokenLimit ?? 'max_tokens']: request.maxOutputTokens ?? 4096 };
-  await enforceInputBudget(context, request, body, options);
+  const wire = context.files.some(ref => ref.storage === 'inline')
+    ? (await import('./protocol-files.js')).materializeInlineImages(context, records) : records;
+  const body = { model: context.profile.model, messages: wire, tools, stream: true, stream_options: { include_usage: true },
+    [context.profile.chatTokenLimit ?? 'max_tokens']: request.maxOutputTokens ?? 4096, ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}) };
+  await enforceInputBudget(context, request, body, options, { ...body, messages: records });
   options.signal.throwIfAborted(); context.inferenceStarted = true;
   await context.transport.post({ origin: context.profile.origin, path: `${context.profile.basePath}/chat/completions`, headers: { authorization: `Bearer ${context.profile.apiKey}` },
     body }, {
@@ -146,7 +156,7 @@ async function generateChat(context: ProtocolContext, request: GenerationRequest
       }
       if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
         finish = string(choice.finish_reason);
-        if (!['stop', 'tool_calls'].includes(finish)) throw new AiProtocolError(finish === 'length' ? 'INCOMPLETE' : 'UNSUPPORTED');
+        if (!['stop', 'tool_calls'].includes(finish)) throw new AiProtocolError(finish === 'length' ? 'OUTPUT_LIMIT' : 'UNSUPPORTED');
       }
     },
   });

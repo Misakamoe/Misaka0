@@ -16,3 +16,15 @@ export const aiAdminSnapshotSchema = z.strictObject({
 });
 export type AiAdminSnapshot = z.infer<typeof aiAdminSnapshotSchema>;
 export const aiAdminSecretUpdateSchema = z.strictObject({ revision: z.number().int().nonnegative(), change: aiCredentialChangeSchema });
+
+export const aiToolCatalogSchema = z.strictObject({
+  items: z.array(z.strictObject({
+    id: z.string().min(2).max(64).regex(/^[a-z][a-z0-9_.]{1,63}$/),
+    group: z.string().min(1).max(32).regex(/^[a-z][a-z0-9_]*$/),
+    effect: z.enum(['read', 'personal_write', 'write', 'destructive', 'permission']),
+    scopes: z.array(z.enum(['private', 'group'])).min(1).max(2).refine(values => new Set(values).size === values.length),
+    permission: z.enum(['any', 'self', 'superadmin', 'group_admin', 'chat_manager']),
+    approval: z.enum(['none', 'required', 'conditional']),
+  })).max(256).refine(items => new Set(items.map(item => item.id)).size === items.length),
+});
+export type AiToolCatalog = z.infer<typeof aiToolCatalogSchema>;

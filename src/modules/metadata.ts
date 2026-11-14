@@ -18,3 +18,6 @@ export const stickerMetadata: ModuleMetadata = {
 export const subconvMetadata: ModuleMetadata = {
   id: 'subconv', nameKey: 'web:subconv.name', descriptionKey: 'web:subconv.description', schema_version: 1, configurable: false,
 };
+export const relayMetadata: ModuleMetadata = {
+  id: 'relay', nameKey: 'web:modules.relayName', descriptionKey: 'web:modules.relayDescription', schema_version: 1, configurable: false,
+};

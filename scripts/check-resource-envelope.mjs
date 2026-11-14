@@ -490,6 +490,7 @@ async function aiScenarios(app, directory, driver, createInvocation, checkpoint)
     approval: async (target, confirmation) => { assert.ok(approvals.size < 32); approvals.set(target.runId, confirmation.token); },
     completed: async (_target, _text, signal) => { signal.throwIfAborted(); deliveries.completed++; return 10000 + deliveries.completed; },
     failed: async () => { deliveries.failures++; },
+    retire: async () => {},
     file: async (target, file, signal) => {
       deliveries.files++; signal.throwIfAborted();
       if (fileHook) return fileHook(target, file, signal);
@@ -923,7 +924,7 @@ async function runtime() {
               const { createStickerConverter } = await import(pathToFileURL(join(root, 'dist/src/modules/sticker-media.js')).href);
               const { ResourcePolicy } = await import(pathToFileURL(join(root, 'dist/src/resources.js')).href);
               // BENCHMARK CANDIDATE ONLY: this is neither production configuration nor a qualification claim.
-              converter ??= createStickerConverter({ qualified: true, resources: new ResourcePolicy({ heavyBytes: 96 * 1024 ** 2 }) });
+              converter ??= createStickerConverter({ resources: new ResourcePolicy({ heavyBytes: 96 * 1024 ** 2 }) });
               const data = await readFile(join(directory, `fixture.${file}`));
               for (let i = 0; i < 2; i++) {
                 const result = await converter({ data, kind, format, width: 32, height: 32, media: false }, new AbortController().signal);
@@ -946,7 +947,7 @@ async function runtime() {
             const { createRssPhotoPreparer } = await import(pathToFileURL(join(root, 'dist/src/modules/rss-photo.js')).href);
             const { ResourcePolicy } = await import(pathToFileURL(join(root, 'dist/src/resources.js')).href);
             const data = await readFile(join(directory, 'fixture.png'));
-            const prepare = createRssPhotoPreparer(async () => data, { qualified: true, resources: new ResourcePolicy({ heavyBytes: 96 * 1024 ** 2 }) });
+            const prepare = createRssPhotoPreparer(async () => data, { resources: new ResourcePolicy({ heavyBytes: 96 * 1024 ** 2 }) });
             for (let i = 0; i < 2; i++) {
               const result = await prepare('https://images.example.com/fixture.png', new AbortController().signal);
               if (!result.data.length || result.sourceBytes !== data.length) throw new Error('INVALID_PHOTO_OUTPUT');

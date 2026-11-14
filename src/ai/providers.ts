@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { AppError } from '../errors.js';
 import { AiProtocolError, approvedHttpsOrigin, boundedJson, createAiTransport, protocolLimits, type AiErrorCode, type AiTransport, type ProtocolLimits } from './transport.js';
 
 export type ProviderProtocol = 'openai-responses' | 'anthropic-messages' | 'google-generate-content' | 'openai-chat-completions';
@@ -23,6 +24,8 @@ export interface ProviderProfile {
   audioVoice?: string;
   /** Compatible chat defaults to max_tokens; newer OpenAI chat models can explicitly select the alternate field. */
   chatTokenLimit?: 'max_tokens' | 'max_completion_tokens';
+  /** Bounded usage permits media without a preflight token counter; strict budgets do not. */
+  mediaTokenPolicy?: 'strict' | 'bounded';
 }
 export interface ProviderTool { name: string; description: string; inputSchema: Record<string, unknown> }
 export interface ProviderToolCall { id: string; name: string; arguments: Record<string, unknown> }
@@ -39,6 +42,8 @@ export interface ProviderFileReference {
   expiresAt: number; providerExpiresAt: number | null; scope: string; signature: string;
   /** Present on new uploads and covered by the MAC. Legacy references without these cannot be rehydrated. */
   kind?: Exclude<Modality, 'text'>; sha256?: string;
+  /** Locally leased image bytes, never an uploaded provider file or a fetchable URL. */
+  storage?: 'inline';
 }
 export class AiFileCleanupError extends AiProtocolError {
   constructor(code: AiErrorCode, readonly cleanup: ProviderFileReference[], billable: boolean | 'unknown' = 'unknown') { super(code, undefined, billable); }
@@ -48,6 +53,8 @@ export interface GenerationRequest {
   /** Initial history, or NEW messages only when using continuation. The native prefix is immutable. */
   messages: { role: 'user' | 'assistant'; content: PreparedContent[] }[];
   tools?: ProviderTool[]; toolResults?: ProviderToolResult[]; continuation?: NativeContinuation; maxOutputTokens?: number;
+  /** Keep the immutable tool catalog but prohibit further calls once the run allowance is spent. */
+  toolChoice?: 'none';
   /** Remaining input-token allowance for this full inference, not a delta or price. Media defaults to 32768 when omitted. */
   maxInputTokens?: number;
 }
@@ -75,7 +82,7 @@ export interface AiProviderDependencies {
 }
 
 export function createAiProvider(input: ProviderProfile, dependencies: AiProviderDependencies = {}): AiProvider {
-  keys(input, ['protocol', 'origin', 'basePath', 'model', 'apiKey', 'capabilities', 'limits', 'anthropicVersion', 'retention', 'imageGeneration', 'audioVoice', 'chatTokenLimit']);
+  keys(input, ['protocol', 'origin', 'basePath', 'model', 'apiKey', 'capabilities', 'limits', 'anthropicVersion', 'retention', 'imageGeneration', 'audioVoice', 'chatTokenLimit', 'mediaTokenPolicy']);
   keys(input.capabilities, ['input', 'output']);
   // Snapshot the reviewed settings so mutation during a stream cannot change the credential destination.
   const profile = structuredClone(input);
@@ -93,15 +100,16 @@ export function createAiProvider(input: ProviderProfile, dependencies: AiProvide
   if (profile.anthropicVersion !== undefined && (profile.protocol !== 'anthropic-messages' || !/^\d{4}-\d{2}-\d{2}$/.test(profile.anthropicVersion))) throw new AiProtocolError('INVALID_INPUT', undefined, false);
   if (profile.retention !== undefined && !['standard', 'fable-30-days-approved'].includes(profile.retention)) throw new AiProtocolError('INVALID_INPUT', undefined, false);
   if (profile.chatTokenLimit !== undefined && (profile.protocol !== 'openai-chat-completions' || !['max_tokens', 'max_completion_tokens'].includes(profile.chatTokenLimit))) throw new AiProtocolError('INVALID_INPUT', undefined, false);
+  if (profile.mediaTokenPolicy !== undefined && !['strict', 'bounded'].includes(profile.mediaTokenPolicy)) throw new AiProtocolError('INVALID_INPUT', undefined, false);
   if (profile.imageGeneration && (profile.protocol !== 'openai-responses' || !profile.capabilities.output.includes('image')
     || !/^[a-zA-Z0-9._-]{1,100}$/.test(profile.imageGeneration.model) || !['png', 'jpeg', 'webp'].includes(profile.imageGeneration.outputFormat))) throw new AiProtocolError('UNSUPPORTED', undefined, false);
   if (profile.audioVoice && (profile.protocol !== 'google-generate-content' || !profile.capabilities.output.includes('audio')
     || !/^[a-zA-Z0-9_-]{1,64}$/.test(profile.audioVoice))) throw new AiProtocolError('UNSUPPORTED', undefined, false);
   if ((profile.protocol === 'anthropic-messages' || profile.protocol === 'openai-chat-completions') && profile.capabilities.output.some(type => type !== 'text')
     || profile.protocol === 'openai-responses' && profile.capabilities.output.some(type => type !== 'text' && !(type === 'image' && profile.imageGeneration))
-    || profile.capabilities.output.includes('file')) throw new AiProtocolError('UNSUPPORTED', undefined, false);
+    || profile.capabilities.output.includes('file')) throw new AiProtocolError('OUTPUT_UNSUPPORTED', undefined, false);
   const limits = protocolLimits(profile.limits);
-  limits.requestBytes = Math.min(limits.requestBytes, 1_048_576);
+  limits.requestBytes = Math.min(limits.requestBytes, inlineImageTransport(profile) ? 2_097_152 : 1_048_576);
   const transport = dependencies.transport ?? createAiTransport();
   const fileScope = dependencies.fileScope;
   const rehydrateMedia = dependencies.rehydrateMedia;
@@ -109,10 +117,11 @@ export function createAiProvider(input: ProviderProfile, dependencies: AiProvide
   if (rehydrateMedia !== undefined && typeof rehydrateMedia !== 'function') throw new AiProtocolError('INVALID_INPUT', undefined, false);
   const contextFor = (binding: string): ProtocolContext => ({ profile, limits, binding, transport, fileScope, files: [], media: new Map(), countMedia: new Map(), inferenceStarted: false });
   return { async generate(request, options) {
-    keys(request, ['system', 'messages', 'tools', 'toolResults', 'continuation', 'maxOutputTokens', 'maxInputTokens']);
+    keys(request, ['system', 'messages', 'tools', 'toolResults', 'continuation', 'maxOutputTokens', 'maxInputTokens', 'toolChoice']);
     if (options.signal.aborted) throw new AiProtocolError('CANCELLED', undefined, false);
-    if (request.maxInputTokens !== undefined && (!Number.isSafeInteger(request.maxInputTokens) || request.maxInputTokens < 0 || request.maxInputTokens > 32_768)) throw new AiProtocolError('INVALID_INPUT', undefined, false);
-    if (request.maxInputTokens === 0) throw new AiProtocolError('QUOTA', undefined, false);
+    if (request.maxInputTokens !== undefined && (!Number.isSafeInteger(request.maxInputTokens) || request.maxInputTokens < 0 || request.maxInputTokens > 131_072)
+      || request.toolChoice !== undefined && request.toolChoice !== 'none') throw new AiProtocolError('INVALID_INPUT', undefined, false);
+    if (request.maxInputTokens === 0) throw new AiProtocolError('INPUT_LIMIT', undefined, false);
     if (!Array.isArray(request.messages) || request.messages.length > 128 || (request.tools?.length ?? 0) > 64
       || (request.toolResults?.length ?? 0) > limits.toolCalls) throw new AiProtocolError('TOO_LARGE', undefined, false);
     let bytes = 0; let parts = 0; let mediaCount = 0;
@@ -121,24 +130,27 @@ export function createAiProvider(input: ProviderProfile, dependencies: AiProvide
       if (!['user', 'assistant'].includes(message.role) || !Array.isArray(message.content) || !message.content.length) throw new AiProtocolError('INVALID_INPUT', undefined, false);
       for (const part of message.content) {
         keys(part, part.type === 'text' ? ['type', 'text'] : ['type', 'mimeType', 'bytes', 'filename']);
-        if (++parts > 256 || !profile.capabilities.input.includes(part.type)) throw new AiProtocolError('UNSUPPORTED', undefined, false);
+        if (++parts > 256) throw new AiProtocolError('TOO_LARGE', undefined, false);
+        if (!profile.capabilities.input.includes(part.type)) throw new AiProtocolError('INPUT_DISABLED', undefined, false);
         if (part.type === 'text') {
           if (typeof part.text !== 'string') throw new AiProtocolError('INVALID_INPUT', undefined, false);
           bytes += Buffer.byteLength(part.text);
         } else {
           if (!(part.bytes instanceof Uint8Array) || part.bytes.buffer instanceof SharedArrayBuffer || !part.bytes.byteLength || !validInputMime(part.type, part.mimeType)
             || part.filename !== undefined && !/^[A-Za-z0-9._ -]{1,128}$/.test(part.filename)) throw new AiProtocolError('INVALID_INPUT', undefined, false);
-          if (++mediaCount > 8 || message.role !== 'user') throw new AiProtocolError('UNSUPPORTED', undefined, false);
+          if (part.bytes.byteLength > 1_048_576) throw new AiProtocolError('TOO_LARGE', undefined, false);
+          if (++mediaCount > 8) throw new AiProtocolError('TOO_LARGE', undefined, false);
+          if (message.role !== 'user') throw new AiProtocolError('UNSUPPORTED', undefined, false);
           if (profile.protocol === 'openai-responses' && part.type === 'audio'
             || profile.protocol === 'anthropic-messages' && part.type === 'audio'
             || profile.protocol === 'google-generate-content' && part.mimeType === 'image/gif'
             || profile.protocol === 'anthropic-messages' && profile.anthropicVersion !== undefined && profile.anthropicVersion !== '2026-10-21'
             || profile.protocol === 'openai-chat-completions' && (part.type === 'file' || part.type === 'audio' && !['audio/wav', 'audio/mpeg', 'audio/mp3'].includes(part.mimeType))) throw new AiProtocolError('UNSUPPORTED', undefined, false);
-          // An arbitrary compatible model need not tokenize compressed media in proportion to encoded bytes.
-          if (profile.protocol === 'openai-chat-completions') throw new AiProtocolError('UNSUPPORTED', undefined, false);
-          if (!fileScope || !transport.request
-            || profile.protocol === 'openai-responses' && (profile.origin !== 'https://api.openai.com' || profile.basePath !== '/v1')) throw new AiProtocolError('UNSUPPORTED', undefined, false);
-          bytes += (profile.protocol === 'anthropic-messages' ? Math.ceil(part.bytes.byteLength / 3) * 4 : part.bytes.byteLength) + 4096;
+          const inline = inlineImageTransport(profile);
+          if (inline && part.type !== 'image') throw new AiProtocolError('UNSUPPORTED', undefined, false);
+          if (inline && profile.mediaTokenPolicy !== 'bounded') throw new AiProtocolError('MEDIA_COUNT_UNAVAILABLE', undefined, false);
+          if (!fileScope || !inline && !transport.request) throw new AiProtocolError('UNSUPPORTED', undefined, false);
+          bytes += (inline || profile.protocol === 'anthropic-messages' ? Math.ceil(part.bytes.byteLength / 3) * 4 : part.bytes.byteLength) + 4096;
         }
         if (bytes > limits.requestBytes) throw new AiProtocolError('TOO_LARGE', undefined, false);
       }
@@ -153,7 +165,7 @@ export function createAiProvider(input: ProviderProfile, dependencies: AiProvide
     if (request.system !== undefined && (typeof request.system !== 'string' || Buffer.byteLength(request.system) > limits.requestBytes)) throw new AiProtocolError('TOO_LARGE', undefined, false);
     if (request.maxOutputTokens !== undefined && (!Number.isSafeInteger(request.maxOutputTokens) || request.maxOutputTokens < 1 || request.maxOutputTokens > 32_768)) throw new AiProtocolError('INVALID_INPUT', undefined, false);
     if (profile.protocol === 'anthropic-messages' && request.messages.at(-1)?.role === 'assistant') throw new AiProtocolError('UNSUPPORTED', undefined, false);
-    if (profile.capabilities.output.some(type => type !== 'text') && request.tools?.length) throw new AiProtocolError('UNSUPPORTED', undefined, false);
+    if (profile.capabilities.output.some(type => type !== 'text') && request.tools?.length) throw new AiProtocolError('OUTPUT_UNSUPPORTED', undefined, false);
     const binding = createHash('sha256').update(boundedJson({ system: request.system ?? '', tools: request.tools ?? [], capabilities: profile.capabilities,
       imageGeneration: profile.imageGeneration ?? null, audioVoice: profile.audioVoice ?? null, retention: profile.retention ?? null, basePath: profile.basePath }, limits.requestBytes)).digest('hex');
     const continuation = request.continuation;
@@ -177,8 +189,9 @@ export function createAiProvider(input: ProviderProfile, dependencies: AiProvide
     request = structuredClone(request);
     const context = contextFor(binding);
     if (mediaCount + (continuation?.files?.length ?? 0) > 8) throw new AiProtocolError('TOO_LARGE', undefined, false);
-    const files = profile.protocol !== 'openai-chat-completions' && (mediaCount || continuation) ? await import('./protocol-files.js') : undefined;
+    const files = mediaCount || continuation ? await import('./protocol-files.js') : undefined;
     if (files) files.validateContinuation(context, request.continuation);
+    if (context.files.some(ref => ref.storage === 'inline') && profile.mediaTokenPolicy !== 'bounded') throw new AiProtocolError('MEDIA_COUNT_UNAVAILABLE', undefined, false);
     // No provider SDKs or protocol execution code enters the idle application graph.
     const adapter = profile.protocol === 'anthropic-messages' ? await import('./protocol-anthropic.js')
       : profile.protocol === 'google-generate-content' ? await import('./protocol-google.js') : await import('./protocol-openai.js');
@@ -204,6 +217,7 @@ export function createAiProvider(input: ProviderProfile, dependencies: AiProvide
         }
       }
       if (!context.inferenceStarted && retained) throw new AiFileCleanupError(code, structuredClone(context.files.slice(0, retained)), false);
+      if (error instanceof AppError) throw error;
       throw new AiProtocolError(code, error instanceof AiProtocolError ? error.status : undefined, billable);
     } finally { clearTimeout(timer); context.countMedia.clear(); context.media.clear(); }
   }, async release(references, signal) {
@@ -220,6 +234,10 @@ export function providerBasePath(protocol: ProviderProtocol, input = ''): string
   const path = !input || input === '/' ? fallback : input.replace(/\/$/, '');
   if ((protocol === 'anthropic-messages' || protocol === 'google-generate-content') && path !== fallback) throw new AiProtocolError('UNSAFE_URL', undefined, false);
   return path;
+}
+export function inlineImageTransport(profile: Pick<ProviderProfile, 'protocol' | 'origin' | 'basePath'>): boolean {
+  return profile.protocol === 'openai-chat-completions' || profile.protocol === 'openai-responses'
+    && (profile.origin !== 'https://api.openai.com' || (profile.basePath ?? '/v1') !== '/v1');
 }
 function keys(value: unknown, allowed: string[]): void {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !allowed.includes(key))) throw new AiProtocolError('INVALID_INPUT', undefined, false);

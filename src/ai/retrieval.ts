@@ -39,9 +39,17 @@ export function createDeepSeekRetrieval(settings: {
   const apiKey = settings.apiKey;
   if (!apiKey || apiKey.length > 2048 || /[^\x21-\x7e]/.test(apiKey)) throw new AiProtocolError('INVALID_INPUT', undefined, false);
   const transport = settings.transport ?? createAiTransport();
-  const post = (operation: 'search' | 'fetch', body: unknown, signal: AbortSignal) => transport.post({
-    origin: 'https://api.deepseek.com', path: `/v1/tools/${operation}`, headers: { authorization: `Bearer ${apiKey}` }, body,
-  }, { signal, limits: { requestBytes: 16_384, responseBytes: 1024 * 1024, timeoutMs: 30_000 } });
+  const post = async (operation: 'search' | 'fetch', body: unknown, signal: AbortSignal) => {
+    try {
+      return await transport.post({ origin: 'https://api.deepseek.com', path: `/v1/tools/${operation}`,
+        headers: { authorization: `Bearer ${apiKey}` }, body,
+      }, { signal, limits: { requestBytes: 16_384, responseBytes: 1024 * 1024, timeoutMs: 30_000 } });
+    } catch (error) {
+      // DeepSeek bills only successful result-bearing retrievals, not confirmed HTTP failures.
+      if (error instanceof AiProtocolError && error.status !== undefined && error.status !== 200) throw new AiProtocolError(error.code, error.status, false);
+      throw error;
+    }
+  };
   function project(operation: 'search' | 'fetch', values: { title: string; url: string; snippet: string; summary: string; content: string }[]): RetrievalResult {
     const result: RetrievalResult = { trust: 'untrusted', results: [], citations: [], truncated: false,
       usage: { provider: 'deepseek', operation, requests: 1, billable: operation === 'search' ? values.length > 0 : values.some(value => value.content.length > 0) } };
@@ -80,18 +88,20 @@ export function createDeepSeekRetrieval(settings: {
       if (!url) throw new AiProtocolError('UNSAFE_URL', undefined, false);
       const timer = new AbortController(); const deadline = setTimeout(() => timer.abort(), 30_000); deadline.unref();
       const signal = AbortSignal.any([caller, timer.signal]);
+      let submitted = false;
       try {
         signal.throwIfAborted();
         const hostname = new URL(url).hostname.replace(/^\[|\]$/g, '');
         const addresses = isIP(hostname) ? [{ address: hostname, family: isIP(hostname) }] : await abortable((settings.lookup ?? resolveFeedAddresses)(hostname, signal), signal);
         if (!addresses.length || addresses.length > 32 || addresses.some(item => !publicAddress(item.address) || isIP(item.address) !== item.family)) throw new AiProtocolError('UNSAFE_URL', undefined, false);
+        signal.throwIfAborted(); submitted = true;
         const response = fetchResponseSchema.safeParse(await post('fetch', { url }, signal));
         if (!response.success) throw new AiProtocolError('INVALID_RESPONSE');
         return project('fetch', [{ url, ...response.data, snippet: '', summary: '' }]);
       } catch (error) {
-        if (signal.aborted) throw new AiProtocolError(caller.aborted ? 'CANCELLED' : 'TIMEOUT');
+        if (signal.aborted) throw new AiProtocolError(caller.aborted ? 'CANCELLED' : 'TIMEOUT', undefined, submitted ? 'unknown' : false);
         if (error instanceof AiProtocolError) throw error;
-        throw new AiProtocolError('NETWORK');
+        throw new AiProtocolError('NETWORK', undefined, submitted ? 'unknown' : false);
       } finally { clearTimeout(deadline); }
     },
   };

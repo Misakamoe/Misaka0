@@ -15,6 +15,7 @@ import type { StartupConfig } from '../src/config.js';
 import { AppError } from '../src/errors.js';
 import { createWebServer } from '../src/web/server.js';
 import { menuCommands } from '../src/telegram/commands.js';
+import { modules } from '../src/modules/index.js';
 
 type RunnerInput = Parameters<NonNullable<ApplicationOptions['runnerFactory']>>[0];
 type RunnerOptions = Parameters<NonNullable<ApplicationOptions['runnerFactory']>>[1];
@@ -185,7 +186,9 @@ describe('application construction and startup', () => {
         const context = createInvocation({ actorId: 1, botId: me.id, source: 'telegram',
           chat: { id: 1, type: 'private' }, language: 'en' });
         expect(await f.app.executor.execute(context, 'core.info', {}))
-          .toMatchObject({ status: 'succeeded', data: { moduleCount: 6 } });
+          .toMatchObject({ status: 'succeeded', data: { moduleCount: modules.length } });
+        expect(await f.app.executor.execute(context, 'relay.settings.get', {}))
+          .toMatchObject({ status: 'succeeded', data: { enabled: false, ownerBound: false, revision: 0 } });
         expect(await f.app.executor.execute(context, 'alias.list', {}))
           .toMatchObject({ status: 'succeeded', data: { revision: 0, aliases: { help: ['\u5e2e\u52a9', '\u5e6b\u52a9', '\u30d8\u30eb\u30d7'] } } });
       }
@@ -193,7 +196,7 @@ describe('application construction and startup', () => {
     const firstStart = f.app.start();
     expect(f.app.start()).toBe(firstStart);
     await firstStart;
-    expect(f.trace.slice(0, 12)).toEqual(['store:access.json', 'store:settings.json', 'store:preferences.json', 'store:aliases.json', 'store:rss.json', 'store:rates.json', 'store:weather.json', 'store:subconv.json',
+    expect(f.trace.slice(0, 13)).toEqual(['store:access.json', 'store:settings.json', 'store:preferences.json', 'store:aliases.json', 'store:rss.json', 'store:rates.json', 'store:weather.json', 'store:subconv.json', 'store:relay.json',
       'web:factory', 'web:ready', 'api:getMe', 'api:deleteWebhook']);
     const menuIndices = f.trace.flatMap((entry, index) => entry === 'api:setMyCommands' ? [index] : []);
     expect(menuIndices).toHaveLength(16);

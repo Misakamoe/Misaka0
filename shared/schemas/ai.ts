@@ -29,7 +29,7 @@ export const aiProviderSchema = z.strictObject({
   credentialRef: aiCredentialRefSchema, enabled: z.boolean(), anthropicVersion: z.iso.date().optional(),
 }).refine(value => allowedEndpoint(value.baseUrl, value.allowedOrigins), { message: 'INVALID_INPUT' });
 export const aiBudgetSchema = z.strictObject({
-  maxInputTokens: integer.min(1).max(32_768), maxOutputTokens: integer.min(1).max(8192),
+  maxInputTokens: integer.min(1).max(131_072), maxOutputTokens: integer.min(1).max(8192),
   maxToolCalls: integer.max(16), maxDurationMs: integer.min(1000).max(600_000),
   maxCostMicros: integer.max(1_000_000_000),
 });
@@ -95,6 +95,11 @@ export type AiBudget = z.infer<typeof aiBudgetSchema>;
 export type AiGrant = z.infer<typeof aiGrantSchema>;
 export type AiLimits = z.infer<typeof aiLimitsSchema>;
 export type AiSettings = z.infer<typeof aiSettingsSchema>;
+export const aiOutputTextLimits = Object.freeze({ characters: 30_720, bytes: 60_000 });
+export const aiInteractiveDailyRuns = 500;
+export function aiInteractiveBudget(): AiBudget {
+  return { maxInputTokens: 65_536, maxOutputTokens: 8192, maxToolCalls: 8, maxDurationMs: 180_000, maxCostMicros: 100_000 };
+}
 export function aiDefaults(): AiSettings {
   return { enabled: false, providers: [], presets: [], grants: [], deniedUserIds: [], limits: {
     maxConcurrentRuns: 1, maxQueuedRuns: 8, maxConversationsPerScope: 100, maxTurnsPerConversation: 10_000,

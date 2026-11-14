@@ -2,8 +2,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { localeSchema, revisionSchema, type Locale } from '../../shared/schemas/index.js';
 import {
-  rssAddInputSchema, rssErrorSchema, rssIdSchema, rssListInputSchema,
-  rssRemoveInputSchema, rssUpdateInputSchema, type RssList, type RssUpdate,
+  rssAddInputSchema, rssErrorSchema, rssIdSchema, rssKeywordFiltersSchema, rssListInputSchema,
+  rssRemoveInputSchema, rssUpdateInputSchema, type RssKeywordFilters, type RssList, type RssUpdate,
 } from '../../shared/schemas/rss.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { AsyncMutex, JSON_DOCUMENT_MAX_BYTES, JsonDocument, jsonDocumentByteLength, type JsonStorage } from '../storage.js';
@@ -57,6 +57,7 @@ const sourceSchema = z.strictObject({
 const subscriptionSchema = z.strictObject({
   id: rssIdSchema, revision: revisionSchema, sourceId: sourceSchema.shape.id, target: targetSchema,
   title: z.string().max(128).optional(), silent: z.boolean(), paused: z.boolean(), language: localeSchema,
+  filters: rssKeywordFiltersSchema.optional(),
   deliveryError: z.enum(['BLOCKED', 'REJECTED', 'UNKNOWN']).nullable(),
 });
 const queueSchema = z.strictObject({
@@ -102,6 +103,17 @@ export interface RssOptions {
 }
 function sameTarget(left: RssTarget, right: RssTarget): boolean {
   return left.chatId === right.chatId && left.kind === right.kind && (left.threadId ?? 0) === (right.threadId ?? 0);
+}
+function matchesFilters(entry: FeedEntry, filters?: RssKeywordFilters): boolean {
+  if (!filters || !filters.include.length && !filters.exclude.length) return true;
+  // These are bounded visible strings, not URLs/metadata or a joined title/body search field.
+  const title = entry.title.normalize('NFKC').toLowerCase();
+  const content = entry.content.normalize('NFKC').toLowerCase();
+  const matches = (keyword: string) => {
+    const normalized = keyword.normalize('NFKC').toLowerCase();
+    return title.includes(normalized) || content.includes(normalized);
+  };
+  return (!filters.include.length || filters.include.some(matches)) && !filters.exclude.some(matches);
 }
 function boundedEntry(entry: FeedEntry): z.infer<typeof entrySchema> {
   const prefix = entry.content.length <= 8000 ? entry.content : entry.content.slice(0, 7997).replace(/[\uD800-\uDBFF]$/, '');
@@ -187,6 +199,7 @@ export class RssService {
       const jobs = state.queue.filter(job => job.subscriptionId === subscription.id);
       return { id: subscription.id, revision: subscription.revision, title: subscription.title ?? source.title, url: source.url,
         silent: subscription.silent, paused: subscription.paused, intervalSeconds: source.intervalSeconds,
+        ...(subscription.filters ? { filters: subscription.filters } : {}),
         lastCheckAt: source.lastCheckAt, lastSuccessAt: source.lastSuccessAt, failures: source.failures, totalChecks: source.totalChecks,
         totalFailures: source.totalFailures, lastError: source.lastError, pending: jobs.filter(job => job.state !== 'uncertain').length,
         uncertain: jobs.filter(job => job.state === 'uncertain').length, deliveryError: subscription.deliveryError };
@@ -232,14 +245,15 @@ export class RssService {
             etag: response.etag, lastModified: response.lastModified, nextCheckAt: this.now() + 300_000, intervalSeconds: 300,
             lastCheckAt: this.now(), lastSuccessAt: this.now(), failures: 0, totalChecks: 1, totalFailures: 0, lastError: null, warned: false });
         }
-        state.subscriptions.push({ id, revision: 0, sourceId, target, language, title: input.title, silent: input.silent, paused: false, deliveryError: null });
+        state.subscriptions.push({ id, revision: 0, sourceId, target, language, title: input.title, silent: input.silent, paused: false, deliveryError: null,
+          ...(input.filters ? { filters: input.filters } : {}) });
       }, { signal: combined });
       return { id, changed: true };
     }, combined); } finally { this.arm(); }
   }
-  async update(target: RssTarget, input: RssUpdate, signal?: AbortSignal) {
+  async update(target: RssTarget, raw: RssUpdate, signal?: AbortSignal) {
     this.assertTarget(target);
-    rssUpdateInputSchema.parse(input);
+    const input = rssUpdateInputSchema.parse(raw);
     const combined = AbortSignal.any([this.abort.signal, ...(signal ? [signal] : [])]);
     try { return await this.lock.run(async () => {
       const result = await this.file.update(state => {
@@ -254,6 +268,16 @@ export class RssService {
           } else subscription.deliveryError = null;
         }
         if (input.title !== undefined) subscription.title = input.title ?? undefined;
+        if (input.filters !== undefined) {
+          if (input.filters === null) delete subscription.filters;
+          else subscription.filters = input.filters;
+          state.queue = state.queue.filter(job => {
+            if (job.subscriptionId !== subscription.id || job.state !== 'queued' || job.payload.kind === 'health') return true;
+            const entry = job.payload.kind === 'entry-ref' ? state.entries![job.payload.entryId]! : job.payload.entry;
+            return matchesFilters(entry, subscription.filters);
+          });
+          collectEntries(state);
+        }
         subscription.revision += 1;
       }, { signal: combined });
       return { id: input.id, changed: result.changed };
@@ -286,6 +310,7 @@ export class RssService {
     return state.subscriptions.filter(subscription => subscription.sourceId === sourceId && !subscription.paused && this.options.allowed(subscription.target));
   }
   private enqueue(state: RssDocument, subscriptions: Subscription[], payload: RssPayload): boolean {
+    if (payload.kind === 'entry') subscriptions = subscriptions.filter(subscription => matchesFilters(payload.entry, subscription.filters));
     if (!subscriptions.length) return true;
     if (state.queue.length + subscriptions.length > 128) return false;
     const previousLength = state.queue.length;
@@ -399,6 +424,13 @@ export class RssService {
       return;
     }
     let payload: RssPayload = job.payload.kind === 'entry-ref' ? { kind: 'entry', entry: state.entries![job.payload.entryId]! } : job.payload;
+    if (job.state === 'queued' && payload.kind === 'entry' && !matchesFilters(payload.entry, subscription.filters)) {
+      await this.file.update(state => {
+        state.queue = state.queue.filter(item => item.id !== id);
+        collectEntries(state);
+      }, { signal: this.abort.signal });
+      return;
+    }
     const page = job.page ?? 0;
     const total = payload.kind === 'entry' ? Math.max(1, Math.ceil((payload.entry.images?.length ?? 0) / RSS_IMAGES_PER_MESSAGE)) : 1;
     if (payload.kind === 'entry' && total > 1) payload = { ...payload, part: { index: page + 1, total } };

@@ -160,6 +160,25 @@ th p { margin-bottom: 0; }
 .schema-editor .glyphicon-arrow-down::before { content: '\2193'; }
 .schema-editor .glyphicon-copy::before { content: '\2398'; }
 .secret-control .help { margin-bottom: 0; }
+.schema-editor .ai-tool-picker { border: 1px solid var(--line); border-radius: 4px; padding: 14px; margin-block: 12px; }
+.ai-tool-picker legend { font-size: .9rem; padding: 0 6px; }
+.ai-tool-search { display: flex; align-items: end; gap: 10px; }
+.ai-tool-search > div { flex: 1; min-width: 0; }
+.ai-tool-search button { flex-shrink: 0; }
+.ai-tool-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-block: 12px; }
+.ai-tool-selection label { display: flex; align-items: center; gap: 8px; margin: 0; font-size: .8rem; }
+.ai-tool-selection button { margin-left: auto; }
+.ai-tool-groups { max-height: 28rem; overflow-y: auto; overflow-wrap: anywhere; scrollbar-gutter: stable; }
+.ai-tool-groups section + section { margin-top: 20px; }
+.ai-tool-groups h3 { margin: 0 0 8px; font-size: .88rem; font-weight: 600; }
+.ai-tool-option { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 10px; margin: 0; padding: 12px 6px; border-top: 1px solid var(--line); cursor: pointer; }
+.ai-tool-option:hover { background: var(--subtle); }
+.ai-tool-option input { margin: 3px 0 0; width: 18px; height: 18px; }
+.ai-tool-name { display: block; font-size: .85rem; }
+.ai-tool-details { display: block; margin-top: 5px; }
+.ai-tool-option code { display: block; font-size: .73rem; color: var(--muted); overflow-wrap: anywhere; }
+.ai-tool-badges { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; color: var(--muted); font-size: .72rem; font-weight: 400; }
+.ai-tool-option[data-effect='destructive'] .ai-tool-badges, .ai-tool-option[data-effect='permission'] .ai-tool-badges { color: var(--danger); }
 .form-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid var(--line); padding-top: 22px; margin-top: 32px; }
 .preferences-form select { width: 100%; }
 .preferences-form > .help { margin-top: 10px; }
@@ -220,6 +239,8 @@ dialog::backdrop { background: var(--backdrop); backdrop-filter: blur(2px); }
   .pagination button { font-size: .75rem; padding-inline: 10px; }
   .schema-editor .field-object .field-object, .schema-editor .field-array { padding-left: 12px; }
   .array-row { flex-direction: column; align-items: stretch; }
+  .ai-tool-search { flex-direction: column; align-items: stretch; }
+  .schema-editor .ai-tool-picker { padding: 10px; }
   .form-footer { gap: 10px; }
   .form-footer > .help { max-width: 120px; }
   .login-layout { padding-inline: max(22px, var(--tg-inset-left), env(safe-area-inset-left)) max(22px, var(--tg-inset-right), env(safe-area-inset-right)); }

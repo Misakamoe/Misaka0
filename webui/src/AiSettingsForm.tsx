@@ -7,6 +7,7 @@ import type { z } from 'zod';
 import { inputJsonSchema } from '../../shared/schemas';
 import { aiSettingsSchema, type AiSettings } from '../../shared/schemas/ai';
 import { errorCode } from './api';
+import { AiToolPicker, type AiToolPickerState } from './AiToolPicker';
 
 function Field({ id, label, displayLabel, required, children, description, errors, rawErrors, schema }: FieldTemplateProps) {
   const { t } = useTranslation();
@@ -66,15 +67,16 @@ const strings: Partial<Record<TranslatableString, string>> = {
   [TranslatableString.ErrorsLabel]: 'form.errors', [TranslatableString.Type]: 'form.type', [TranslatableString.Value]: 'form.value',
 };
 
-export function AiSettingsForm({ settings, onSave, onDirty }: {
-  settings: AiSettings; onSave(settings: AiSettings): Promise<void>; onDirty(dirty: boolean): void;
+export function AiSettingsForm({ settings, tools, onSave, onDirty }: {
+  settings: AiSettings; tools: AiToolPickerState; onSave(settings: AiSettings): Promise<void>; onDirty(dirty: boolean): void;
 }) {
-  return <AiSchemaForm contract={aiSettingsSchema} initialValue={settings} onSave={onSave} onDirty={onDirty} />;
+  return <AiSchemaForm contract={aiSettingsSchema} initialValue={settings} tools={tools} onSave={onSave} onDirty={onDirty} />;
 }
 
-export function AiSchemaForm<T extends Record<string, unknown>>({ contract, initialValue, onSave, onDirty, idPrefix = 'root', submitKey = 'common:actions.save', requireDirty = true, clearDirtyOnSubmit = true }: {
+export function AiSchemaForm<T extends Record<string, unknown>>({ contract, initialValue, tools, onSave, onDirty, idPrefix = 'root', submitKey = 'common:actions.save', requireDirty = true, clearDirtyOnSubmit = true }: {
   contract: z.ZodType<T>; initialValue: Record<string, unknown>; onSave(value: T): Promise<void>;
   onDirty(dirty: boolean): void; idPrefix?: string; submitKey?: string; requireDirty?: boolean; clearDirtyOnSubmit?: boolean;
+  tools?: AiToolPickerState;
 }) {
   const { t } = useTranslation();
   const [value, setValue] = useState<Record<string, unknown>>(initialValue);
@@ -98,17 +100,27 @@ export function AiSchemaForm<T extends Record<string, unknown>>({ contract, init
     });
     const label = name === 'sandbox' ? 'executors' : name === 'limits' && (path.startsWith('sandbox.') || path === 'profile.limits') ? 'executionLimits' : name;
     if (label) schema.title = t(`ai.fields.${label}`);
-    if (!path.endsWith('.*') && ['providers', 'presets', 'grants', 'deniedUserIds', 'limits', 'search', 'skills', 'mcp', 'sandbox', 'credentialRef', 'allowedOrigins', 'tools', 'budget', 'expiresAt', 'system', 'inputCapabilities', 'outputCapabilities', 'pricing', 'retention', 'scope', 'scopes', 'credentialAuthority', 'readTools', 'profiles', 'reviewedDigest', 'localProfiles', 'stdioProfiles', 'files'].includes(name)) schema.description = t(`ai.help.${label}`);
+    if (!path.endsWith('.*') && ['providers', 'presets', 'grants', 'deniedUserIds', 'limits', 'search', 'skills', 'mcp', 'sandbox', 'credentialRef', 'allowedOrigins', 'tools', 'budget', 'budgetMode', 'dailyRuns', 'expiresAt', 'system', 'inputCapabilities', 'outputCapabilities', 'pricing', 'retention', 'scope', 'scopes', 'credentialAuthority', 'readTools', 'profiles', 'reviewedDigest', 'localProfiles', 'stdioProfiles', 'files'].includes(name)) schema.description = t(`ai.help.${label}`);
+    if (!path.endsWith('.*') && (name === 'inputCapabilities' || name === 'outputCapabilities')) {
+      schema.description = t(name === 'inputCapabilities' ? 'ai.media.inputHelp' : 'ai.media.outputHelp');
+    }
     if (name === 'system') ui['ui:widget'] = 'textarea';
     if (name === 'text' && path.startsWith('files.')) ui['ui:widget'] = 'TextFile';
     if (name === 'expiresAt') ui['ui:widget'] = 'text';
+    // MCP profile tool names are a different namespace and must not use the Action catalog.
+    if (tools && path === 'presets.*.tools') {
+      ui['ui:widget'] = AiToolPicker;
+      ui['ui:options'] = { label: false };
+      schema.title = t('ai.toolPicker.title'); delete schema.description;
+    }
     if (name === 'enabled') schema.default = false;
     if (schema.const !== undefined) {
       if (name === 'currency' || name === 'kind' || name === 'runtime') { schema.oneOf = [{ const: schema.const, title: name === 'currency' ? String(schema.const) : name === 'runtime' ? t('ai.extensions.nodeRuntime') : t(`ai.options.${String(schema.const)}`) }]; delete schema.const; }
       else ui['ui:readonly'] = true;
     }
     if (schema.enum) {
-      schema.oneOf = schema.enum.map(item => ({ const: item, title: t(`ai.options.${String(item)}`) }));
+      const choices = name === 'inputCapabilities' ? 'ai.media.input' : name === 'outputCapabilities' ? 'ai.media.output' : 'ai.options';
+      schema.oneOf = schema.enum.map(item => ({ const: item, title: t(`${choices}.${String(item)}`) }));
       delete schema.enum;
     }
     for (const [key, child] of Object.entries(schema.properties ?? {})) if (typeof child === 'object') {
@@ -125,7 +137,7 @@ export function AiSchemaForm<T extends Record<string, unknown>>({ contract, init
   return <div className="schema-editor">
     {invalid && <div role="alert" className="error-text"><p>{t('state.validation')}</p>{invalidFields.length > 0 && <ul>{invalidFields.map((field, index) => <li key={index}>{field}</li>)}</ul>}</div>}
     {error && <p role="alert" className="notice error">{t(`common:errors.${error}`)}</p>}
-    <Form schema={schema} uiSchema={ui} validator={validator} formData={value} disabled={busy} noHtml5Validate showErrorList={false} idPrefix={idPrefix} widgets={{ TextFile }}
+    <Form schema={schema} uiSchema={ui} validator={validator} formData={value} formContext={{ aiTools: tools }} disabled={busy} noHtml5Validate showErrorList={false} idPrefix={idPrefix} widgets={{ TextFile }}
       experimental_defaultFormStateBehavior={{ emptyObjectFields: 'populateRequiredDefaults', arrayMinItems: { populate: 'requiredOnly' }, constAsDefaults: 'never' }}
       templates={{ FieldTemplate: Field, ArrayFieldItemTemplate: ArrayItem, OptionalDataControlsTemplate: OptionalData, ButtonTemplates: buttons, DescriptionFieldTemplate: ({ id, description }) => description ? <p id={id} className="help">{description}</p> : null }}
       translateString={(key, params) => key === TranslatableString.OptionPrefix || key === TranslatableString.TitleOptionPrefix ? t('form.option', { index: params?.at(-1) }) : t(strings[key] ?? 'form.unsupported')}

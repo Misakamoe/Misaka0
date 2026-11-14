@@ -7,14 +7,16 @@ import type { ConfigurationService } from '../src/configuration.js';
 import type { AccessService } from '../src/access.js';
 import type { StartupConfig } from '../src/config.js';
 import { createTelegramAdapter, createTelegramEffects, sessionKey } from '../src/telegram/index.js';
-import { helpMarkdown, menuCommands } from '../src/telegram/commands.js';
+import { commands, helpMarkdown, menuCommands } from '../src/telegram/commands.js';
 import { aliasNameSchema } from '../shared/schemas/alias.js';
 import { subconvDefaults } from '../shared/schemas/subconv.js';
 import { normalizeLocale } from '../shared/locales/normalize.js';
 import { translator } from '../src/i18n.js';
 import { aliasMetadata } from '../src/modules/alias.js';
+import { modules } from '../src/modules/index.js';
 import { buttonRows, callbacks, liveCallbacks, recordContent, richText, telegramMessage } from './support/telegram.js';
 import { offlineStickers } from './support/core.js';
+import { SessionStore } from '../src/telegram/session.js';
 
 const me: UserFromGetMe = {
   id: 12345, is_bot: true, first_name: 'Offline', username: 'offline_bot',
@@ -213,6 +215,44 @@ describe('offline native message recording', () => {
   });
 });
 
+describe('module-isolated input storage', () => {
+  it('expires fields independently without refreshing older inputs when another field starts', () => {
+    let now = 0;
+    const sessions = new SessionStore(100, 1, () => now);
+    const aliasInput = { panelId: 'alias', messageId: 1, promptMessageId: 2, command: 'help', revision: 0 };
+    const rssInput = { panelId: 'rss', messageId: 3, promptMessageId: 4 };
+    sessions.setInput('owner', 'aliasInput', aliasInput);
+    now = 50; sessions.setInput('owner', 'rssInput', rssInput);
+    expect(sessions.get('owner')).toEqual({ aliasInput, rssInput });
+    now = 100;
+    expect(sessions.get('owner')).toEqual({ rssInput });
+    expect(sessions.clearInput('owner', 'rssInput', 'alias')).toBe(false);
+    expect(sessions.get('owner')).toEqual({ rssInput });
+    now = 150;
+    expect(sessions.get('owner')).toBeUndefined(); expect(sessions.size).toBe(0);
+    sessions.stop();
+  });
+
+  it('rejects capacity without evicting another owner and clears only the matching module and panel', () => {
+    const sessions = new SessionStore(1000, 1);
+    const aliasInput = { panelId: 'alias', messageId: 1, promptMessageId: 2, command: 'help', revision: 0 };
+    const rssInput = { panelId: 'rss', messageId: 3, promptMessageId: 4 };
+    sessions.setInput('owner', 'aliasInput', aliasInput);
+    sessions.setInput('owner', 'rssInput', rssInput);
+    expect(() => sessions.setInput('other', 'rssInput', { ...rssInput, panelId: 'other' })).toThrow('CAPACITY');
+    expect(() => sessions.set('other', { rssInput })).toThrow('CAPACITY');
+    expect(sessions.get('owner')).toEqual({ aliasInput, rssInput });
+    expect(sessions.get('other')).toBeUndefined();
+    expect(sessions.clearInput('owner', 'aliasInput', 'rss')).toBe(false);
+    expect(sessions.clearInput('owner', 'aliasInput', 'alias')).toBe(true);
+    expect(sessions.get('owner')).toEqual({ rssInput });
+    expect(sessions.clearInput('owner', 'rssInput', 'rss')).toBe(true);
+    sessions.setInput('other', 'rssInput', rssInput);
+    expect(sessions.get('other')).toEqual({ rssInput });
+    sessions.stop();
+  });
+});
+
 describe('offline Telegram admission and commands', () => {
   it('does not initialize networking, publish menus, or allocate sessions on creation', () => {
     const f = fixture();
@@ -255,23 +295,91 @@ describe('offline Telegram admission and commands', () => {
     expect(markdown).toMatch(/\|.+\|/);
     expect(markdown).not.toContain('| /help |');
     expect(markdown).not.toContain('`');
-    expect(markdown.match(/^\| [^\n]+ \| \/\w+[^\n]* \|$/gm)).toHaveLength(9);
+    expect(markdown.match(/^\| [^\n]+ \| \/\w+[^\n]* \|$/gm)).toHaveLength(modules.length + 3);
     for (const command of ['/ai', '/chats', '/memory', '/tasks']) expect(markdown).toContain(command);
     expect(markdown).not.toMatch(/^\/\w+/m);
-    expect(markdown).toContain('Installed native modules: 6');
+    expect(markdown).toContain(`Installed native modules: ${modules.length}`);
     expect(markdown).not.toContain('Untrusted');
     expect(rich.payload).not.toHaveProperty('parse_mode');
     expect(f.adapter.sessions.size).toBe(0);
   });
 
-  it('routes core commands to shared Actions and returns plain private IDs/status', async () => {
+  it('routes core commands to shared Actions and returns copyable private IDs/status', async () => {
     const f = fixture();
     for (const command of ['/start', '/modules', '/stats', '/id', '/commands', '/cancel']) await f.bot.handleUpdate(message(command, { thread: 42 }));
     expect(f.execute.mock.calls.map(call => call[1])).toEqual(['core.info', 'modules.list', 'core.status', 'sticker.cancel']);
     expect(f.sent().every(call => call.payload.message_thread_id === 42)).toBe(true);
-    expect(f.sent().some(call => String(call.payload.text).includes('User ID: 1'))).toBe(true);
+    expect(f.messages.some(message => richText(message).includes('User ID: 1'))).toBe(true);
     expect(f.sent().some(call => String(call.payload.text).includes('Natural-language AI'))).toBe(false);
     expect(f.execute.mock.calls[0]![0]).toMatchObject({ actorId: 1, source: 'telegram', botId: me.id, chat: { id: 1, type: 'private', threadId: 42 }, language: 'en' });
+  });
+
+  it.each(['zh-CN', 'zh-TW', 'en', 'ja'] as const)('reports the replied sender with literal names and copyable monospace IDs in %s', async language => {
+    const f = fixture(); const update = message('/id', { thread: 7 });
+    update.message!.from!.language_code = language;
+    update.message!.reply_to_message = { ...message('visible', { user: 42, chat: -100, thread: 7 }).message!,
+      chat: update.message!.chat, reply_to_message: undefined, from: { id: 42, is_bot: false, first_name: '<b>Alice</b>', last_name: '@untrusted', username: 'alice_example' } };
+    await f.bot.handleUpdate(update);
+    const response = f.last(1, 7); const rich = response.rich_message!; const serialized = JSON.stringify(rich);
+    expect(richText(response)).toContain('<b>Alice</b> @untrusted');
+    expect(richText(response)).toContain('@alice_example');
+    expect(rich).toMatchObject({ skip_entity_detection: true });
+    for (const id of ['42', '1', '7']) {
+      expect(serialized).toContain(JSON.stringify({ type: 'code', text: id }));
+      expect(serialized).toContain(`"copy_text":{"text":"${id}"}`);
+    }
+    expect(serialized).not.toContain('"type":"mention"');
+    expect(serialized).not.toContain('callback_data');
+    expect(f.calls.at(-1)?.payload).toMatchObject({ reply_parameters: { message_id: update.message!.message_id } });
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.calls.some(call => call.method === 'getChat' || call.method === 'getChatMember')).toBe(false);
+  });
+
+  it.each(['channel', 'supergroup'] as const)('does not mistake a %s sender for the anonymous placeholder user', async type => {
+    const f = fixture(); const update = message('/id');
+    update.message!.reply_to_message = { ...message('anonymous').message!,
+      reply_to_message: undefined, from: { id: 1087968824, is_bot: true, first_name: 'Placeholder must not identify a person' },
+      sender_chat: { id: -100123, type, title: '<literal> Sender', username: 'sender_example' } };
+    await f.bot.handleUpdate(update);
+    const response = f.last(); const serialized = JSON.stringify(response.rich_message);
+    expect(richText(response)).toContain('<literal> Sender');
+    expect(richText(response)).toContain('does not identify a personal account');
+    expect(serialized).toContain('"copy_text":{"text":"-100123"}');
+    expect(serialized).not.toContain('1087968824');
+    expect(serialized).not.toContain('Placeholder');
+  });
+
+  it('reports the actual forwarding sender rather than inferring the original author', async () => {
+    const f = fixture(); const update = message('/id');
+    update.message!.reply_to_message = { ...message('forwarded').message!,
+      reply_to_message: undefined, from: { id: 42, is_bot: false, first_name: 'Visible sender' },
+      forward_origin: { type: 'user', date: 10, sender_user: { id: 99, is_bot: false, first_name: 'Original author' } } };
+    await f.bot.handleUpdate(update);
+    expect(richText(f.last())).toContain('User ID: 42');
+    expect(JSON.stringify(f.last().rich_message)).not.toContain('"copy_text":{"text":"99"}');
+    expect(richText(f.last())).not.toContain('Original author');
+  });
+
+  it('does not invent a sender for incomplete replies or treat incidental thread IDs as topics', async () => {
+    const f = fixture(); const update = message('/id');
+    update.message!.is_topic_message = undefined; update.message!.message_thread_id = 55;
+    update.message!.reply_to_message = { ...message('unknown').message!, from: undefined, reply_to_message: undefined,
+      forward_origin: { type: 'hidden_user', date: 10, sender_user_name: 'Hidden original' } };
+    await f.bot.handleUpdate(update);
+    expect(richText(f.last())).toContain('No identity was inferred');
+    expect(richText(f.last())).toContain('Thread ID: None');
+    expect(JSON.stringify(f.last().rich_message)).not.toContain('"copy_text":{"text":"55"}');
+    expect(richText(f.last())).not.toContain('Hidden original');
+    expect(f.calls.at(-1)?.payload.message_thread_id).toBeUndefined();
+  });
+
+  it('keeps /id adapter-local and leaves another module input intact', async () => {
+    const f = fixture(); const key = `${me.id}:1:1:0`;
+    f.adapter.sessions.setInput(key, 'rssInput', { panelId: 'rss', messageId: 12, promptMessageId: 13 });
+    await f.bot.handleUpdate(message('/id'));
+    expect(richText(f.last())).toContain('User ID: 1');
+    expect(f.adapter.sessions.get(key)?.rssInput).toEqual({ panelId: 'rss', messageId: 12, promptMessageId: 13 });
+    expect(f.execute).not.toHaveBeenCalled();
   });
 
   it('sends stats as literal native RichText only after core.status, without forwarding resource parameters', async () => {
@@ -356,6 +464,30 @@ describe('offline Telegram admission and commands', () => {
     for (const update of updates) await f.bot.handleUpdate(update as Update);
     expect(f.calls).toEqual([]);
     expect(f.execute).not.toHaveBeenCalled();
+  });
+
+  it.each(['forward_origin', 'external_reply'] as const)('never executes forwarded command-looking text or captions with %s', async origin => {
+    const f = fixture();
+    for (const value of ['/stats', '/addgroup -200', '/帮助']) {
+      for (const caption of [false, true]) {
+        const update = message(value);
+        const provenance = { type: 'user' as const, date: 100, sender_user: { id: 10, is_bot: false, first_name: 'Forwarded author' } };
+        if (origin === 'forward_origin') update.message!.forward_origin = provenance;
+        else update.message!.external_reply = { origin: provenance };
+        if (caption) {
+          update.message!.caption = value; update.message!.caption_entities = update.message!.entities;
+          delete update.message!.text; delete update.message!.entities;
+          update.message!.photo = [{ file_id: 'forwarded-photo', file_unique_id: 'unique', width: 10, height: 10 }];
+        }
+        await f.bot.handleUpdate(update);
+      }
+    }
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.resolveAlias).not.toHaveBeenCalled();
+    expect(f.allowed.has(-200)).toBe(false);
+    expect(f.calls.some(call => call.method === 'getChat' || call.method === 'getChatMember')).toBe(false);
+    expect(f.sent().some(call => (call.payload.rich_message as { markdown?: string } | undefined)?.markdown)).toBe(false);
   });
 
   it('keeps unknown commands out of Actions and leaves group chatter silent', async () => {
@@ -516,6 +648,7 @@ describe('safe callbacks and bounded interaction', () => {
     expect(help!.method).toBe('sendRichMessage');
     expect(catalogue!.method).toBe('sendRichMessage');
     const pane = f.last();
+    const pages = Math.ceil(commands.length / 6);
     expectNativeCommands(catalogue!.payload.rich_message,
       ['/start', '/help', '/帮助', '/幫助', '/ヘルプ', '/id', '/modules', '/commands', '/cancel', '/help']);
     expect(richText(pane).split('\n').filter(line => /^\/\w+(?: \([^\n]+\))? - /.test(line))).toHaveLength(6);
@@ -523,7 +656,7 @@ describe('safe callbacks and bounded interaction', () => {
     expect(buttonRows(pane)).toHaveLength(1);
     const firstRow = buttonRows(pane)[0]!;
     expect(firstRow).toHaveLength(3);
-    expect(firstRow.map(button => button.text)).toEqual(['\u25c1 Prev', '1/4', 'Next \u25b7']);
+    expect(firstRow.map(button => button.text)).toEqual(['\u25c1 Prev', `1/${pages}`, 'Next \u25b7']);
     expect(firstRow[0]).not.toHaveProperty('callback_data');
     expect(firstRow[1]).toHaveProperty('callback_data', buttonData(pane, 'pick'));
     await f.bot.handleUpdate(f.click('page:1', pane));
@@ -532,19 +665,18 @@ describe('safe callbacks and bounded interaction', () => {
     expect(richText(pane)).toContain('/stats -');
     expect(richText(pane).split('\n').filter(line => /^\/\w+(?: \([^\n]+\))? - /.test(line))).toHaveLength(6);
     expect(buttonRows(pane)[0]![2]).toHaveProperty('callback_data');
-    await f.bot.handleUpdate(f.click('page:2', pane));
-    expect(richText(pane)).toContain('/rss -');
-    expect(buttonRows(pane)[0]![2]).toHaveProperty('callback_data');
-    await f.bot.handleUpdate(f.click('page:3', pane));
-    expectNativeCommands(f.calls.filter(call => call.method === 'editMessageText').at(-1)!.payload.rich_message,
-      ['/ai', '/chats', '/memory', '/tasks', '/aiconfig', '/help']);
-    expect(richText(pane).split('\n').filter(line => /^\/\w+(?: \([^\n]+\))? - /.test(line))).toHaveLength(5);
+    for (let page = 2; page < pages; page++) {
+      await f.bot.handleUpdate(f.click(`page:${page}`, pane));
+      const expected = commands.slice(page * 6, (page + 1) * 6);
+      expectNativeCommands(f.calls.filter(call => call.method === 'editMessageText').at(-1)!.payload.rich_message,
+        [...expected.flatMap(command => [`/${command.name}`, ...(f.aliases[command.name] ?? []).map(alias => `/${alias}`)]), '/help']);
+      expect(richText(pane).split('\n').filter(line => /^\/\w+(?: \([^\n]+\))? - /.test(line))).toHaveLength(expected.length);
+      if (page < pages - 1) expect(buttonRows(pane)[0]![2]).toHaveProperty('callback_data');
+    }
     expect(buttonRows(pane)[0]![2]).not.toHaveProperty('callback_data');
-    await f.bot.handleUpdate(f.click('page:2', pane));
-    await f.bot.handleUpdate(f.click('page:1', pane));
-    await f.bot.handleUpdate(f.click('page:0', pane));
+    for (let page = pages - 2; page >= 0; page--) await f.bot.handleUpdate(f.click(`page:${page}`, pane));
     expect(f.sent()).toHaveLength(2);
-    expect(f.calls.filter(call => call.method === 'editMessageText')).toHaveLength(6);
+    expect(f.calls.filter(call => call.method === 'editMessageText')).toHaveLength(2 * (pages - 1));
     expect(f.execute).not.toHaveBeenCalled();
   });
 
@@ -587,45 +719,36 @@ describe('safe callbacks and bounded interaction', () => {
     const pane = f.last(chat);
     const names = () => [...richText(pane).matchAll(/^\/(\w+)(?: \([^\n]+\))? - /gm)].map(match => match[1]);
     const shown = names();
-    for (let page = 1; page < 4 && callbacks(pane).some(data => data.endsWith(`:page:${page}`)); page++) {
+    for (let page = 1; page < Math.ceil(commands.length / 6) && callbacks(pane).some(data => data.endsWith(`:page:${page}`)); page++) {
       await f.bot.handleUpdate(f.click('pick', pane, { user, chat }));
       await f.bot.handleUpdate(f.click(`page:${page}`, pane, { user, chat }));
       shown.push(...names());
     }
-    const expected = ['start', 'help', 'id', 'modules', 'commands', 'cancel'];
-    if (privateChat) expected.push('settings');
-    if (admin) {
-      if (privateChat) expected.push('stats');
-      expected.push('addgroup');
-      if (privateChat) expected.push('listgroups', 'webui', 'alias');
-    }
-    expected.push('rss', 'rate', 'weather', 'forecast');
-    if (privateChat) expected.push('sticker', 'subconv');
-    expected.push('ai');
-    if (privateChat) expected.push('chats', 'memory');
-    expected.push('tasks');
-    if (privateChat && admin) expected.push('aiconfig');
+    const expected = commands.filter(command => (!command.admin || admin) && (!command.private || privateChat)).map(command => command.name);
     expect(shown).toEqual(expected);
+    if (!admin) expect(shown).not.toContain('stats');
+    if (!privateChat) for (const name of ['settings', 'alias', 'sticker', 'subconv']) expect(shown).not.toContain(name);
   });
 
   it('opens a page grid from the counter and selects or returns in place without accepting stale or foreign buttons', async () => {
     const f = fixture();
     await f.bot.handleUpdate(message('/commands', { thread: 9 }));
     const pane = f.last(1, 9);
+    const pages = Math.ceil(commands.length / 6);
     const original = structuredClone(pane.rich_message);
     const stale = f.click('page:1', pane, { thread: 9 });
     await f.bot.handleUpdate(f.click('pick', pane, { user: 2, thread: 9 }));
     expect(pane.rich_message).toEqual(original);
     await f.bot.handleUpdate(f.click('pick', pane, { thread: 9 }));
-    expect(richText(pane)).toContain('Select a page (currently 1/4)');
-    expect(buttonRows(pane)[0]!.map(button => button.text)).toEqual(['1', '2', '3', '4']);
+    expect(richText(pane)).toContain(`Select a page (currently 1/${pages})`);
+    expect(buttonRows(pane)[0]!.map(button => button.text)).toEqual(Array.from({ length: pages }, (_, index) => String(index + 1)));
     expect(buttonRows(pane).at(-1)![0]!.text).toBe('Back to list');
     const selection = structuredClone(pane.rich_message);
     await f.bot.handleUpdate(stale);
     expect(pane.rich_message).toEqual(selection);
     await f.bot.handleUpdate(f.click('page:1', pane, { thread: 9 }));
     expect(richText(pane)).toContain('/stats -');
-    expect(buttonRows(pane)[0]!.map(button => button.text)).toEqual(['\u25c1 Prev', '2/4', 'Next \u25b7']);
+    expect(buttonRows(pane)[0]!.map(button => button.text)).toEqual(['\u25c1 Prev', `2/${pages}`, 'Next \u25b7']);
     await f.bot.handleUpdate(f.click('pick', pane, { thread: 9 }));
     expect(buttonRows(pane)[0]![1]).toMatchObject({ text: '2', style: 'primary' });
     await f.bot.handleUpdate(f.click('page:1', pane, { thread: 9 }));
@@ -710,7 +833,7 @@ describe('safe callbacks and bounded interaction', () => {
     await f.bot.handleUpdate(callback(data, { thread: 9 }, pane));
     expect(richText(pane)).toContain('/stats -');
     await f.bot.handleUpdate(f.click('pick', pane, { thread: 9 }));
-    expect(richText(pane)).toContain('Select a page (currently 2/4)');
+    expect(richText(pane)).toContain(`Select a page (currently 2/${Math.ceil(commands.length / 6)})`);
     await vi.advanceTimersByTimeAsync(600_001);
     await f.bot.handleUpdate(f.click('page:0', pane, { thread: 9 }));
     expect(richText(pane)).toContain('/help (');

@@ -20,7 +20,18 @@ describe('shared resource admission', () => {
     const policy = new ResourcePolicy({ heavyBytes: 1024 });
     expect(policy.tryAcquire('heavy', 1025)).toBeUndefined();
     expect(policy.tryAcquire('heavy', 1024)).toBeDefined();
-    expect(defaultResourcePolicy.heavyBytes).toBe(32 * 1024 * 1024);
+    expect(defaultResourcePolicy.heavyBytes).toBeUndefined();
+  });
+
+  it('does not impose a low-spec byte ceiling on the default runtime', () => {
+    const policy = new ResourcePolicy();
+    for (const megabytes of [32, 96, 512, 2048]) {
+      const lease = policy.tryAcquire('heavy', megabytes * 1024 * 1024);
+      expect(lease).toBeDefined();
+      expect(policy.tryAcquire('heavy', 1)).toBeUndefined();
+      lease!.release();
+    }
+    expect(policy.heavyBytes).toBeUndefined();
   });
 
   it.each([-1, NaN, Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('rejects invalid byte estimates %s', bytes => {

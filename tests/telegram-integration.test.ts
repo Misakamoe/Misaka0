@@ -27,6 +27,8 @@ import { commands, menuCommands } from '../src/telegram/commands.js';
 import { buttonRows, callbacks, liveCallbacks, recordContent, richText, telegramMessage } from './support/telegram.js';
 import { offlineStickers } from './support/core.js';
 import { ResourcePolicy } from '../src/resources.js';
+import type { AiTelegramPort } from '../src/ai/telegram-port.js';
+import { modules } from '../src/modules/index.js';
 
 const me: UserFromGetMe = {
   id: 12345, is_bot: true, first_name: 'Offline', username: 'offline_bot',
@@ -47,6 +49,11 @@ function text(command: string, actor = 1, chatId = actor, thread?: number): Upda
     message_thread_id: thread, is_topic_message: thread !== undefined,
     ...(command.startsWith('/') ? { entities: [{ type: 'bot_command' as const, offset: 0, length: command.split(' ')[0]!.length }] } : {}),
   } };
+}
+function formReply(value: string, prompt: Message, actor = 1, chatId = actor, thread?: number): Update {
+  const update = text(value, actor, chatId, thread);
+  update.message!.reply_to_message = { ...telegramMessage(prompt), reply_to_message: undefined };
+  return update;
 }
 function button(data: string, original: Message, actor = 1): Update {
   const base = text('', actor);
@@ -85,7 +92,7 @@ function joined(actor = 10, chatId = -200): Update {
   } };
 }
 
-async function fixture(rssOptions: Partial<RssOptions> = {}, groupAdmin?: (chatId: number, userId: number, signal: AbortSignal) => Promise<boolean>, providers: { rate?: RateOptions; weather?: WeatherOptions; sticker?: Parameters<typeof offlineStickers>[0] } = {}) {
+async function fixture(rssOptions: Partial<RssOptions> = {}, groupAdmin?: (chatId: number, userId: number, signal: AbortSignal) => Promise<boolean>, providers: { rate?: RateOptions; weather?: WeatherOptions; sticker?: Parameters<typeof offlineStickers>[0]; ai?: AiTelegramPort } = {}) {
   const directory = await mkdtemp('/tmp/kilo/telegram-integration-');
   const config: StartupConfig = {
     botToken: '12345:offline-test', adminIds: [1, 2], dataDir: directory, logLevel: 'silent', pollingTimeout: 30,
@@ -147,7 +154,7 @@ async function fixture(rssOptions: Partial<RssOptions> = {}, groupAdmin?: (chatI
   const executor = new ActionExecutor({ access, configuration, effects, aliases, rss, rate, weather, stickers, subconv, groupAdmin, now: () => now,
     status: () => ({ uptimeSeconds: 20, updateCount: 5, authorizedGroupCount: access.count(), polling: 'running', http: 'disabled', lastApiError: null }) });
   const controller = new AbortController();
-  const adapter = createTelegramAdapter(bot, { config, access, configuration, executor, stickers, health, signal: controller.signal });
+  const adapter = createTelegramAdapter(bot, { config, access, configuration, executor, stickers, ai: providers.ai, health, signal: controller.signal });
   cleanup.push(async () => { await adapter.stop(); await Promise.all([rss.stop(), rate.stop(), weather.stop(), stickers.stop()]); await executor.close(); await storage.close(); await rm(directory, { recursive: true, force: true }); });
   const sent = () => calls.filter(call => call.method === 'sendMessage' || call.method === 'sendRichMessage');
   const last = (actor = 1, thread?: number): Message => {
@@ -177,6 +184,13 @@ async function aliasInput(f: Awaited<ReturnType<typeof fixture>>, thread?: numbe
   const target = buttonRows(pane).flat().find(button => richText(button.text).includes('/help') && 'callback_data' in button);
   if (!target || !('callback_data' in target)) throw new Error('Missing cached /help alias target');
   await f.bot.handleUpdate(button(target.callback_data, pane));
+  const prompt = f.last(1, thread);
+  expect(prompt.message_id).not.toBe(pane.message_id);
+  expect(f.sent().at(-1)).toMatchObject({ method: 'sendRichMessage', payload: { reply_markup: { force_reply: true, selective: true } } });
+  expect(pane.reply_markup?.force_reply).toBeUndefined();
+  expect(f.adapter.sessions.get(`${me.id}:1:1:${thread ?? 0}`)?.aliasInput).toMatchObject({
+    messageId: pane.message_id, promptMessageId: prompt.message_id,
+  });
   return pane;
 }
 
@@ -571,6 +585,243 @@ describe('Telegram with real Actions and persistent services', () => {
     return { rate: { key: 'TEST_ONLY_KEY', json: rateJson }, weather: { qweatherHost: 'test.qweatherapi.com', qweatherKey: 'TEST_ONLY_KEY', json: weatherJson }, rateJson, weatherJson };
   }
 
+  const inputFields = { alias: 'aliasInput', rss: 'rssInput', weather: 'weatherInput', subconv: 'subconvInput' } as const;
+  const inputKinds = ['alias', 'rss', 'weather', 'subconv'] as const;
+  const values = { alias: 'isolated_alias', rss: 'https://feeds.example.com/isolated Isolated feed', weather: '北京海淀区', subconv: 'https://convert.example/sub' };
+  function availableAi() {
+    return { available: vi.fn(() => true), capture: vi.fn<AiTelegramPort['capture']>(async () => 'offline-file'),
+      isReply: vi.fn(() => false), attachTelegram: vi.fn<AiTelegramPort['attachTelegram']>() } satisfies AiTelegramPort;
+  }
+  async function waitingForms(f: Awaited<ReturnType<typeof fixture>>) {
+    const key = `${me.id}:1:1:9`;
+    const alias = await aliasInput(f, 9); const aliasPrompt = f.last(1, 9);
+    const savedAlias = f.adapter.sessions.get(key)?.aliasInput;
+    await f.bot.handleUpdate(text('/rss', 1, 1, 9));
+    const rss = f.last(1, 9);
+    await f.bot.handleUpdate(f.click('rssadd', rss));
+    const rssPrompt = f.last(1, 9);
+    expect(f.adapter.sessions.get(key)?.aliasInput).toEqual(savedAlias);
+    const savedRss = f.adapter.sessions.get(key)?.rssInput;
+    await f.bot.handleUpdate(text('/weather', 1, 1, 9));
+    const weatherPrompt = f.last(1, 9); const weather = f.messages.at(-2)!;
+    const savedWeather = f.adapter.sessions.get(key)?.weatherInput;
+    await f.bot.handleUpdate(text('/subconv', 1, 1, 9));
+    const subconv = f.last(1, 9);
+    await f.bot.handleUpdate(f.click('uinput:1', subconv));
+    const subconvPrompt = f.last(1, 9);
+    const panels = { alias, rss, weather, subconv };
+    const prompts = { alias: aliasPrompt, rss: rssPrompt, weather: weatherPrompt, subconv: subconvPrompt };
+    const pending = f.adapter.sessions.get(key)!;
+    expect(pending).toMatchObject({ aliasInput: savedAlias, rssInput: savedRss, weatherInput: savedWeather });
+    expect(Object.keys(pending).sort()).toEqual(Object.values(inputFields).sort());
+    expect(new Set(Object.values(prompts).map(prompt => prompt.message_id)).size).toBe(4);
+    for (const kind of inputKinds) {
+      expect(prompts[kind]).toMatchObject({ from: me, chat: { id: 1 }, message_thread_id: 9, is_topic_message: true,
+        reply_markup: { force_reply: true }, rich_message: { skip_entity_detection: kind === 'subconv' } });
+      expect(prompts[kind].message_id).not.toBe(panels[kind].message_id);
+      expect(panels[kind].reply_markup?.force_reply).toBeUndefined();
+      expect(pending[inputFields[kind]]).toMatchObject({ messageId: panels[kind].message_id, promptMessageId: prompts[kind].message_id });
+    }
+    return { key, panels, prompts, pending };
+  }
+
+  it.each(inputKinds)('routes an exact %s ForceReply only to its owner while all four module inputs coexist', async kind => {
+    const providers = lookupProviders(); const ai = availableAi();
+    const fetcher = vi.fn(async (url: string) => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }));
+    const f = await fixture({ fetcher }, undefined, { ...providers, ai });
+    const form = await waitingForms(f);
+    const execute = vi.spyOn(f.executor, 'execute');
+    await f.bot.handleUpdate(formReply(values[kind], form.prompts[kind], 1, 1, 9));
+    const expected = { alias: ['alias.add', 'alias.list'], rss: ['rss.add', 'rss.list'],
+      weather: ['weather.search', 'weather.query', 'weather.default.get'], subconv: ['subconv.settings.set'] };
+    expect(execute.mock.calls.map(call => call[1])).toEqual(expected[kind]);
+    expect(f.adapter.sessions.get(form.key)?.[inputFields[kind]]).toBeUndefined();
+    for (const other of inputKinds.filter(other => other !== kind)) {
+      expect(f.adapter.sessions.get(form.key)?.[inputFields[other]]).toEqual(form.pending[inputFields[other]]);
+    }
+    if (kind === 'alias') expect(f.aliases.resolve(values.alias)).toBe('help');
+    else expect(f.aliases.snapshot().revision).toBe(0);
+    expect(fetcher).toHaveBeenCalledTimes(kind === 'rss' ? 1 : 0);
+    expect(providers.weatherJson).toHaveBeenCalledTimes(kind === 'weather' ? 2 : 0);
+    expect(f.weather.getDefault(1).location).toBeNull();
+    if (kind === 'subconv') expect(f.subconv.settings(createInvocation({ actorId: 1, botId: me.id, source: 'telegram',
+      chat: { id: 1, type: 'private', threadId: 9 }, language: 'en' })).settings.backend).toBe(values.subconv);
+    expect(ai.capture).not.toHaveBeenCalled(); expect(ai.available).not.toHaveBeenCalled();
+    execute.mockClear();
+    await f.bot.handleUpdate(formReply(values[kind], form.prompts[kind], 1, 1, 9));
+    expect(execute).not.toHaveBeenCalled();
+    expect(f.adapter.sessions.get(form.key)?.[inputFields[kind]]).toBeUndefined();
+  });
+
+  it('does not treat bare values as any waiting form input or leak them to available AI', async () => {
+    const providers = lookupProviders(); const ai = availableAi();
+    const fetcher = vi.fn(async (url: string) => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }));
+    const f = await fixture({ fetcher }, undefined, { ...providers, ai });
+    const execute = vi.spyOn(f.executor, 'execute');
+    await f.bot.handleUpdate(text('AI routing positive control', 1, 1, 9));
+    expect(execute).toHaveBeenCalledWith(expect.anything(), 'ai.run.start', { text: 'AI routing positive control' });
+    const form = await waitingForms(f); execute.mockClear(); ai.available.mockClear();
+    for (const value of Object.values(values)) await f.bot.handleUpdate(text(value, 1, 1, 9));
+    expect(execute).not.toHaveBeenCalled(); expect(ai.capture).not.toHaveBeenCalled(); expect(ai.available).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled(); expect(providers.weatherJson).not.toHaveBeenCalled();
+    expect(f.aliases.snapshot().revision).toBe(0); expect(f.rss.snapshot().subscriptions).toEqual([]);
+    expect(f.adapter.sessions.get(form.key)).toEqual(form.pending);
+  });
+
+  it.each(inputKinds)('rejects foreign, stale and forwarded %s prompt replies without consuming any other form', async kind => {
+    const ai = availableAi(); const providers = lookupProviders();
+    const fetcher = vi.fn(async (url: string) => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }));
+    const f = await fixture({ fetcher }, undefined, { ...providers, ai });
+    const form = await waitingForms(f); const prompt = form.prompts[kind];
+    const execute = vi.spyOn(f.executor, 'execute');
+    const forwarded = formReply(values[kind], prompt, 1, 1, 9);
+    forwarded.message!.forward_origin = { type: 'user', date: 100, sender_user: { id: 2, is_bot: false, first_name: 'Other' } };
+    const external = formReply(values[kind], prompt, 1, 1, 9);
+    external.message!.external_reply = { origin: { type: 'hidden_user', date: 100, sender_user_name: 'Other' } };
+    const replies = [formReply(values[kind], form.panels[kind], 1, 1, 9), formReply(values[kind], prompt, 2, 2, 9),
+      formReply(values[kind], prompt, 2, 1, 9), formReply(values[kind], prompt, 1, 1, 10), forwarded, external];
+    for (const fake of [
+      { ...prompt, message_id: prompt.message_id + 1_000_000 }, { ...prompt, from: { ...me, id: 999 } },
+      { ...prompt, from: { ...me, is_bot: false } }, { ...prompt, from: undefined },
+      { ...prompt, chat: { id: 2, type: 'private', first_name: 'Other' } },
+      { ...prompt, message_thread_id: 10, is_topic_message: true }, { ...prompt, message_thread_id: 9, is_topic_message: false },
+    ]) replies.push(formReply(values[kind], fake as Message, 1, 1, 9));
+    for (const update of replies) {
+      await f.bot.handleUpdate(update);
+      expect(f.adapter.sessions.get(form.key)).toEqual(form.pending);
+    }
+    expect(execute).not.toHaveBeenCalled(); expect(ai.capture).not.toHaveBeenCalled(); expect(ai.available).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled(); expect(providers.weatherJson).not.toHaveBeenCalled();
+  });
+
+  it.each(inputKinds)('keeps captioned and non-text attachments out of AI, stickers and weather while %s waits', async kind => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const ai = availableAi(); const providers = lookupProviders();
+    const fetcher = vi.fn(async (url: string) => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }));
+    const f = await fixture({ fetcher }, undefined, { ...providers, ai });
+    const form = await waitingForms(f); const execute = vi.spyOn(f.executor, 'execute');
+    for (const attachment of ['photo', 'document', 'sticker', 'voice'] as const) {
+      for (const addressed of [false, true]) {
+        const update = addressed ? formReply('', form.prompts[kind], 1, 1, 9) : text('', 1, 1, 9);
+        delete update.message!.text; delete update.message!.entities;
+        if (attachment === 'photo') {
+          update.message!.photo = [{ file_id: 'photo', file_unique_id: 'photo-unique', width: 10, height: 10, file_size: 10 }];
+          update.message!.caption = 'Beijing weather PRIVATE_CAPTION';
+          update.message!.media_group_id = `blocked-${kind}-${addressed}`;
+        } else if (attachment === 'document') {
+          update.message!.document = { file_id: 'doc', file_unique_id: 'doc-unique', file_name: 'source.txt', mime_type: 'text/plain', file_size: 10 };
+          update.message!.caption = values[kind];
+        } else if (attachment === 'sticker') {
+          update.message!.sticker = { type: 'regular', file_id: 'sticker', file_unique_id: 'sticker-unique', width: 1, height: 1, is_animated: false, is_video: false };
+        } else update.message!.voice = { file_id: 'voice', file_unique_id: 'voice-unique', duration: 1, mime_type: 'audio/ogg', file_size: 10 };
+        await f.bot.handleUpdate(update);
+        expect(f.adapter.sessions.get(form.key)).toEqual(form.pending);
+      }
+    }
+    await vi.advanceTimersByTimeAsync(601);
+    expect(execute).not.toHaveBeenCalled(); expect(ai.capture).not.toHaveBeenCalled(); expect(ai.available).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled(); expect(providers.weatherJson).not.toHaveBeenCalled();
+    expect(f.calls.some(call => call.method === 'getFile' || call.method === 'sendPhoto' || call.method === 'sendDocument')).toBe(false);
+  });
+
+  it.each(inputKinds)('navigation or completion in %s clears only that module input', async kind => {
+    const providers = lookupProviders(); const f = await fixture({}, undefined, providers);
+    const form = await waitingForms(f);
+    if (kind === 'weather') await f.bot.handleUpdate(text(`/weather ${values.weather}`, 1, 1, 9));
+    else await f.bot.handleUpdate(f.click({ alias: 'aliashome', rss: 'rsshome', subconv: 'uhome' }[kind], form.panels[kind]));
+    expect(f.adapter.sessions.get(form.key)?.[inputFields[kind]]).toBeUndefined();
+    for (const other of inputKinds.filter(other => other !== kind)) {
+      expect(f.adapter.sessions.get(form.key)?.[inputFields[other]]).toEqual(form.pending[inputFields[other]]);
+    }
+    const execute = vi.spyOn(f.executor, 'execute');
+    await f.bot.handleUpdate(formReply(values[kind], form.prompts[kind], 1, 1, 9));
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('rate navigation and settings never clear module input, and expiry only removes the older alias prompt', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const providers = lookupProviders(); const f = await fixture({}, undefined, providers);
+    const alias = await aliasInput(f, 9); const aliasPrompt = f.last(1, 9);
+    const key = `${me.id}:1:1:9`;
+    const originalAlias = f.adapter.sessions.get(key)?.aliasInput;
+    await vi.advanceTimersByTimeAsync(300_000);
+    await f.bot.handleUpdate(text('/rss', 1, 1, 9)); const rss = f.last(1, 9);
+    await f.bot.handleUpdate(f.click('rssadd', rss));
+    await f.bot.handleUpdate(text('/weather', 1, 1, 9));
+    await f.bot.handleUpdate(text('/subconv', 1, 1, 9)); const subconv = f.last(1, 9);
+    await f.bot.handleUpdate(f.click('uinput:1', subconv));
+    const pending = f.adapter.sessions.get(key)!;
+    expect(pending.aliasInput).toEqual(originalAlias);
+    expect(Object.keys(pending)).toHaveLength(4);
+    await f.bot.handleUpdate(text('/rate currencies', 1, 1, 9)); const rate = f.last(1, 9);
+    await f.bot.handleUpdate(f.click('page:1', rate));
+    await f.bot.handleUpdate(text('/settings', 1, 1, 9));
+    expect(f.adapter.sessions.get(key)).toEqual(pending);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expectClosed(alias, 'a');
+    const { aliasInput: _expired, ...remaining } = pending;
+    expect(f.adapter.sessions.get(key)).toEqual(remaining);
+    const execute = vi.spyOn(f.executor, 'execute');
+    await f.bot.handleUpdate(formReply('late_alias', aliasPrompt, 1, 1, 9));
+    expect(execute).not.toHaveBeenCalled();
+    expect(f.adapter.sessions.get(key)).toEqual(remaining);
+  });
+
+  it('does not send a location reply intended for RSS to the coexisting weather prompt', async () => {
+    const providers = lookupProviders(); const f = await fixture({}, undefined, providers);
+    const form = await waitingForms(f); const execute = vi.spyOn(f.executor, 'execute');
+    const update = formReply('', form.prompts.rss, 1, 1, 9);
+    delete update.message!.text;
+    update.message!.location = { latitude: 39.96, longitude: 116.3 };
+    await f.bot.handleUpdate(update);
+    expect(execute).not.toHaveBeenCalled(); expect(providers.weatherJson).not.toHaveBeenCalled();
+    expect(f.adapter.sessions.get(form.key)).toEqual(form.pending);
+    const intended = { ...update, update_id: ++sequence, message: { ...update.message!, message_id: sequence,
+      reply_to_message: { ...telegramMessage(form.prompts.weather), reply_to_message: undefined } } };
+    await f.bot.handleUpdate(intended);
+    expect(execute.mock.calls.map(call => call[1])).toEqual(['weather.search', 'weather.query', 'weather.default.get']);
+    expect(f.adapter.sessions.get(form.key)?.rssInput).toEqual(form.pending.rssInput);
+    expect(f.adapter.sessions.get(form.key)?.weatherInput).toBeUndefined();
+  });
+
+  it('ignores incidental reply thread IDs when the RSS prompt and reply are not real topics', async () => {
+    const fetcher = vi.fn(async (url: string) => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }));
+    const f = await fixture({ fetcher });
+    await f.bot.handleUpdate(text('/rss', 10)); const pane = f.last(10);
+    await f.bot.handleUpdate(f.click('rssadd', pane, 10)); const prompt = f.last(10);
+    const update = formReply('https://feeds.example.com/ordinary', prompt, 10);
+    update.message!.message_thread_id = 777; update.message!.is_topic_message = false;
+    update.message!.reply_to_message!.message_thread_id = 888; update.message!.reply_to_message!.is_topic_message = false;
+    const execute = vi.spyOn(f.executor, 'execute');
+    await f.bot.handleUpdate(update);
+    expect(execute.mock.calls.map(call => call[1])).toEqual(['rss.add', 'rss.list']);
+    expect(execute.mock.calls[0]![0].chat).toEqual({ id: 10, type: 'private', threadId: undefined });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(f.rss.list({ kind: 'private', chatId: 10 }).total).toBe(1);
+    expect(f.rss.list({ kind: 'private', chatId: 10, threadId: 777 }).total).toBe(0);
+    expect(f.adapter.sessions.size).toBe(0);
+  });
+
+  it('does not route stale bot replies or their attachments into AI or weather when no form remains', async () => {
+    const ai = availableAi(); const providers = lookupProviders();
+    const f = await fixture({}, undefined, { ...providers, ai });
+    const pane = await aliasInput(f, 9); const prompt = f.last(1, 9);
+    await f.bot.handleUpdate(f.click('aliashome', pane));
+    expect(f.adapter.sessions.size).toBe(0);
+    const execute = vi.spyOn(f.executor, 'execute');
+    const reply = formReply('Beijing weather', prompt, 1, 1, 9);
+    await f.bot.handleUpdate(reply);
+    const photo = formReply('', prompt, 1, 1, 9);
+    delete photo.message!.text;
+    photo.message!.caption = 'PRIVATE_STALE_CAPTION';
+    photo.message!.photo = [{ file_id: 'stale-photo', file_unique_id: 'unique', width: 1, height: 1, file_size: 10 }];
+    await f.bot.handleUpdate(photo);
+    expect(execute).not.toHaveBeenCalled(); expect(ai.capture).not.toHaveBeenCalled(); expect(ai.available).not.toHaveBeenCalled();
+    expect(providers.weatherJson).not.toHaveBeenCalled();
+    expect(f.aliases.snapshot().revision).toBe(0);
+    expect(f.adapter.sessions.size).toBe(0);
+  });
+
   it.each(['/settings', '/commands', '/listgroups', '/alias', '/rss', '/rate 100 jp rmb', '/weather 北京海淀区', '/forecast 北京海淀区'])('renders ordinary controls inside %s rich content', async command => {
     const f = await fixture({}, undefined, lookupProviders());
     if (command === '/listgroups') await f.access.authorize(-100, 'Example group', 1, 0);
@@ -814,11 +1065,20 @@ describe('Telegram with real Actions and persistent services', () => {
     await f.bot.handleUpdate(shared(10, 9));
     expect(providers.weatherJson).not.toHaveBeenCalled();
     await f.bot.handleUpdate(text('/weather', 10, 10, 9));
-    const pane = f.last(10, 9);
+    const prompt = f.last(10, 9);
+    const pane = f.messages.at(-2)!;
+    expect(prompt.message_id).not.toBe(pane.message_id);
+    expect(prompt.reply_markup).toMatchObject({ force_reply: true, selective: true });
+    expect(f.adapter.sessions.get(`${me.id}:10:10:9`)?.weatherInput).toMatchObject({
+      messageId: pane.message_id, promptMessageId: prompt.message_id,
+    });
     await f.bot.handleUpdate(shared(11, 9));
     await f.bot.handleUpdate(shared(10, 10));
-    expect(providers.weatherJson).not.toHaveBeenCalled();
     await f.bot.handleUpdate(shared(10, 9));
+    expect(providers.weatherJson).not.toHaveBeenCalled();
+    const intended = shared(10, 9);
+    intended.message!.reply_to_message = { ...telegramMessage(prompt), reply_to_message: undefined };
+    await f.bot.handleUpdate(intended);
     expect(richText(pane)).toContain('Temperature: 8');
     expect(f.weather.getDefault(10).location).toBeNull();
     await f.bot.handleUpdate(f.click('wsave', pane, 10));
@@ -872,10 +1132,15 @@ describe('Telegram with real Actions and persistent services', () => {
     await f.bot.handleUpdate(text('/rss', 10, 10, 9));
     const pane = f.last(10, 9);
     await f.bot.handleUpdate(f.click('rssadd', pane, 10));
+    const prompt = f.last(10, 9);
+    expect(prompt.message_id).not.toBe(pane.message_id);
+    expect(prompt.reply_markup).toMatchObject({ force_reply: true, selective: true });
     expect(richText(pane)).toContain('RSS or Atom URL');
     await f.bot.handleUpdate(text('https://feeds.example.com/rss', 11, 11, 9));
-    expect(fetcher).not.toHaveBeenCalled();
     await f.bot.handleUpdate(text('https://feeds.example.com/rss My feed', 10, 10, 9));
+    await f.bot.handleUpdate(formReply('https://feeds.example.com/rss', pane, 10, 10, 9));
+    expect(fetcher).not.toHaveBeenCalled();
+    await f.bot.handleUpdate(formReply('https://feeds.example.com/rss My feed', prompt, 10, 10, 9));
     expect(fetcher).toHaveBeenCalledOnce();
     expect(richText(pane)).toContain('My feed');
     expect(richText(pane)).not.toMatch(/revision|expires at/i);
@@ -890,7 +1155,138 @@ describe('Telegram with real Actions and persistent services', () => {
     await f.bot.handleUpdate(f.click('rssremove', pane, 10));
     expect(f.rss.list({ kind: 'private', chatId: 10, threadId: 9 }).total).toBe(0);
     expect(richText(pane)).toContain('Unsubscribed');
-    expect(f.calls.filter(call => call.method === 'sendRichMessage' && call.payload.chat_id === 10)).toHaveLength(1);
+    expect(f.calls.filter(call => call.method === 'sendRichMessage' && call.payload.chat_id === 10)).toHaveLength(2);
+  });
+
+  it.each(['zh-CN', 'zh-TW', 'en', 'ja'] as const)('edits and clears RSS keyword lists through dedicated native prompts in %s', async locale => {
+    const fetcher = vi.fn(async url => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }));
+    const f = await fixture({ fetcher });
+    const target = { kind: 'private', chatId: 10, threadId: 9 } as const;
+    const handle = async (update: Update) => {
+      const actor = update.callback_query?.from ?? update.message!.from!;
+      actor.language_code = locale; await f.bot.handleUpdate(update);
+    };
+    await handle(text('/rss add https://feeds.example.com/rss', 10, 10, 9));
+    const pane = f.last(10, 9);
+    await handle(f.click('rssitem:0', pane, 10));
+    await handle(f.click('rssinclude', pane, 10));
+    const includePrompt = f.last(10, 9);
+    expect(includePrompt.message_id).not.toBe(pane.message_id);
+    expect(includePrompt.reply_markup).toMatchObject({ force_reply: true, selective: true });
+    expect(richText(includePrompt)).toContain(translator(locale)('bot:rss.includeKeywords'));
+    await handle(text('Not a filter input', 10, 10, 9));
+    await handle(formReply('Wrong prompt', pane, 10, 10, 9));
+    expect(f.rss.list(target).items[0]?.filters).toBeUndefined();
+    await handle(formReply(' NASA \n\n宇宙\n[a-z]+', includePrompt, 10, 10, 9));
+    expect(f.rss.list(target).items[0]).toMatchObject({ revision: 1, filters: { include: ['NASA', '宇宙', '[a-z]+'], exclude: [] } });
+    expect(pane.rich_message).toMatchObject({ skip_entity_detection: true });
+    expect(richText(pane)).toContain('[a-z]+');
+    await handle(f.click('rssexclude', pane, 10));
+    const excludePrompt = f.last(10, 9);
+    await handle(formReply('广告\nspam', excludePrompt, 10, 10, 9));
+    expect(f.rss.list(target).items[0]).toMatchObject({ revision: 2, filters: { include: ['NASA', '宇宙', '[a-z]+'], exclude: ['广告', 'spam'] } });
+    await handle(formReply('Stale reply', includePrompt, 10, 10, 9));
+    expect(f.rss.list(target).items[0]?.revision).toBe(2);
+    await handle(f.click('rssinclude', pane, 10));
+    await handle(f.click('rssclearfield', pane, 10));
+    expect(f.rss.list(target).items[0]).toMatchObject({ revision: 3, filters: { include: [], exclude: ['广告', 'spam'] } });
+    await handle(f.click('rssexclude', pane, 10));
+    await handle(f.click('rssclearfield', pane, 10));
+    expect(f.rss.list(target).items[0]).toMatchObject({ revision: 4, filters: { include: [], exclude: [] } });
+    await handle(f.click('rssfilterclear', pane, 10));
+    expect(f.rss.list(target).items[0]).toMatchObject({ revision: 5 });
+    expect(f.rss.list(target).items[0]?.filters).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it('shows the complete keyword list in its edit panel without detecting dynamic commands or markup', async () => {
+    const f = await fixture({ fetcher: async url => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }) });
+    const target = { kind: 'private', chatId: 10 } as const;
+    await f.bot.handleUpdate(text('/rss add https://feeds.example.com/rss', 10));
+    const entry = f.rss.list(target).items[0]!;
+    const last = '/help <b>literal</b> @not_a_command';
+    const include = [...Array.from({ length: 19 }, (_, index) => `keyword-${index}`), last];
+    await f.rss.update(target, { id: entry.id, revision: 0, filters: { include, exclude: [] } });
+    await f.bot.handleUpdate(text(`/rss filter ${entry.id}`, 10)); const pane = f.last(10);
+    expect(richText(pane)).not.toContain(last);
+    await f.bot.handleUpdate(f.click('rssinclude', pane, 10));
+    for (const keyword of include) expect(richText(pane)).toContain(keyword);
+    expect(pane.rich_message).toMatchObject({ skip_entity_detection: true });
+    expect(JSON.stringify(pane.rich_message)).not.toContain('"type":"bot_command"');
+    expect(JSON.stringify(pane.rich_message)).not.toContain('"type":"url"');
+    expect(richText(f.last(10))).not.toContain(last);
+  });
+
+  it('preserves another module input while applying RSS keywords and never parses them as feed URLs', async () => {
+    const fetcher = vi.fn(async url => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }));
+    const f = await fixture({ fetcher }); const target = { kind: 'private', chatId: 10, threadId: 9 } as const;
+    await f.bot.handleUpdate(text('/rss add https://feeds.example.com/rss', 10, 10, 9));
+    const rss = f.last(10, 9); await f.bot.handleUpdate(f.click('rssitem:0', rss, 10));
+    await f.bot.handleUpdate(text('/subconv', 10, 10, 9));
+    const subconv = f.last(10, 9); await f.bot.handleUpdate(f.click('uinput:0', subconv, 10));
+    const subconvPrompt = f.last(10, 9); const key = `${me.id}:10:10:9`;
+    const waiting = f.adapter.sessions.get(key)!.subconvInput;
+    await f.bot.handleUpdate(f.click('rssinclude', rss, 10)); const prompt = f.last(10, 9);
+    expect(f.adapter.sessions.get(key)?.subconvInput).toEqual(waiting);
+    await f.bot.handleUpdate(formReply('wrong actor', prompt, 11, 11, 9));
+    await f.bot.handleUpdate(formReply('wrong topic', prompt, 10, 10, 8));
+    const picture = formReply('', prompt, 10, 10, 9);
+    picture.message!.text = undefined;
+    picture.message!.photo = [{ file_id: 'not-downloaded', file_unique_id: 'no-download', width: 1, height: 1, file_size: 8 }];
+    await f.bot.handleUpdate(picture);
+    expect(f.rss.list(target).items[0]?.filters).toBeUndefined();
+    await f.bot.handleUpdate(formReply('https://example.com/literal-keyword\nspace telescope', prompt, 10, 10, 9));
+    expect(f.rss.list(target).items[0]?.filters).toEqual({ include: ['https://example.com/literal-keyword', 'space telescope'], exclude: [] });
+    expect(f.adapter.sessions.get(key)?.subconvInput).toEqual(waiting);
+    await f.bot.handleUpdate(formReply('https://subscription.example.com/private', subconvPrompt, 10, 10, 9));
+    expect(f.adapter.sessions.get(key)?.subconvInput).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it.each(['x'.repeat(65), Array.from({ length: 21 }, (_, index) => `word${index}`).join('\n'), 'hidden\u0000word'])('rejects invalid RSS keyword form input without saving a partial list: %j', async value => {
+    const f = await fixture({ fetcher: async url => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }) });
+    await f.bot.handleUpdate(text('/rss add https://feeds.example.com/rss', 10)); const pane = f.last(10);
+    await f.bot.handleUpdate(f.click('rssitem:0', pane, 10)); await f.bot.handleUpdate(f.click('rssinclude', pane, 10));
+    await f.bot.handleUpdate(formReply(value, f.last(10), 10));
+    expect(f.rss.list({ kind: 'private', chatId: 10 }).items[0]).toMatchObject({ revision: 0 });
+    expect(f.rss.list({ kind: 'private', chatId: 10 }).items[0]?.filters).toBeUndefined();
+  });
+
+  it('uses current RSS revision and permissions for keyword changes and supports read/clear shortcuts', async () => {
+    const groupAdmin = vi.fn(async () => true);
+    const f = await fixture({ fetcher: async url => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }) }, groupAdmin);
+    await f.access.authorize(-100, 'Group', 1, 0);
+    const target = { kind: 'group', chatId: -100, threadId: 9 } as const;
+    await f.bot.handleUpdate(text('/rss add https://feeds.example.com/rss', 10, -100, 9)); const pane = f.last(-100, 9);
+    const subscription = f.rss.list(target).items[0]!;
+    await f.bot.handleUpdate(f.click('rssitem:0', pane, 10)); await f.bot.handleUpdate(f.click('rssinclude', pane, 10));
+    const stale = f.last(-100, 9);
+    await f.rss.update(target, { id: subscription.id, revision: 0, filters: { include: [], exclude: ['Keep this rule'] } });
+    await f.bot.handleUpdate(formReply('Must not overwrite', stale, 10, -100, 9));
+    expect(f.rss.get(target, subscription.id)).toMatchObject({ revision: 1, filters: { include: [], exclude: ['Keep this rule'] } });
+    await f.bot.handleUpdate(f.click('rssinclude', pane, 10)); const denied = f.last(-100, 9);
+    groupAdmin.mockResolvedValue(false);
+    await f.bot.handleUpdate(formReply('Forbidden rule', denied, 10, -100, 9));
+    expect(f.rss.get(target, subscription.id).revision).toBe(1);
+    groupAdmin.mockResolvedValue(true);
+    await f.bot.handleUpdate(text(`/rss filter ${subscription.id}`, 10, -100, 9));
+    expect(richText(f.last(-100, 9))).toContain('Keep this rule');
+    await f.bot.handleUpdate(text(`/rss filter ${subscription.id} clear`, 10, -100, 9));
+    expect(f.rss.get(target, subscription.id).filters).toBeUndefined();
+    expect(f.rss.get(target, subscription.id).revision).toBe(2);
+  });
+
+  it('does not replay an expired RSS keyword input when its panel is reopened', async () => {
+    vi.useFakeTimers();
+    const f = await fixture({ fetcher: async url => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }) });
+    await f.bot.handleUpdate(text('/rss add https://feeds.example.com/rss', 10)); const pane = f.last(10);
+    await f.bot.handleUpdate(f.click('rssitem:0', pane, 10)); await f.bot.handleUpdate(f.click('rssinclude', pane, 10));
+    const prompt = f.last(10);
+    await vi.advanceTimersByTimeAsync(600_001);
+    await f.bot.handleUpdate(formReply('Expired keyword', prompt, 10));
+    expect(f.rss.list({ kind: 'private', chatId: 10 }).items[0]?.filters).toBeUndefined();
+    await f.bot.handleUpdate(button('mk:open:r:10', pane, 10));
+    expect(f.rss.list({ kind: 'private', chatId: 10 }).items[0]?.revision).toBe(0);
   });
 
   it('rechecks RSS group administrator rights before accepting form input', async () => {
@@ -901,8 +1297,11 @@ describe('Telegram with real Actions and persistent services', () => {
     await f.bot.handleUpdate(text('/rss', 10, -100, 9));
     const pane = f.last(-100, 9);
     await f.bot.handleUpdate(f.click('rssadd', pane, 10));
+    const prompt = f.last(-100, 9);
+    expect(prompt.reply_markup).toMatchObject({ force_reply: true, selective: true });
+    expect(prompt.rich_message?.blocks[0]).toMatchObject({ type: 'paragraph', text: { type: 'text_mention', user: { id: 10 } } });
     groupAdmin.mockResolvedValue(false);
-    await f.bot.handleUpdate(text('https://feeds.example.com/rss', 10, -100, 9));
+    await f.bot.handleUpdate(formReply('https://feeds.example.com/rss', prompt, 10, -100, 9));
     expect(fetcher).not.toHaveBeenCalled();
     expect(f.rss.snapshot().subscriptions).toEqual([]);
     expectClosed(pane, 'r', 10);
@@ -934,9 +1333,11 @@ describe('Telegram with real Actions and persistent services', () => {
     await f.bot.handleUpdate(text('/rss', 10));
     const pane = f.last(10);
     await f.bot.handleUpdate(f.click('rssadd', pane, 10));
+    const prompt = f.last(10);
     await vi.advanceTimersByTimeAsync(600_001);
     expectClosed(pane, 'r', 10);
     await f.bot.handleUpdate(text('https://feeds.example.com/rss', 10));
+    await f.bot.handleUpdate(formReply('https://feeds.example.com/rss', prompt, 10));
     expect(fetcher).not.toHaveBeenCalled();
     await f.bot.handleUpdate(button('mk:open:r:10', pane, 10));
     expect(richText(f.last(10))).toContain('RSS subscriptions (0)');
@@ -1072,7 +1473,7 @@ describe('Telegram with real Actions and persistent services', () => {
     expect(f.calls.filter(call => call.method === 'getChat').map(call => call.payload.chat_id)).toEqual([-200]);
   });
 
-  it('shows six native modules without claiming unrelated modules migrated', async () => {
+  it('shows registered native modules without claiming unrelated modules migrated', async () => {
     const f = await fixture();
     await f.bot.handleUpdate(text('/modules', 10));
     expect(richText(f.last(10))).toContain('Command aliases');
@@ -1083,29 +1484,31 @@ describe('Telegram with real Actions and persistent services', () => {
     expect(richText(f.last(10))).toContain('Sticker conversion');
     expect(richText(f.last(10))).toContain(translator('en')('web:subconv.name'));
     expect(richText(f.last(10))).not.toMatch(/hug|reminder|echo/i);
-    expect(commands).toHaveLength(23);
+    expect(menuCommands('en', true, true).map(command => command.command)).toEqual(commands.map(command => command.name));
     await f.bot.handleUpdate(text('/help', 10));
     expect(richText(f.last(10))).toContain('/sticker');
     expect(richText(f.last(10))).toContain('/subconv');
-    expect(richText(f.last(10))).toContain('Six native modules');
+    expect(richText(f.last(10))).toContain(`Installed native modules: ${modules.length}`);
     expect(richText(f.last(10))).toContain('/sticker and /subconv remain private-chat only without an administrator role');
   });
 
   it('binds alias text entry to its owner/topic and gives recognized commands priority without fabricating updates', async () => {
     const f = await fixture();
     const pane = await aliasInput(f, 9);
+    const prompt = f.last(1, 9);
     expectNativeCommands(f.calls.filter(call => call.method === 'editMessageText').at(-1)!.payload.rich_message, ['/help', '/cancel']);
     expect(richText(pane)).not.toMatch(/revision|Panel expires at|\{\{/i);
     const key = `${me.id}:1:1:9`;
-    expect(f.adapter.sessions.get(key)?.aliasInput).toMatchObject({ messageId: pane.message_id, command: 'help', revision: 0 });
+    expect(f.adapter.sessions.get(key)?.aliasInput).toMatchObject({ messageId: pane.message_id, promptMessageId: prompt.message_id, command: 'help', revision: 0 });
     const execute = vi.spyOn(f.executor, 'execute');
     await f.bot.handleUpdate(text('foreign_user', 2, 1, 9));
     await f.bot.handleUpdate(text('foreign_topic', 1, 1, 10));
+    await f.bot.handleUpdate(text('bare_input', 1, 1, 9));
     await f.bot.handleUpdate(text('/help', 1, 1, 9));
     await f.bot.handleUpdate(text('/幫助', 1, 1, 9));
     expect(f.aliases.snapshot().revision).toBe(0);
     expect(f.adapter.sessions.get(key)?.aliasInput).toBeDefined();
-    const input = text('新輸入', 1, 1, 9);
+    const input = formReply('新輸入', prompt, 1, 1, 9);
     const before = structuredClone(input);
     await f.bot.handleUpdate(input);
     expect(input).toEqual(before);
@@ -1138,14 +1541,17 @@ describe('Telegram with real Actions and persistent services', () => {
   it('ignores replies to a different message while retaining the panel-bound alias input', async () => {
     const f = await fixture();
     const pane = await aliasInput(f);
+    const prompt = f.last();
     await f.bot.handleUpdate(text('/help'));
     const unrelated = text('wrong_reply');
     unrelated.message!.reply_to_message = { ...telegramMessage(f.last()), reply_to_message: undefined };
     await f.bot.handleUpdate(unrelated);
     expect(f.aliases.resolve('wrong_reply')).toBeUndefined();
+    await f.bot.handleUpdate(formReply('panel_reply', pane));
+    expect(f.aliases.resolve('panel_reply')).toBeUndefined();
     expect(f.adapter.sessions.get(`${me.id}:1:1:0`)?.aliasInput?.messageId).toBe(pane.message_id);
     const intended = text('right_reply');
-    intended.message!.reply_to_message = { ...telegramMessage(pane), reply_to_message: undefined };
+    intended.message!.reply_to_message = { ...telegramMessage(prompt), reply_to_message: undefined };
     await f.bot.handleUpdate(intended);
     expect(f.aliases.resolve('right_reply')).toBe('help');
     expect(f.adapter.sessions.size).toBe(0);
@@ -1155,12 +1561,14 @@ describe('Telegram with real Actions and persistent services', () => {
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     const f = await fixture();
     const pane = await aliasInput(f);
+    const prompt = f.last();
     const execute = vi.spyOn(f.executor, 'execute');
     await vi.advanceTimersByTimeAsync(600_000);
     expect(f.adapter.sessions.size).toBe(0);
     expectClosed(pane, 'a');
     expect(f.adapter.panels.size).toBe(0);
     await f.bot.handleUpdate(text('too_late'));
+    await f.bot.handleUpdate(formReply('too_late', prompt));
     expect(f.aliases.resolve('too_late')).toBeUndefined();
     expect(f.aliases.snapshot().revision).toBe(0);
     expect(execute).not.toHaveBeenCalled();
@@ -1195,14 +1603,15 @@ describe('Telegram with real Actions and persistent services', () => {
     const f = await fixture();
     for (const value of ['two aliases', '<b>help</b>', 'https://evil.test']) {
       await aliasInput(f);
-      await f.bot.handleUpdate(text(value));
+      await f.bot.handleUpdate(formReply(value, f.last()));
     }
     expect(f.aliases.snapshot().revision).toBe(0);
     await aliasInput(f);
+    const prompt = f.last();
     expect(f.adapter.sessions.get(`${me.id}:1:1:0`)?.aliasInput).toBeDefined();
     const execute = vi.spyOn(f.executor, 'execute');
     vi.spyOn(f.access, 'isAdmin').mockReturnValue(false);
-    await f.bot.handleUpdate(text('no_longer_admin'));
+    await f.bot.handleUpdate(formReply('no_longer_admin', prompt));
     expect(f.aliases.resolve('no_longer_admin')).toBeUndefined();
     expect(f.aliases.snapshot().revision).toBe(0);
     expect(execute).not.toHaveBeenCalled();
@@ -1225,17 +1634,19 @@ describe('Telegram with real Actions and persistent services', () => {
     if (!target || !('callback_data' in target)) throw new Error('Missing final-page /alias target');
     await f.bot.handleUpdate(button(target.callback_data, pane));
     expect(f.adapter.sessions.get(`${me.id}:1:1:0`)?.aliasInput?.command).toBe('alias');
-    expect(f.sent()).toHaveLength(1);
+    expect(f.sent()).toHaveLength(2);
+    expect(f.sent().at(-1)).toMatchObject({ method: 'sendRichMessage', payload: { reply_markup: { force_reply: true } } });
     expect(callbacks(pane).every(data => Buffer.byteLength(data) <= 64)).toBe(true);
   });
 
   it('refreshes stale alias input after a concurrent mapping revision without silently retrying mutation', async () => {
     const f = await fixture();
     const pane = await aliasInput(f);
+    const prompt = f.last();
     const http = createInvocation({ actorId: 1, botId: me.id, source: 'http', chat: { id: 1, type: 'private' }, language: 'en' });
     expect(await f.executor.execute(http, 'alias.add', { command: 'help', alias: 'concurrent', revision: 0 })).toMatchObject({ status: 'succeeded' });
     const execute = vi.spyOn(f.executor, 'execute');
-    await f.bot.handleUpdate(text('stale_input'));
+    await f.bot.handleUpdate(formReply('stale_input', prompt));
     expect(f.aliases.resolve('stale_input')).toBeUndefined();
     expect(f.aliases.snapshot().revision).toBe(1);
     expect(execute.mock.calls.filter(call => call[1] === 'alias.add').map(call => call[2]))
@@ -1252,7 +1663,7 @@ describe('Telegram with real Actions and persistent services', () => {
     if (!help || !('callback_data' in help)) throw new Error('Missing refreshed /help alias target');
     await f.bot.handleUpdate(button(help.callback_data, pane));
     expect(f.adapter.sessions.get(`${me.id}:1:1:0`)?.aliasInput?.revision).toBe(1);
-    await f.bot.handleUpdate(text('fresh_input'));
+    await f.bot.handleUpdate(formReply('fresh_input', f.last()));
     expect(f.aliases.resolve('fresh_input')).toBe('help');
     expect(f.aliases.snapshot().revision).toBe(2);
     expect(execute.mock.calls.filter(call => call[1] === 'alias.add').map(call => call[2]))
@@ -1830,16 +2241,12 @@ describe('Telegram sticker panels with real scoped Actions', () => {
     expect(pane.reply_markup?.inline_keyboard ?? []).toEqual([]);
     expect(pane.rich_message?.blocks[0]?.type).toBe('paragraph');
     const rows = pane.rich_message!.blocks.slice(1);
-    expect(rows).toEqual(buttonRows(pane).flatMap(buttons => [
-      ...(buttons.some(button => 'callback_data' in button && /:stformat:(?:png|jpg|webp|gif)$/.test(button.callback_data))
-        ? [{ type: 'paragraph', text: [{ type: 'marked', text: 'Choose format' }, ':'] }] : []),
-      { type: 'buttons', buttons },
-    ]));
+    expect(rows).toEqual(buttonRows(pane).map(buttons => ({ type: 'buttons', buttons })));
     for (const row of buttonRows(pane)) {
       expect(row.length).toBeGreaterThan(0);
       expect(row.length).toBeLessThanOrEqual(8);
       for (const button of row) {
-        expect(Object.keys(button).sort()).toEqual(['text', 'callback_data' in button ? 'callback_data' : 'url',
+        expect(Object.keys(button).sort()).toEqual(['text', 'disabled' in button ? 'disabled' : 'callback_data' in button ? 'callback_data' : 'url',
           ...('style' in button ? ['style'] : [])].sort());
       }
     }
@@ -1900,7 +2307,7 @@ describe('Telegram sticker panels with real scoped Actions', () => {
     await f.bot.handleUpdate(sticker(kind, 10, 10, undefined, { emoji: '\u{1f680}', set_name: 'Example_pack' }));
     const pane = f.last(10);
     const description = `${t('bot:sticker.single', { kind: t(`bot:sticker.kinds.${kind}`), width: 512, height: 256 })} \u{1f680}`;
-    expect(richText(pane)).toBe(`${t('bot:sticker.title')}\n${description}\n${t(kind === 'static' ? 'bot:sticker.hint' : 'bot:sticker.animationHint')}\n\n${t('bot:sticker.format')}`);
+    expect(richText(pane)).toBe(`${t('bot:sticker.title')}\n${description}\n${t(kind === 'static' ? 'bot:sticker.hint' : 'bot:sticker.animationHint')}`);
     expect(richText(pane).length).toBeLessThan(180);
     expect(richText(pane)).not.toMatch(/Associated emoji:|Dimensions:|Delivery mode:|10 minutes/);
     expectNativeSticker(pane);
@@ -1910,9 +2317,9 @@ describe('Telegram sticker panels with real scoped Actions', () => {
       { text: t('bot:sticker.original'), callback_data: buttonData(pane, 'stformat:original') },
       { text: t('bot:sticker.wholePack'), callback_data: buttonData(pane, 'stpack') },
     ]);
-    expect(buttonRows(pane)).toHaveLength(3);
+    expect(buttonRows(pane)).toHaveLength(4);
     expect(buttonRows(pane).at(-1)?.every(button => 'callback_data' in button && /:stformat:(?:png|jpg|gif)$/.test(button.callback_data))).toBe(true);
-    expect(pane.rich_message?.blocks.at(-2)).toEqual({ type: 'paragraph', text: [{ type: 'marked', text: 'Choose format' }, ':'] });
+    expect(pane.rich_message?.blocks.at(-2)).toEqual({ type: 'buttons', buttons: [{ text: 'Choose format', disabled: true }] });
     expect(buttonRows(pane).flat().some(button => 'url' in button)).toBe(false);
     await f.bot.handleUpdate(f.click('stmode:file', pane, 10));
     expectSelectedMode(pane, 'file');
@@ -1920,17 +2327,18 @@ describe('Telegram sticker panels with real scoped Actions', () => {
     expect(f.transport.send).not.toHaveBeenCalled();
   });
 
-  it.each(['zh-CN', 'zh-TW', 'en', 'ja'] as const)('keeps the format label colon outside marked text in %s', async locale => {
+  it.each(['zh-CN', 'zh-TW', 'en', 'ja'] as const)('uses a disabled format placeholder without a colon in %s', async locale => {
     const f = await stickerFixture();
     const update = sticker();
     update.message!.from!.language_code = locale;
     await f.bot.handleUpdate(update);
     const label = translator(locale)('bot:sticker.format');
-    const marked = label.replace(/[:：]$/, '');
     expect(f.last(10).rich_message?.blocks.at(-2)).toEqual({
-      type: 'paragraph', text: [{ type: 'marked', text: marked }, label.slice(marked.length)],
+      type: 'buttons', buttons: [{ text: label, disabled: true }],
     });
-    expect(marked).not.toMatch(/[:：]$/);
+    expect(label).not.toMatch(/[:：]$/);
+    expect(richText(f.last(10))).not.toContain(label);
+    expect(f.transport.send).not.toHaveBeenCalled();
   });
 
   it('replaces embedded choices with progress and then fresh completed controls on the same message', async () => {

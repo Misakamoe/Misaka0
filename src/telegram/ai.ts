@@ -6,33 +6,33 @@ import { finished } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Bot, Context, GrammyError, InputFile } from 'grammy';
 import type { InputRichMessageWithoutUpload, Message, RichMessageButton } from 'grammy/types';
-import type { AiConversation, AiMemory, AiPage, AiSettingsSnapshot, AiTurn } from '../../shared/schemas/ai.js';
+import { aiOutputTextLimits, type AiConversation, type AiMemory, type AiPage, type AiSettingsSnapshot, type AiTurn } from '../../shared/schemas/ai.js';
 import type { AutomationView } from '../../shared/schemas/ai-automation.js';
-import type { ActionResult, Confirmation } from '../../shared/schemas/index.js';
+import { confirmationSchema, errorCodeSchema, type ActionResult, type Confirmation } from '../../shared/schemas/index.js';
 import { createInvocation, type ActionExecutor, type InvocationContext } from '../actions.js';
 import type { AccessService } from '../access.js';
 import type { AiCapturedFile, AiDelivery, AiDeliveryTarget, AiTelegramPort } from '../ai/telegram-port.js';
 import type { ConfigurationService } from '../configuration.js';
 import { AppError, safeError, throwIfAborted } from '../errors.js';
 import { translator } from '../i18n.js';
-import { telegramSignal, type ApiHealth } from './effects.js';
+import { plainValue, telegramSignal, type ApiHealth } from './effects.js';
 import { PanelStore, type Panel } from './panels.js';
 import { messageTopicId, sessionKey } from './session.js';
 import { panelContent } from './rich.js';
 
 const maxBytes = 1_048_576;
-const maxText = 16_384;
+const maxText = 32_768;
 const maxProposalBytes = 32 * 1024;
 type StructuredMessage = { blocks: NonNullable<InputRichMessageWithoutUpload['blocks']>; skip_entity_detection?: boolean };
 type Control = { label: string; action: string; input: Record<string, unknown>; confirmation?: string };
 type Controls = { items: Control[]; signal?: AbortSignal; generation?: number; busy?: boolean; executing?: boolean;
-  reopen?: Control; receipt?: string; runId?: string };
+  reopen?: Control; receipt?: string; runId?: string; proposal?: StructuredMessage };
 type Proposal = { key: string; runId?: string; expiresAt: number; digest: string; controller: AbortController;
   work?: Promise<void>; failed?: ReturnType<typeof safeError>['code'] };
 type Run = {
   target: AiDeliveryTarget; controller: AbortController; signal: AbortSignal; turnSignal: AbortSignal; detach: () => void;
-  draftId: number; messageId?: number; panel: Panel<Controls>; text: string;
-  nextAt: number; timer?: ReturnType<typeof setTimeout>; work?: Promise<void>; finalizing: boolean; uncertain: boolean;
+  draftId: number; messageId?: number; panel: Panel<Controls>; text: string; hasOutput: boolean;
+  nextAt: number; timer?: ReturnType<typeof setTimeout>; work?: Promise<void>; retirement?: Promise<void>; finalizing: boolean; uncertain: boolean;
 };
 type Album = { context: InvocationContext; files: AiCapturedFile[]; text: string; replyTo?: number; invalid: boolean; timer: ReturnType<typeof setTimeout> };
 
@@ -47,10 +47,14 @@ export interface AiAdapterDependencies {
   fetch?: typeof fetch;
 }
 
-// Only literal provider text is accepted here, never provider-owned rich blocks or callbacks.
+// Controls, parameters and server notices remain literal, separate from model answer formatting.
 function rich(text: string, buttons: RichMessageButton[][] = []): StructuredMessage {
   if (typeof text !== 'string' || text.length > maxText) throw new AppError('INVALID_OUTPUT');
   return { blocks: [{ type: 'paragraph', text }, ...buttons.map(row => ({ type: 'buttons' as const, buttons: row }))], skip_entity_detection: true };
+}
+let answerRenderer: Promise<typeof import('./ai-rich.js')> | undefined;
+async function answer(text: string): Promise<StructuredMessage> {
+  return (await (answerRenderer ??= import('./ai-rich.js'))).aiAnswerContent(text);
 }
 
 function captureFile(message: Message): AiCapturedFile | undefined {
@@ -63,12 +67,13 @@ function captureFile(message: Message): AiCapturedFile | undefined {
   const mimeType = photo ? 'image/jpeg' : message.voice ? 'audio/ogg' : sticker
     ? sticker.is_animated ? 'application/x-tgsticker' : sticker.is_video ? 'video/webm' : 'image/webp'
     : message.audio?.mime_type ?? message.document?.mime_type ?? '';
+  const imageDocument = Boolean(message.document && ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mimeType));
   if (!Number.isSafeInteger(file.file_size) || file.file_size! < 1 || file.file_size! > maxBytes
     || !file.file_id || file.file_id.length > 512 || !file.file_unique_id || file.file_unique_id.length > 256
     || message.audio && !['audio/ogg', 'audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-wav', 'audio/flac'].includes(mimeType)
-    || message.document && !['application/pdf', 'text/plain'].includes(mimeType)) throw new AppError('INVALID_INPUT');
+    || message.document && !imageDocument && !['application/pdf', 'text/plain'].includes(mimeType)) throw new AppError('INVALID_INPUT');
   return { fileId: file.file_id, uniqueId: file.file_unique_id, size: file.file_size!, mimeType,
-    kind: photo ? 'image' : sticker ? 'sticker' : message.document ? 'document' : 'audio',
+    kind: photo || imageDocument ? 'image' : sticker ? 'sticker' : message.document ? 'document' : 'audio',
     name: photo ? 'photo.jpg' : sticker ? 'sticker' : message.voice ? 'voice.ogg'
       : Array.from(message.audio?.file_name ?? message.document?.file_name ?? 'attachment').map(c => c.charCodeAt(0) < 32 || '/\\'.includes(c) ? '_' : c).join('').slice(0, 128) };
 }
@@ -87,6 +92,8 @@ function validateFile(file: AiCapturedFile, bytes: Uint8Array): void {
   }
   const valid = file.mimeType === 'application/pdf' ? starts('%PDF-')
     : file.mimeType === 'image/jpeg' ? header[0] === 255 && header[1] === 216 && header[2] === 255
+      : file.mimeType === 'image/png' ? header.subarray(0, 8).toString('hex') === '89504e470d0a1a0a'
+        : file.mimeType === 'image/gif' ? starts('GIF87a') || starts('GIF89a')
       : file.mimeType === 'image/webp' ? starts('RIFF') && starts('WEBP', 8)
         : file.mimeType === 'application/x-tgsticker' ? header[0] === 31 && header[1] === 139 && header[2] === 8
           : file.mimeType === 'video/webm' && file.kind === 'sticker' ? header.subarray(0, 4).toString('hex') === '1a45dfa3'
@@ -107,12 +114,30 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
   const albums = new Map<string, Album>();
   const closedAlbums = new Map<string, number>();
   const pending = new Set<Promise<unknown>>();
+  let cacheTimer: ReturnType<typeof setTimeout> | undefined;
   let backoffUntil = 0;
   const track = <T>(task: Promise<T>): Promise<T> => {
     pending.add(task);
     void task.then(() => pending.delete(task), () => pending.delete(task));
     return task;
   };
+  function pruneCaches() {
+    if (cacheTimer) clearTimeout(cacheTimer);
+    cacheTimer = undefined;
+    const now = Date.now(); const deadlines: number[] = [];
+    for (const [token, entry] of proposals) {
+      if (entry.work) continue;
+      if (entry.expiresAt <= now) proposals.delete(token);
+      else deadlines.push(entry.expiresAt);
+    }
+    for (const [key, expiry] of closedAlbums) {
+      if (expiry <= now) closedAlbums.delete(key);
+      else deadlines.push(expiry);
+    }
+    if (signal.aborted || !deadlines.length) return;
+    cacheTimer = setTimeout(pruneCaches, Math.min(2_147_483_647, Math.max(0, Math.min(...deadlines) - now)));
+    cacheTimer.unref();
+  }
   const language = (ctx: Context) => deps.configuration.resolveLanguage(ctx.from!.id, ctx.from?.language_code);
   const context = (ctx: Context, phase = ''): InvocationContext => {
     const message = ctx.update.message ?? ctx.update.callback_query?.message;
@@ -152,6 +177,11 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
     }
   }
 
+  function controlContent(panel: Panel<Controls>, notice: string, rows: RichMessageButton[][] = []): StructuredMessage {
+    if (!panel.value.proposal) return rich(notice, rows);
+    return { blocks: [...panel.value.proposal.blocks, { type: 'paragraph', text: notice },
+      ...rows.map(buttons => ({ type: 'buttons' as const, buttons }))], skip_entity_detection: true };
+  }
   const panels = new PanelStore<Controls>({ capacity: 128, onClose: async (panel, reason) => {
     panel.value.items = [];
     if (signal.aborted || panel.messageId === undefined) return;
@@ -161,15 +191,15 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
     let rows: RichMessageButton[][] = [];
     let fresh: Panel<Controls> | undefined;
     if (panel.value.reopen && reason !== 'replaced') {
-      // Retain only a bounded, read-only route, never the old mutation, revision or approval.
+      // Keep only a read-only route and display text, never executable old parameters or approval tokens.
       try {
-        fresh = panels.create(panel.binding, { items: [panel.value.reopen], receipt: text });
+        fresh = panels.create(panel.binding, { items: [panel.value.reopen], receipt: text, proposal: panel.value.proposal });
         await panels.attach(fresh, panel.messageId);
         rows = buttons(fresh);
       } catch { /* Keep the receipt even if there is no room for another navigation panel. */ }
     }
     const edit = () => api(s => bot.api.editMessageText(panel.binding.chatId, panel.messageId!,
-      panelContent(text, [], rows), { reply_markup: { inline_keyboard: [] } }, s)).then(() => undefined);
+      panel.value.proposal ? controlContent(panel, text, rows) : panelContent(text, [], rows), { reply_markup: { inline_keyboard: [] } }, s)).then(() => undefined);
     // Retrying an edit of this exact message cannot duplicate a mutation or delivery.
     const render = () => edit().catch(error => safeError(error).code === 'FORBIDDEN' ? undefined : edit());
     if (fresh) await panels.render(fresh, render);
@@ -207,6 +237,7 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
       panel.value.items = items;
       panel.value.reopen = reopen;
       panel.value.receipt = undefined;
+      panel.value.proposal = undefined;
     });
   }
 
@@ -256,12 +287,18 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
       });
     } catch { throw new AppError('INVALID_OUTPUT'); }
     if (json === undefined) throw new AppError('INVALID_OUTPUT');
+    const parsedSubject = confirmationSchema.shape.subject.safeParse(confirmation.subject);
+    if (!parsedSubject.success) throw new AppError('INVALID_OUTPUT');
+    const subject = parsedSubject.data;
+    if (subject && (!['rss.update', 'rss.remove'].includes(confirmation.actionId) || input === null || typeof input !== 'object'
+      || Array.isArray(input) || (input as Record<string, unknown>).id !== subject.id)) throw new AppError('INVALID_OUTPUT');
+    const subjectJson = subject ? JSON.stringify(subject) : '';
     const serialized = json;
-    if (Buffer.byteLength(json) > maxProposalBytes) throw new AppError('CAPACITY');
+    if (Buffer.byteLength(json) + Buffer.byteLength(subjectJson) > maxProposalBytes) throw new AppError('CAPACITY');
     if (!confirmation.token || json.includes(confirmation.token) || confirmation.actionId.includes(confirmation.token)
-      || confirmation.target.includes(confirmation.token)) throw new AppError('INVALID_OUTPUT');
-    const digest = createHash('sha256').update(JSON.stringify([confirmation.actionId, confirmation.target, expiresAt, json])).digest('hex');
-    for (const [token, entry] of proposals) if (!entry.work && entry.expiresAt <= Date.now()) proposals.delete(token);
+      || confirmation.target.includes(confirmation.token) || subjectJson.includes(confirmation.token)) throw new AppError('INVALID_OUTPUT');
+    const digest = createHash('sha256').update(JSON.stringify([confirmation.actionId, confirmation.target, expiresAt, json, subject ?? null])).digest('hex');
+    pruneCaches();
     const previous = proposals.get(confirmation.token);
     if (previous) {
       if (previous.key !== scopeKey(ctx) || previous.runId !== run?.target.runId) throw new AppError('FORBIDDEN');
@@ -289,11 +326,15 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
       { type: 'paragraph', text: [t('bot:ai.approvalExpiry'), ' ', { type: 'date_time', text: confirmation.expiresAt,
         unix_time: Math.floor(expiresAt / 1000), date_time_format: 'Dt' }] },
     ] };
+    if (subject) content.blocks.splice(1, 0, { type: 'paragraph', text: [
+      t('bot:ai.rssSubject', { title: plainValue(subject.title, 128).trim() || t('bot:rss.untitled') }), ' ', { type: 'code', text: subject.id },
+    ] });
     const revision = input !== null && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>).revision : undefined;
     if (revision !== undefined) content.blocks.push({ type: 'paragraph', text: t('bot:ai.approvalRevision', { revision: JSON.stringify(revision) }) });
     const document = json.length > 1500;
     content.blocks.push({ type: 'paragraph', text: t(document ? 'bot:ai.largeProposal' : 'bot:ai.proposal') });
     if (!document) content.blocks.push({ type: 'paragraph', text: json });
+    panel.value.proposal = content;
     const work = (async () => {
       try {
         let replyTo: number | undefined;
@@ -320,7 +361,7 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
       }
     })();
     entry.work = work;
-    try { await track(work); } finally { entry.work = undefined; }
+    try { await track(work); } finally { entry.work = undefined; pruneCaches(); }
   }
 
   async function result<T>(ctx: InvocationContext, value: ActionResult<T>): Promise<T | undefined> {
@@ -336,25 +377,38 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
   }
   const execute = <T>(ctx: InvocationContext, action: string, input: unknown) => deps.executor.execute<T>(ctx, action, input).then(value => result(ctx, value));
 
-  function retire(run: Run) {
+  function retire(run: Run, reason: 'used' | 'cancelled' = 'cancelled'): Promise<void> {
+    if (run.retirement) return run.retirement;
+    if (run.uncertain || reason === 'cancelled' && run.finalizing) run.panel.messageId = undefined;
+    run.finalizing = true;
     if (run.timer) clearTimeout(run.timer);
     run.timer = undefined;
     run.detach();
-    runs.delete(run.target.runId);
+    run.controller.abort(); run.text = ''; run.panel.value.items = [];
+    const draining: Promise<unknown>[] = run.work ? [run.work] : [];
+    for (const entry of proposals.values()) if (entry.runId === run.target.runId && entry.key === scopeKey(run.target)) {
+      entry.controller.abort(); if (entry.work) draining.push(entry.work);
+    }
+    run.retirement = track(Promise.resolve().then(async () => {
+      await Promise.allSettled(draining);
+      await Promise.all([panels.close(run.panel, reason),
+        panels.closeOwned(scopeKey(run.target), reason, panel => panel.value.runId === run.target.runId)]);
+    }).finally(() => { if (runs.get(run.target.runId) === run) runs.delete(run.target.runId); }));
+    return run.retirement;
   }
   function bindSignal(run: Run, turnSignal: AbortSignal) {
     run.detach();
     run.turnSignal = turnSignal;
     run.signal = AbortSignal.any([signal, turnSignal, run.controller.signal]);
-    const abort = () => retire(run);
+    const abort = () => { void retire(run); };
     run.detach = () => run.signal.removeEventListener('abort', abort);
     run.signal.addEventListener('abort', abort, { once: true });
-    if (run.signal.aborted) retire(run);
+    if (run.signal.aborted) void retire(run);
   }
   function live(target: AiDeliveryTarget, turnSignal?: AbortSignal): Run | undefined {
     const run = runs.get(target.runId);
     if (!run || scopeKey(run.target) !== scopeKey(target) || run.target.conversationId !== target.conversationId
-      || run.uncertain) return undefined;
+      || run.uncertain || run.retirement) return undefined;
     if (turnSignal && turnSignal !== run.turnSignal) bindSignal(run, turnSignal);
     if (run.signal.aborted) return undefined;
     checkTarget(target);
@@ -362,7 +416,8 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
   }
   async function preview(run: Run) {
     if (run.finalizing || !live(run.target)) return;
-    const content = rich(run.text, run.target.chat.type === 'private' ? [] : buttons(run.panel));
+    const content = run.hasOutput ? await answer(run.text) : rich(run.text);
+    if (run.target.chat.type !== 'private') content.blocks.push(...buttons(run.panel).map(row => ({ type: 'buttons' as const, buttons: row })));
     if (run.target.chat.type === 'private') {
       await api(s => bot.api.sendRichMessageDraft(run.target.chat.id, run.draftId, content, {
         message_thread_id: run.target.chat.threadId, can_stop: true, keep_on_stop: true,
@@ -385,6 +440,35 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
     run.timer.unref();
   }
 
+  async function finishReply(target: AiDeliveryTarget, text: string, turnSignal: AbortSignal, notice?: string): Promise<number | undefined> {
+    const run = live(target, turnSignal);
+    if (!run || run.finalizing || turnSignal.aborted) return undefined;
+    run.finalizing = true;
+    if (run.timer) clearTimeout(run.timer);
+    await run.work;
+    if (run.signal.aborted) { await retire(run); return undefined; }
+    try {
+      const t = translator(target.language);
+      const content: StructuredMessage = text.length > maxText ? rich(t('bot:ai.outputTooLong'))
+        : text ? await answer(text) : notice ? { blocks: [], skip_entity_detection: true } : rich(t('bot:ai.saved'));
+      // A truncated fence or other model markup must not absorb the trusted failure notice.
+      if (notice) content.blocks.push({ type: 'paragraph', text: notice });
+      if (target.chat.type === 'private') {
+        const message = await track(api(s => bot.api.sendRichMessage(target.chat.id, content, {
+          message_thread_id: target.chat.threadId, protect_content: false,
+        }, s), run.signal, true));
+        return message.message_id;
+      }
+      if (run.messageId !== undefined) await track(api(s => bot.api.editMessageText(target.chat.id, run.messageId!, content, {
+        reply_markup: { inline_keyboard: [] },
+      }, s), run.signal, true));
+      // Do not let the expiry hook overwrite the completed answer.
+      run.panel.messageId = undefined;
+      return run.messageId;
+    } catch (error) { run.uncertain = safeError(error).code === 'OUTCOME_UNKNOWN'; throw error; }
+    finally { await retire(run, 'used'); }
+  }
+
   const delivery: AiDelivery = {
     async started(target, turnSignal) {
       checkTarget(target); throwIfAborted(signal); throwIfAborted(turnSignal);
@@ -398,7 +482,7 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
       do { draftId = randomInt(1, 2_147_483_647); } while ([...runs.values()].some(run => run.draftId === draftId));
       const run: Run = { target: { ...target, chat: { ...target.chat } }, controller, signal: combined, turnSignal,
         detach: () => undefined, panel, draftId,
-        text: translator(target.language)('bot:ai.started'), nextAt: 0, finalizing: false, uncertain: false };
+        text: translator(target.language)('bot:ai.started'), hasOutput: false, nextAt: 0, finalizing: false, uncertain: false };
       runs.set(target.runId, run);
       bindSignal(run, turnSignal);
       try {
@@ -418,8 +502,11 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
     async progress(target, text, turnSignal) {
       const run = live(target, turnSignal);
       if (!run || run.finalizing) return;
-      if (text.length > maxText) throw new AppError('INVALID_OUTPUT');
-      run.text = text; schedule(run);
+      if (text.length > aiOutputTextLimits.characters) throw new AppError('AI_OUTPUT_LIMIT');
+      // Load on first output; parsing stays coalesced with the actual preview updates.
+      await (answerRenderer ??= import('./ai-rich.js'));
+      if (!live(target, turnSignal) || run.finalizing) return;
+      run.text = text; run.hasOutput = true; schedule(run);
     },
     async approval(target, confirmation: Confirmation, tool, turnSignal, input) {
       const run = live(target, turnSignal);
@@ -432,35 +519,22 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
         label: t('bot:ai.confirm'), action: 'ai.run.confirm', input: { runId: target.runId, token: confirmation.token },
       }, { label: t('bot:ai.stop'), action: 'ai.run.stop', input: { runId: target.runId } }], run);
     },
-    async completed(target, text, turnSignal) {
-      const run = live(target, turnSignal);
-      if (!run || run.finalizing || turnSignal.aborted) return undefined;
-      run.finalizing = true;
-      if (run.timer) clearTimeout(run.timer);
-      await run.work;
-      if (run.signal.aborted) { retire(run); return undefined; }
-      try {
-        const content = rich(text.length > maxText ? translator(target.language)('bot:ai.outputTooLong') : text || translator(target.language)('bot:ai.saved'));
-        if (target.chat.type === 'private') {
-          const message = await track(api(s => bot.api.sendRichMessage(target.chat.id, content, {
-            message_thread_id: target.chat.threadId, protect_content: true,
-          }, s), run.signal, true));
-          return message.message_id;
-        }
-        if (run.messageId !== undefined) await track(api(s => bot.api.editMessageText(target.chat.id, run.messageId!, content, {
-          reply_markup: { inline_keyboard: [] },
-        }, s), run.signal, true));
-        // Do not let the expiry hook overwrite the completed answer.
-        run.panel.messageId = undefined;
-        return run.messageId;
-      } catch (error) { run.uncertain = safeError(error).code === 'OUTCOME_UNKNOWN'; throw error; }
-      finally { retire(run); await panels.close(run.panel, 'used'); }
-    },
-    async failed(target, code, turnSignal) {
+    completed: finishReply,
+    async failed(target, code, turnSignal, partialText = '') {
       const run = live(target, turnSignal);
       if (!run) return;
-      if (run.signal.aborted || run.uncertain || run.finalizing) { retire(run); return; }
-      await delivery.completed(target, translator(target.language)('bot:ai.failed', { code: /^[A-Z_]{1,64}$/.test(code) ? code : 'UNAVAILABLE' }), run.signal);
+      if (run.signal.aborted || run.uncertain || run.finalizing) { await retire(run); return; }
+      const t = translator(target.language); const safeCode = errorCodeSchema.safeParse(code);
+      const key = safeCode.success ? safeCode.data : 'UNAVAILABLE';
+      const notice = t(partialText ? 'bot:ai.partial' : 'bot:ai.failed', { code: key, reason: t(`common:errors.${key}`) });
+      await finishReply(target, partialText, run.signal, notice);
+    },
+    async retire(target) {
+      const run = runs.get(target.runId);
+      if (!run) return;
+      // Retirement must also work after revocation, but never for another owner's run.
+      if (scopeKey(run.target) !== scopeKey(target) || run.target.conversationId !== target.conversationId) throw new AppError('FORBIDDEN');
+      await retire(run);
     },
     async file(target, file, turnSignal) {
       checkTarget(target);
@@ -497,7 +571,7 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
       if (!file.bytes.byteLength || file.bytes.byteLength > maxBytes || !file.name || file.name.length > 128
         || Array.from(file.name).some(c => c.charCodeAt(0) < 32 || '/\\'.includes(c))) throw new AppError('INVALID_OUTPUT');
       const input = new InputFile(file.bytes, file.name);
-      const options = { message_thread_id: target.chat.threadId, protect_content: true };
+      const options = { message_thread_id: target.chat.threadId, protect_content: file.protectContent !== false };
       try {
         await track(api<Message>(s => file.mimeType === 'image/jpeg' || file.mimeType === 'image/png'
           ? bot.api.sendPhoto(target.chat.id, input, options, s)
@@ -566,7 +640,7 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
     const albumKey = message.media_group_id ? `${scopeKey(invocation)}:${message.media_group_id}` : undefined;
     const body = explicitText ?? message.text ?? message.caption ?? '';
     const entities = message.entities ?? message.caption_entities ?? [];
-    const mentioned = entities.some(entity => entity.type === 'mention' && body.slice(entity.offset, entity.offset + entity.length).toLowerCase() === `@${ctx.me.username.toLowerCase()}`
+    const mentioned = !message.forward_origin && !message.external_reply && entities.some(entity => entity.type === 'mention' && body.slice(entity.offset, entity.offset + entity.length).toLowerCase() === `@${ctx.me.username.toLowerCase()}`
       || entity.type === 'text_mention' && entity.user.id === ctx.me.id);
     if (explicitText === undefined && message.chat.type !== 'private' && !ownedReply && !mentioned && !(albumKey && albums.has(albumKey))) return false;
     if (reply?.from?.is_bot && !ownedReply) { await send(invocation, t('bot:ai.blockedReply')); return true; }
@@ -582,13 +656,13 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
     }
     if (!body.trim() && !file) return false;
     if (albumKey && file) {
-      for (const [key, expiry] of closedAlbums) if (expiry <= Date.now()) closedAlbums.delete(key);
+      pruneCaches();
       if (closedAlbums.has(albumKey)) return true;
       let album = albums.get(albumKey);
       if (!album) {
         if (albums.size >= 16 || closedAlbums.size >= 128) throw new AppError('CAPACITY');
         const timer = setTimeout(() => {
-          const entry = albums.get(albumKey); albums.delete(albumKey); closedAlbums.set(albumKey, Date.now() + 120_000);
+          const entry = albums.get(albumKey); albums.delete(albumKey); closedAlbums.set(albumKey, Date.now() + 120_000); pruneCaches();
           if (!entry || signal.aborted) return;
           track((entry.invalid ? send(entry.context, t('bot:ai.unsupported')) : start(entry.context, entry.text, entry.files, entry.replyTo))
             .catch(error => signal.aborted ? undefined : send(entry.context, t(`common:errors.${safeError(error).code}`)).catch(() => undefined)));
@@ -791,9 +865,9 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
     if (!runId) for (const job of exports.values()) if (job.key === scopeKey(invocation)) {
       job.controller.abort(); if (job.work) draining.push(job.work);
     }
-    for (const [key, album] of albums) if (scopeKey(album.context) === scopeKey(invocation)) { clearTimeout(album.timer); albums.delete(key); }
+    suspendInput(invocation);
     for (const run of runs.values()) if (scopeKey(run.target) === scopeKey(invocation) && (!runId || run.target.runId === runId)) {
-      run.controller.abort(); retire(run); if (run.work) draining.push(run.work);
+      run.controller.abort(); draining.push(retire(run));
     }
     draining.push(panels.closeOwned(scopeKey(invocation), 'cancelled', panel => !runId || panel.value.runId === runId));
     // Abort real run work before waiting for preview transports to finish their cleanup.
@@ -801,8 +875,35 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
     await Promise.allSettled(draining);
   }
 
+  function suspendInput(invocation: InvocationContext): void {
+    for (const [key, album] of albums) if (scopeKey(album.context) === scopeKey(invocation)) {
+      clearTimeout(album.timer); albums.delete(key); closedAlbums.set(key, Date.now() + 120_000);
+    }
+    pruneCaches();
+  }
+
   return {
     command, input, context,
+    suspendInput(ctx: Context): void {
+      const message = ctx.update.message ?? ctx.callbackQuery?.message;
+      if (message && sessionKey(ctx) && (message.chat.type !== 'private' || message.chat.id === ctx.from?.id)) suspendInput(context(ctx));
+    },
+    ownsAlbum(ctx: Context): boolean {
+      const id = ctx.update.message?.media_group_id;
+      if (!id || !sessionKey(ctx)) return false;
+      pruneCaches();
+      const key = `${scopeKey(context(ctx))}:${id}`;
+      return albums.has(key) || closedAlbums.has(key);
+    },
+    closedAlbum(ctx: Context): boolean {
+      const id = ctx.update.message?.media_group_id;
+      return !!id && !!sessionKey(ctx) && closedAlbums.has(`${scopeKey(context(ctx))}:${id}`);
+    },
+    ownsReply(ctx: Context): boolean {
+      const message = ctx.update.message; const reply = message?.reply_to_message;
+      return !!message && !!reply && reply.from?.id === ctx.me.id && reply.from.is_bot && reply.chat.id === message.chat.id
+        && messageTopicId(reply) === messageTopicId(message) && Boolean(deps.ai?.isReply(context(ctx), reply.message_id));
+    },
     async blockedReply(ctx: Context): Promise<boolean> {
       const message = ctx.update.message;
       const reply = message?.reply_to_message;
@@ -858,8 +959,8 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
           panel.value.items = [];
           panel.value.generation = (panel.value.generation ?? 0) + 1;
           if (control.action === 'ai.run.stop') { await cancel(invocation, control.input.runId as string); return true; }
-          const active = await panels.render(panel, () => api(s => bot.api.editMessageText(invocation!.chat.id, panel!.messageId!,
-            rich(translator(invocation!.language)('bot:ai.busy')), { reply_markup: { inline_keyboard: [] } }, s)).then(() => undefined));
+           const active = await panels.render(panel, () => api(s => bot.api.editMessageText(invocation!.chat.id, panel!.messageId!,
+             controlContent(panel!, translator(invocation!.language)('bot:ai.busy')), { reply_markup: { inline_keyboard: [] } }, s)).then(() => undefined));
           if (!active) return true;
           panels.get(panel.id, { ...binding(invocation), messageId: panel.messageId! });
           if (panel.value.signal?.aborted) return true;
@@ -880,9 +981,11 @@ export function createAiTelegramAdapter(bot: Bot, deps: AiAdapterDependencies) {
     },
     async stop() {
       shutdown.abort();
+      if (cacheTimer) clearTimeout(cacheTimer);
+      cacheTimer = undefined;
       for (const album of albums.values()) clearTimeout(album.timer);
       albums.clear(); closedAlbums.clear();
-      for (const run of runs.values()) { run.controller.abort(); retire(run); }
+      for (const run of runs.values()) { run.controller.abort(); void retire(run); }
       await Promise.allSettled([...pending]);
       proposals.clear();
       await panels.stop();

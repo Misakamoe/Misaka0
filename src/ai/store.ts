@@ -6,7 +6,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
   aiArtifactPayloadSchema, aiConversationNewInputSchema, aiConversationSchema, aiCredentialChangeSchema, aiCredentialValueSchema,
-  aiDefaults, aiJsonValueSchema, aiMemoryPutInputSchema, aiMemorySchema,
+  aiDefaults, aiInteractiveBudget, aiInteractiveDailyRuns, aiJsonValueSchema, aiMemoryPutInputSchema, aiMemorySchema,
   aiPageInputSchema, aiRecordKindSchema, aiRecordPutInputSchema, aiRecordSchema, aiRunCreateInputSchema,
   aiRunSchema, aiRunUpdateInputSchema, aiSafeStatusSchema, aiScopeSchema, aiSettingsSchema,
   aiSettingsSnapshotSchema, aiTurnInputSchema, aiTurnSchema,
@@ -30,7 +30,7 @@ const rowSchema = z.strictObject({
 });
 type Row = z.infer<typeof rowSchema>;
 type RowData = Omit<Row, 'sequence' | 'ciphertext'>;
-const usageAmountSchema = z.strictObject({ inputTokens: number.max(1_000_000), outputTokens: number.max(1_000_000), costMicros: number.max(1_000_000_000) });
+const usageAmountSchema = z.strictObject({ inputTokens: number.max(131_072 * 17), outputTokens: number.max(1_000_000), costMicros: number.max(1_000_000_000) });
 export const aiUsageReservationSchema = z.strictObject({ id: identifier, actorId: number.min(1), period: z.iso.date(),
   runId: identifier.optional(), reserved: usageAmountSchema, actual: usageAmountSchema.nullable(),
   budgetMode: z.enum(['cost', 'usage']).optional(),
@@ -392,10 +392,10 @@ export class AiStore implements AiCredentialBackend {
           allowedOrigins: [new URL(valid.baseUrl).origin], credentialRef: ref }],
         presets: [{ id: presetId, providerId, model: valid.model, tools: ['rate.convert', 'rate.currencies', 'weather.search', 'weather.query'],
           inputCapabilities: ['text'], outputCapabilities: ['text'], budgetMode: 'usage',
-          budget: { maxInputTokens: 32768, maxOutputTokens: 8192, maxToolCalls: 4, maxDurationMs: 60000, maxCostMicros: 100000 } }],
+          budget: aiInteractiveBudget() }],
         grants: [{ id: `owner-${suffix}`, kind: 'private', subjectId: ownerId, presetId },
           ...valid.groupIds.map((subjectId, index) => ({ id: `group-${index}-${suffix}`, kind: 'group', subjectId, presetId }))],
-        limits: { ...current.settings.limits, dailyRuns: current.settings.limits.dailyRuns ?? 50 },
+        limits: { ...current.settings.limits, dailyRuns: current.settings.limits.dailyRuns ?? aiInteractiveDailyRuns },
       });
       this.insert(this.credentialScope('instance'), 'credential', { value: valid.apiKey }, { id: ref });
       this.bumpPolicy(`credential:${ref}`); this.changePolicy(current.settings, settings);
@@ -527,10 +527,10 @@ export class AiStore implements AiCredentialBackend {
   }
   assertRunCapacity(): void {
     const settings = this.getSettings().settings;
-    const limit = settings.limits.dailyRuns ?? (settings.presets.some(preset => preset.budgetMode === 'usage') ? 50 : undefined);
+    const limit = settings.limits.dailyRuns ?? (settings.presets.some(preset => preset.budgetMode === 'usage') ? aiInteractiveDailyRuns : undefined);
     if (limit === undefined) return;
     const date = this.timestamp().slice(0, 10);
-    if (this.dailyRunCount(date) >= limit) throw new AppError('CAPACITY');
+    if (this.dailyRunCount(date) >= limit) throw new AppError('AI_DAILY_LIMIT');
   }
   private dailyRunCount(date: string): number {
     const counter = this.getRow('budget:instance', 'receipt', `runs:${date}`);
@@ -673,7 +673,7 @@ export class AiStore implements AiCredentialBackend {
       const amount = Number(this.statement("SELECT coalesce(sum(amount),0) AS amount FROM entries WHERE scope=? AND kind='usage' AND parent=?").get(key, valid.period)!.amount);
       const globalAmount = Number(this.statement("SELECT coalesce(sum(amount),0) AS amount FROM entries WHERE kind='usage' AND parent=?").get(valid.period)!.amount);
       if (valid.budgetMode !== 'usage' && (amount + valid.amount.costMicros > valid.limitCostMicros
-        || globalAmount + valid.amount.costMicros > this.getSettings().settings.limits.dailyCostMicros)) throw new AppError('CAPACITY');
+        || globalAmount + valid.amount.costMicros > this.getSettings().settings.limits.dailyCostMicros)) throw new AppError('AI_BUDGET_LIMIT');
       const value: AiUsageReservation = { id: valid.id, actorId: valid.actorId, period: valid.period,
         ...(valid.runId ? { runId: valid.runId } : {}), ...(valid.budgetMode ? { budgetMode: valid.budgetMode } : {}), reserved: valid.amount, actual: null, state: 'reserved' };
       return this.decode(this.insert(key, 'usage', value, { id: valid.id, parent: valid.period, state: 'reserved', amount: valid.amount.costMicros })) as AiUsageReservation;

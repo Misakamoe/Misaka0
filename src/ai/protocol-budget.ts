@@ -1,9 +1,10 @@
-import type { GenerationOptions, GenerationRequest, PreparedContent, ProtocolContext } from './providers.js';
+import { inlineImageTransport, type GenerationOptions, type GenerationRequest, type PreparedContent, type ProtocolContext } from './providers.js';
 import { AiProtocolError, boundedJson } from './transport.js';
 import { base64, object } from './protocol-common.js';
 
 // These are admission counts, not usage receipts. No fee is inferred from a count response.
-export async function enforceInputBudget(context: ProtocolContext, request: GenerationRequest, body: Record<string, unknown>, options: GenerationOptions): Promise<void> {
+export async function enforceInputBudget(context: ProtocolContext, request: GenerationRequest, body: Record<string, unknown>, options: GenerationOptions,
+  compactBody = body): Promise<void> {
   const media = context.files.length > 0 || request.messages.some(message => message.content.some(part => part.type !== 'text'));
   if (!media) {
     if (context.profile.protocol === 'openai-chat-completions') {
@@ -11,11 +12,20 @@ export async function enforceInputBudget(context: ProtocolContext, request: Gene
       if (records.some(record => Array.isArray(record.content) && record.content.some(value => object(value).type !== 'text'))) throw new AiProtocolError('UNSUPPORTED', undefined, false);
     }
     // Text-only callers can use the conservative encoded-byte bound without a second API request.
-    if (request.maxInputTokens !== undefined && Buffer.byteLength(boundedJson(body, context.limits.requestBytes)) > request.maxInputTokens) throw new AiProtocolError('QUOTA', undefined, false);
+    if (request.maxInputTokens !== undefined && Buffer.byteLength(boundedJson(body, context.limits.requestBytes)) > request.maxInputTokens) throw new AiProtocolError('INPUT_LIMIT', undefined, false);
     return;
   }
   const { protocol, origin, basePath, model, apiKey } = context.profile;
   const limit = request.maxInputTokens ?? 32_768;
+  const boundedMedia = () => {
+    if (context.profile.mediaTokenPolicy !== 'bounded') throw new AiProtocolError('MEDIA_COUNT_UNAVAILABLE', undefined, false);
+    // Bound textual context separately; compressed image bytes are not a token count.
+    boundedJson(body, context.limits.requestBytes);
+    if (Buffer.byteLength(boundedJson(compactBody, context.limits.requestBytes)) > limit) throw new AiProtocolError('INPUT_LIMIT', undefined, false);
+    if (context.files.some(ref => ref.expiresAt <= Date.now())) throw new AiProtocolError('CONTINUATION_MISMATCH', undefined, false);
+    options.signal.throwIfAborted();
+  };
+  if (inlineImageTransport(context.profile)) { boundedMedia(); return; }
   let path: string; let headers: Record<string, string>; let countBody: Record<string, unknown>;
   if (protocol === 'openai-responses') {
     if (origin !== 'https://api.openai.com' || basePath !== '/v1') throw new AiProtocolError('UNSUPPORTED', undefined, false);
@@ -57,7 +67,10 @@ export async function enforceInputBudget(context: ProtocolContext, request: Gene
       signal: options.signal, limits: { ...context.limits, responseBytes: 16_384 },
     }));
   } catch (error) {
-    if (error instanceof AiProtocolError && [400, 404, 405, 501].includes(error.status ?? 0)) throw new AiProtocolError('UNSUPPORTED', error.status, false);
+    if (error instanceof AiProtocolError && [400, 404, 405, 501].includes(error.status ?? 0)) {
+      if (context.profile.mediaTokenPolicy === 'bounded') { boundedMedia(); return; }
+      throw new AiProtocolError('MEDIA_COUNT_UNAVAILABLE', error.status, false);
+    }
     throw error;
   }
   options.signal.throwIfAborted();
@@ -65,5 +78,5 @@ export async function enforceInputBudget(context: ProtocolContext, request: Gene
   const count = protocol === 'google-generate-content' ? result.totalTokens : result.input_tokens;
   if (result.error !== undefined || protocol === 'openai-responses' && result.object !== 'response.input_tokens'
     || typeof count !== 'number' || !Number.isSafeInteger(count) || count <= 0) throw new AiProtocolError('INVALID_RESPONSE', undefined, false);
-  if (count > limit) throw new AiProtocolError('QUOTA', undefined, false);
+  if (count > limit) throw new AiProtocolError('INPUT_LIMIT', undefined, false);
 }

@@ -22,7 +22,6 @@ RUN npm pkg delete devDependencies && npm ci --omit=dev --omit=peer --workspaces
 FROM node:24.22.2-bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
-ENV NODE_OPTIONS="--max-old-space-size=96 --max-semi-space-size=4"
 WORKDIR /app
 COPY --from=dependencies --chown=root:root /app/node_modules ./node_modules
 COPY --chown=root:root package.json LICENSE ./

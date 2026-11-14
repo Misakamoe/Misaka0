@@ -121,6 +121,7 @@ export async function registerWebRoutes(app: FastifyInstance, deps: WebDependenc
     ['/api/status', 'core.status'], ['/api/preferences', 'preferences.get'],
     ['/api/settings/core', 'core.settings.get'], ['/api/settings/core/schema', 'core.settings.schema'],
     ['/api/modules', 'modules.list'], ['/api/ai/admin', 'ai.admin.get'],
+    ['/api/ai/admin/tools', 'ai.admin.tools'],
     ['/api/ai/admin/extensions/status', 'ai.extensions.status'],
   ]) {
     app.get(path!, async (request, reply) => sendResult(reply, await deps.executor.execute(context(request), action!, request.query)));

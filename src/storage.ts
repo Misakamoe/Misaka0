@@ -64,7 +64,7 @@ export class JsonDocument<T extends Versioned> {
 
   constructor(
     private readonly owner: JsonStorage,
-    readonly filename: 'access.json' | 'settings.json' | 'preferences.json' | 'aliases.json' | 'rss.json' | 'rates.json' | 'weather.json' | 'subconv.json',
+    readonly filename: 'access.json' | 'settings.json' | 'preferences.json' | 'aliases.json' | 'rss.json' | 'rates.json' | 'weather.json' | 'subconv.json' | 'relay.json',
     private readonly schema: z.ZodType<T>,
   ) {}
 

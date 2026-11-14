@@ -162,14 +162,19 @@ describe('native AI discovery and business permissions', () => {
     expect(f.observer.mock.calls.find(([, id]) => id === 'rss.add')?.[0]).toMatchObject({ source: 'ai', actorId: 3, aiRunId: manager.aiRunId, chat: { threadId: 7 } });
     expect(await f.executor.execute(manager, 'rss.add', { url: 'https://feeds.example.com/other', threadId: 8 })).toMatchObject({ status: 'rejected', error: { code: 'INVALID_INPUT' } });
     const next = f.ai({ actorId: 3, chat: manager.chat });
-    const update = await f.executor.execute(next, 'rss.update', { id: result.data.id, revision: 0, paused: true });
+    const filters = { include: ['NASA', '宇宙'], exclude: ['advertisement'] };
+    const update = await f.executor.execute(next, 'rss.update', { id: result.data.id, revision: 0, paused: true, filters });
     if (update.status !== 'pending_confirmation') throw new Error('missing approval');
+    expect(f.rss.get({ chatId: -100, threadId: 7, kind: 'group' }, result.data.id).filters).toBeUndefined();
     expect(await f.executor.confirm(human(next), update.confirmation.token)).toMatchObject({ status: 'succeeded' });
+    const filtered = await f.executor.execute(f.ai({ actorId: 3, chat: manager.chat }), 'rss.get', { id: result.data.id });
+    expect(filtered).toMatchObject({ status: 'succeeded', data: { filters } });
+    expect(JSON.stringify(filtered)).not.toContain('https://feeds.example.com/rss');
     const remove = await f.executor.execute(f.ai({ actorId: 3, chat: manager.chat }), 'rss.remove', { id: result.data.id, revision: 1 });
     if (remove.status !== 'pending_confirmation') throw new Error('missing approval');
     f.groupAdmin.mockResolvedValue(false);
     expect(await f.executor.confirm(human(next), remove.confirmation.token)).toMatchObject({ status: 'rejected', error: { code: 'FORBIDDEN' } });
-    expect(f.rss.get({ chatId: -100, threadId: 7, kind: 'group' }, result.data.id)).toMatchObject({ paused: true, revision: 1 });
+    expect(f.rss.get({ chatId: -100, threadId: 7, kind: 'group' }, result.data.id)).toMatchObject({ paused: true, revision: 1, filters });
   });
 });
 

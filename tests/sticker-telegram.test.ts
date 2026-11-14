@@ -70,6 +70,46 @@ describe('bounded official-host sticker download', () => {
     expect(f.fetcher).toHaveBeenCalledWith(`https://api.telegram.org/file/bot${token}/stickers/file_1.webp`,
       expect.objectContaining({ method: 'GET', redirect: 'error', credentials: 'omit', headers: { 'Accept-Encoding': 'identity' }, signal: expect.any(AbortSignal) }));
   });
+  it.each([undefined, 1, bytes.length, 64 * 1024, 0, -1, 1.5, NaN])('returns compact chunked bytes with captured size %s and no authoritative size', async fileSize => {
+    const f = fixture(); delete f.info.file_size;
+    const cancel = vi.fn();
+    const body = new ReadableStream({ start(controller) {
+      controller.enqueue(bytes.subarray(0, 5)); controller.enqueue(bytes.subarray(5)); controller.close();
+    }, cancel });
+    f.fetcher.mockResolvedValue(new Response(body));
+    const result = await f.transport.download({ ...file, fileSize }, new AbortController().signal, 8 * 1024 * 1024);
+    expect(result).toEqual(bytes);
+    expect(result.buffer.byteLength).toBeLessThanOrEqual(Buffer.poolSize);
+    expect(body.locked).toBe(false);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+  it.each([['header', 32 * 1024], ['getFile', 32 * 1024], ['captured', 32 * 1024], ['unknown', 64 * 1024]] as const)('returns the exact-fit %s allocation without a copy', async (source, size) => {
+    const f = fixture(); delete f.info.file_size;
+    const original = Buffer.alloc(size, 123);
+    if (source === 'getFile') f.info.file_size = original.length;
+    f.fetcher.mockResolvedValue(new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(original.subarray(0, 100)); controller.enqueue(original.subarray(100)); controller.close();
+    } }), { headers: source === 'header' ? { 'content-length': String(original.length) } : {} }));
+    const allocation = vi.spyOn(Buffer, 'allocUnsafe');
+    const result = await f.transport.download({ ...file, fileSize: source === 'captured' ? original.length : undefined }, new AbortController().signal, 8 * 1024 * 1024);
+    const index = allocation.mock.calls.findIndex(([size]) => size === original.length);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(result).toBe(allocation.mock.results[index]!.value);
+    expect(result).toEqual(original);
+    expect(result.buffer.byteLength).toBe(original.length);
+  });
+  it.each([[undefined, 150 * 1024], [1, 150 * 1024], [undefined, 8 * 1024 * 1024], [1, 8 * 1024 * 1024]] as const)('grows and compacts unknown-length downloads with captured size %s and cap %s', async (fileSize, maxBytes) => {
+    const f = fixture(); delete f.info.file_size;
+    const original = Buffer.alloc(150 * 1024, 123);
+    f.fetcher.mockResolvedValue(new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(original.subarray(0, 100));
+      controller.enqueue(original.subarray(100, 100 * 1024));
+      controller.enqueue(original.subarray(100 * 1024)); controller.close();
+    } })));
+    const result = await f.transport.download({ ...file, fileSize }, new AbortController().signal, maxBytes);
+    expect(result).toEqual(original);
+    expect(result.buffer.byteLength).toBe(original.length);
+  });
   it.each(['../private', '/stickers/file.webp', 'https://evil.test/file.webp', 'stickers/../private',
     'stickers/%2e%2e/file.webp', 'stickers/file.webp?token=x', 'stickers\\file.webp', 'stickers/file.webp#fragment'])('rejects an unsafe getFile path %s before fetching', async path => {
     const f = fixture(); f.info.file_path = path;
@@ -87,25 +127,51 @@ describe('bounded official-host sticker download', () => {
     await expect(f.transport.download(file, new AbortController().signal, bytes.length)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     expect(cancel).toHaveBeenCalledOnce();
   });
-  it('rejects and closes oversized chunked responses even without Content-Length', async () => {
+  it.each([undefined, 1])('rejects and closes oversized chunked responses with captured size %s', async fileSize => {
     const f = fixture(); delete f.info.file_size;
     const cancel = vi.fn();
-    f.fetcher.mockResolvedValue(new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(bytes.length + 1)); }, cancel })));
-    await expect(f.transport.download({ ...file, fileSize: undefined }, new AbortController().signal, bytes.length)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const body = new ReadableStream({ start(controller) {
+      controller.enqueue(bytes.subarray(0, 5)); controller.enqueue(bytes.subarray(5)); controller.enqueue(new Uint8Array(1));
+    }, cancel });
+    f.fetcher.mockResolvedValue(new Response(body));
+    await expect(f.transport.download({ ...file, fileSize }, new AbortController().signal, bytes.length)).rejects.toMatchObject({ code: 'INVALID_INPUT', message: 'INVALID_INPUT' });
     expect(cancel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
   });
-  it('rejects truncated bytes instead of uploading incomplete originals', async () => {
-    const f = fixture(); f.fetcher.mockResolvedValue(new Response(Uint8Array.from(bytes.subarray(1))));
-    await expect(f.transport.download(file, new AbortController().signal, bytes.length)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  it.each(['header', 'getFile', 'conflicting sizes', 'empty'] as const)('rejects incomplete or mismatched %s bytes even when they match the captured hint', async source => {
+    const f = fixture(); delete f.info.file_size;
+    if (source === 'getFile' || source === 'conflicting sizes') f.info.file_size = bytes.length;
+    const cancel = vi.fn();
+    const body = new ReadableStream({ start(controller) {
+      if (source !== 'empty') controller.enqueue(bytes.subarray(1));
+      controller.close();
+    }, cancel });
+    f.fetcher.mockResolvedValue(new Response(body, { headers: source === 'header' || source === 'conflicting sizes'
+      ? { 'content-length': String(source === 'header' ? bytes.length : bytes.length - 1) } : {} }));
+    await expect(f.transport.download({ ...file, fileSize: bytes.length - 1 }, new AbortController().signal, bytes.length)).rejects.toMatchObject({ code: 'INVALID_INPUT', message: 'INVALID_INPUT' });
+    expect(body.locked).toBe(false);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+  it.each(['header', 'getFile'] as const)('cancels bytes exceeding the %s size even with a larger captured hint and cap', async source => {
+    const f = fixture(); delete f.info.file_size;
+    if (source === 'getFile') f.info.file_size = bytes.length - 1;
+    const cancel = vi.fn();
+    const body = new ReadableStream({ start(controller) { controller.enqueue(bytes); }, cancel });
+    f.fetcher.mockResolvedValue(new Response(body, { headers: source === 'header' ? { 'content-length': String(bytes.length - 1) } : {} }));
+    await expect(f.transport.download({ ...file, fileSize: 64 * 1024 }, new AbortController().signal, 8 * 1024 * 1024)).rejects.toMatchObject({ code: 'INVALID_INPUT', message: 'INVALID_INPUT' });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
   });
   it('cancels a blocked body read and releases the stream', async () => {
     const f = fixture(); const controller = new AbortController(); const cancel = vi.fn();
     const entered = Promise.withResolvers<void>();
-    f.fetcher.mockResolvedValue(new Response(new ReadableStream({ pull() { entered.resolve(); }, cancel }, { highWaterMark: 0 })));
+    const body = new ReadableStream({ pull() { entered.resolve(); }, cancel }, { highWaterMark: 0 });
+    f.fetcher.mockResolvedValue(new Response(body));
     const pending = f.transport.download(file, controller.signal, bytes.length);
     await entered.promise; controller.abort();
-    await expect(pending).rejects.toMatchObject({ code: 'CANCELLED' });
+    await expect(pending).rejects.toMatchObject({ code: 'CANCELLED', message: 'CANCELLED' });
     expect(cancel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
   });
   it('destroys a response arriving after cancellation without leaking its token URL', async () => {
     const f = fixture(); const controller = new AbortController(); const cancel = vi.fn();

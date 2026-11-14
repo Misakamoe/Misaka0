@@ -4,12 +4,12 @@ import { PassThrough } from 'node:stream';
 import { gzipSync } from 'node:zlib';
 import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createStickerConverter as createQualifiedConverter, type StickerConversionRequest } from '../src/modules/sticker-media.js';
+import { createStickerConverter as createConverter, type StickerConversionRequest } from '../src/modules/sticker-media.js';
 import { ResourcePolicy } from '../src/resources.js';
 import { encodeGif } from '../src/modules/sticker-render.js';
 
 const resources = new ResourcePolicy({ heavyBytes: 96 * 1024 * 1024 });
-const createStickerConverter = (options: Parameters<typeof createQualifiedConverter>[0] = {}) => createQualifiedConverter({ qualified: true, resources, ...options });
+const createStickerConverter = (options: Parameters<typeof createConverter>[0] = {}) => createConverter({ resources, ...options });
 const convertSticker = createStickerConverter();
 
 vi.mock('node:child_process', async importOriginal => {
@@ -366,7 +366,7 @@ describe('VP9 video conversion', () => {
     const checked = expect(task).rejects.toMatchObject({ code: 'CANCELLED', message: 'CANCELLED' });
     await vi.waitFor(() => expect(spawned).toHaveBeenCalled());
     const [, args, options] = spawned.mock.calls[0]!;
-    expect(options).toMatchObject({ shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    expect(options).toMatchObject({ shell: false, env: {}, stdio: ['pipe', 'pipe', 'pipe'] });
     expect(args).toEqual(expect.arrayContaining(['-protocol_whitelist', 'pipe', '-f', 'matroska', '-c:v', 'libvpx-vp9',
       '-max_pixels', '262144', '-threads', '1', '-map', '0:v:0', '-an', '-sn', '-dn', '-frames:v', '1', 'pipe:0', 'pipe:1']));
     expect(args?.join(' ')).not.toContain('fps=');
@@ -531,10 +531,11 @@ describe('conversion budgets and cleanup', () => {
     await expect(convertSticker(request(await sourceImage()), signal())).resolves.toHaveProperty('data');
   });
 
-  it('defaults to unavailable until explicitly qualified and starts only the fixed clean-environment child', async () => {
-    await expect(createQualifiedConverter()(request(tgs(), { kind: 'animated' }), signal())).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+  it('honors an explicit byte budget without gating the default codec, and uses a clean child environment', async () => {
+    await expect(createStickerConverter({ resources: new ResourcePolicy({ heavyBytes: 96 * 1024 * 1024 - 1 }) })(request(tgs(), { kind: 'animated' }), signal()))
+      .rejects.toMatchObject({ code: 'CAPACITY' });
     expect(fork).not.toHaveBeenCalled();
-    await convertSticker(request(await sourceImage()), signal());
+    await createConverter()(request(await sourceImage()), signal());
     expect(vi.mocked(fork).mock.calls[0]?.[0].toString()).toMatch(/\/sticker-worker\.ts$/);
     expect(vi.mocked(fork).mock.calls[0]?.[2]).toMatchObject({ env: {}, serialization: 'advanced', execArgv: ['--max-old-space-size=64', '--max-semi-space-size=2'] });
   });

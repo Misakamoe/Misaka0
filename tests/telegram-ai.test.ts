@@ -88,14 +88,14 @@ function fixture(dedicated = false) {
     return { ok: true, result } as never;
   });
   const ownedReplies = new Set<number>();
-  const capture = vi.fn(async () => `owned-${sequence}`);
+  const capture = vi.fn<AiTelegramPort['capture']>(async () => `owned-${sequence}`);
   const port: AiTelegramPort = { available: vi.fn(() => available), capture,
     isReply: vi.fn((_ctx, id) => ownedReplies.has(id)), attachTelegram: (value, fetchFile) => { delivery = value; download = fetchFile; } };
   const execute = vi.fn(async (_ctx: InvocationContext, action: string, _input: unknown): Promise<ActionResult> => {
     if (action === 'ai.run.start') return success({ runId: 'run-1', conversationId: 'conversation-1' });
     if (action === 'ai.run.status') return success({ runId: 'run-1', state: 'running' });
     if (action.endsWith('.list')) return success({ items: [], nextCursor: null });
-    if (action === 'core.info') return success({ runtime: 'grammy', version: 'offline', moduleCount: 6, aiAvailable: true });
+    if (action === 'core.info') return success({ runtime: 'grammy', version: 'offline', moduleCount: 7, aiAvailable: true });
     if (action === 'alias.list') return success({ aliases: {}, revision: 0 });
     return success({});
   });
@@ -187,6 +187,26 @@ describe('AI Telegram routing and owned input', () => {
     expect(f.capture).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['image/png', '89504e470d0a1a0a0000000d49484452'],
+    ['image/jpeg', 'ffd8ffe000104a46494600'],
+    ['image/webp', '524946461000000057454250'],
+    ['image/gif', '47494638396101000100000000'],
+  ] as const)('treats a document with %s as image input and validates its download header', async (mimeType, hex) => {
+    const f = fixture(true); const bytes = Buffer.from(hex, 'hex');
+    await (f.adapter as ReturnType<typeof createAiTelegramAdapter>).input(f.context(update('', { extra: { text: undefined, caption: 'Describe this picture', document: {
+      file_id: 'image-file', file_unique_id: 'unique-image', mime_type: mimeType, file_name: 'picture.bin', file_size: bytes.length,
+    } } })));
+    expect(f.capture).toHaveBeenCalledWith(expect.objectContaining({ actorId: 3 }), expect.objectContaining({ kind: 'image', mimeType, size: bytes.length }));
+    expect(f.execute.mock.calls[0]![2]).toMatchObject({ text: 'Describe this picture', attachments: [expect.stringMatching(/^owned-/)] });
+    f.intercept(async method => method === 'getFile' ? { ok: true, result: { file_id: 'image-file', file_path: 'documents/picture.bin', file_size: bytes.length } } : undefined);
+    f.fetcher.mockResolvedValue(new Response(Uint8Array.from(bytes), { headers: { 'content-length': String(bytes.length), 'content-type': 'application/octet-stream' } }));
+    const file = f.capture.mock.calls[0]![1];
+    expect(await f.download(file)).toEqual(new Uint8Array(bytes));
+    f.fetcher.mockResolvedValue(new Response(Uint8Array.from(Buffer.alloc(bytes.length, 0)), { headers: { 'content-length': String(bytes.length) } }));
+    await expect(f.download(file)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it('aggregates at most five album photos into one action and rejects the entire oversized album', async () => {
     vi.useFakeTimers(); const f = fixture();
     for (let index = 0; index < 5; index++) await f.bot.handleUpdate(update('', { extra: { media_group_id: 'album',
@@ -244,24 +264,112 @@ describe('AI Telegram routing and owned input', () => {
 });
 
 describe('AI delivery control lane', () => {
-  it('coalesces private drafts, sends one literal persistent answer and suppresses late sends', async () => {
+  it('retires only the exact bound run and invalidates its controls', async () => {
+    const f = fixture(true); const destination = target(-100, 7); const controller = new AbortController();
+    await f.delivery().started(destination, controller.signal);
+    await f.delivery().approval(destination, { token: 'bound-retirement-token', actionId: 'rss.remove', target: 'group:-100:7',
+      expiresAt: new Date(Date.now() + 60_000).toISOString() }, 'rss.remove', controller.signal, { id: 'feed-1', revision: 1 });
+    const message = f.messages.at(-1)!; const button = callbacks(message)[0]!;
+    for (const wrong of [{ ...destination, actorId: 4 }, { ...destination, botId: 99 },
+      { ...destination, chat: { ...destination.chat, threadId: 8 } }, { ...destination, conversationId: 'foreign' }]) {
+      await expect(f.delivery().retire(wrong)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    }
+    await f.delivery().retire(destination); await f.delivery().retire(destination);
+    await (f.adapter as ReturnType<typeof createAiTelegramAdapter>).callback(f.context(click(message, button)));
+    expect(f.execute).not.toHaveBeenCalled(); expect(f.confirm).not.toHaveBeenCalled();
+    expect(callbacks(message)).toHaveLength(0);
+  });
+
+  it('drains an in-flight preview before retirement completes and suppresses late updates', async () => {
+    vi.useFakeTimers(); const f = fixture(true); const controller = new AbortController();
+    await f.delivery().started(target(), controller.signal);
+    const gate = Promise.withResolvers<void>();
+    f.intercept(async method => { if (method === 'sendRichMessageDraft') await gate.promise; });
+    await f.delivery().progress(target(), 'preview awaiting transport cleanup', controller.signal);
+    await vi.advanceTimersByTimeAsync(800);
+    let retired = false;
+    const retirement = f.delivery().retire(target()).then(() => { retired = true; });
+    const repeated = f.delivery().retire(target());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retired).toBe(false);
+    const sent = f.calls.length;
+    await f.delivery().progress(target(), 'late preview must not queue', controller.signal);
+    gate.resolve(); await Promise.all([retirement, repeated]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(f.calls).toHaveLength(sent); expect(vi.getTimerCount()).toBe(0);
+    await f.delivery().completed(target(), 'late final must not send', controller.signal);
+    expect(f.calls).toHaveLength(sent);
+  });
+
+  it('drops expired proposal tombstones while idle without another proposal', async () => {
+    vi.useFakeTimers(); const f = fixture(true); const controller = new AbortController();
+    await f.delivery().started(target(), controller.signal);
+    await f.delivery().approval(target(), { token: 'idle-proposal-token', actionId: 'rss.remove', target: 'user:3',
+      expiresAt: new Date(Date.now() + 1000).toISOString() }, 'rss.remove', controller.signal, { id: 'feed-1', revision: 1 });
+    await f.delivery().retire(target());
+    const deleted = vi.spyOn(Map.prototype, 'delete');
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(deleted).not.toHaveBeenCalledWith('idle-proposal-token');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(deleted).toHaveBeenCalledWith('idle-proposal-token');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('expires closed album IDs during idle and leaves no permanent polling timer', async () => {
+    vi.useFakeTimers(); const f = fixture(true);
+    await (f.adapter as ReturnType<typeof createAiTelegramAdapter>).input(f.context(update('photo', { extra: { media_group_id: 'idle-album',
+      photo: [{ file_id: 'photo', file_unique_id: 'unique', width: 1, height: 1, file_size: 10 }] } })));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(f.execute).toHaveBeenCalledWith(expect.anything(), 'ai.run.start', expect.anything());
+    const key = `${me.id}:3:3:0:idle-album`;
+    const deleted = vi.spyOn(Map.prototype, 'delete');
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(deleted).not.toHaveBeenCalledWith(key);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(deleted).toHaveBeenCalledWith(key); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([3, -100])('keeps a long literal answer and explains partial failure in chat %i', async chat => {
+    const f = fixture(); const controller = new AbortController(); const destination = target(chat);
+    const text = '<b>literal, not markup</b> '.repeat(750);
+    await f.delivery().started(destination, controller.signal);
+    await f.delivery().progress(destination, text, controller.signal);
+    await f.delivery().failed(destination, 'AI_OUTPUT_LIMIT', controller.signal, text);
+    const payload = f.calls.filter(call => call.method === (chat > 0 ? 'sendRichMessage' : 'editMessageText')).at(-1)!.payload;
+    const message = payload.rich_message as { blocks: { text: string }[]; skip_entity_detection: boolean };
+    expect(message.skip_entity_detection).toBe(true);
+    expect(richText(message.blocks[0])).toContain(text.trimEnd());
+    expect(message.blocks.at(-1)!.text).toContain('AI_OUTPUT_LIMIT');
+    expect(message.blocks.at(-1)!.text).toContain('Incomplete answer');
+    expect(richText(message).length).toBeLessThanOrEqual(32_768);
+    expect(richText(message)).not.toContain('Output exceeds the safe Telegram message limit');
+    if (chat > 0) expect(payload.protect_content).toBe(false);
+  });
+
+  it('coalesces rich private drafts, sends one forwardable formatted answer and suppresses late sends', async () => {
     vi.useFakeTimers(); const f = fixture(); const controller = new AbortController();
     await f.delivery().started(target(), controller.signal);
-    for (let index = 0; index < 20; index++) await f.delivery().progress(target(), `partial ${index}`, controller.signal);
+    for (let index = 0; index < 20; index++) await f.delivery().progress(target(), `partial **${index}**`, controller.signal);
     expect(f.calls.filter(call => call.method === 'sendRichMessageDraft')).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(800);
     const drafts = f.calls.filter(call => call.method === 'sendRichMessageDraft');
     expect(drafts).toHaveLength(2);
     expect(drafts[0]!.payload).toMatchObject({ can_stop: true, keep_on_stop: true, draft_id: expect.any(Number) });
-    const text = '<script>literal</script> **not markdown**';
+    expect(drafts[1]!.payload).toMatchObject({ rich_message: { skip_entity_detection: true,
+      blocks: [{ type: 'paragraph', text: ['partial ', { type: 'bold', text: '19' }] }] } });
+    const text = '<script>literal</script> **formatted** /help @admin';
     await f.delivery().completed(target(), text, controller.signal);
     await f.delivery().completed(target(), 'duplicate', controller.signal);
     await f.delivery().progress(target(), 'late', controller.signal);
     await vi.advanceTimersByTimeAsync(5000);
     expect(f.calls.filter(call => call.method === 'sendRichMessage')).toHaveLength(1);
-    expect(f.calls.find(call => call.method === 'sendRichMessage')!.payload).toMatchObject({ rich_message: {
-      skip_entity_detection: true, blocks: [{ type: 'paragraph', text }],
-    } });
+    const payload = f.calls.find(call => call.method === 'sendRichMessage')!.payload;
+    expect(payload).toMatchObject({ protect_content: false, rich_message: { skip_entity_detection: true,
+      blocks: [{ type: 'paragraph', text: ['<script>literal</script> ', { type: 'bold', text: 'formatted' }, ' /help @admin'] }] } });
+    expect(payload).not.toHaveProperty('parse_mode');
+    expect(payload.rich_message).not.toHaveProperty('markdown'); expect(payload.rich_message).not.toHaveProperty('html');
   });
 
   it('uses editMessageText with native rich content for groups and does not overwrite final output on expiry', async () => {
@@ -269,14 +377,45 @@ describe('AI delivery control lane', () => {
     await f.delivery().started(target(-100, 9), s);
     const first = f.messages[0]!;
     expect(callbacks(first)[0]).toMatch(/^mk:ai:/);
-    await f.delivery().progress(target(-100, 9), 'partial', s);
+    await f.delivery().progress(target(-100, 9), '**partial**', s);
     await vi.advanceTimersByTimeAsync(800);
-    const id = await f.delivery().completed(target(-100, 9), 'finished', s);
+    expect(f.calls.at(-1)!.payload).toMatchObject({ rich_message: { blocks: [
+      { type: 'paragraph', text: { type: 'bold', text: 'partial' } }, { type: 'buttons' },
+    ] } });
+    const id = await f.delivery().completed(target(-100, 9), '# Finished\n\nRendered *answer*.', s);
     expect(id).toBe(first.message_id);
     await vi.advanceTimersByTimeAsync(600_001);
     expect(f.calls.filter(call => call.method === 'sendRichMessage')).toHaveLength(1);
-    expect(f.calls.at(-1)).toMatchObject({ method: 'editMessageText', payload: { rich_message: { blocks: [{ type: 'paragraph', text: 'finished' }] } } });
+    expect(f.calls.at(-1)).toMatchObject({ method: 'editMessageText', payload: { rich_message: { blocks: [
+      { type: 'paragraph', text: { type: 'bold', text: 'Finished' } },
+      { type: 'paragraph', text: ['Rendered ', { type: 'italic', text: 'answer' }, '.'] },
+    ] } } });
     expect(f.calls.some(call => call.method === 'editMessageRichMessage')).toBe(false);
+  });
+
+  it.each([3, -100])('keeps the trusted incomplete notice outside an unfinished code fence in chat %i', async chat => {
+    const f = fixture(); const controller = new AbortController(); const destination = target(chat);
+    const partial = 'Intro **bold**\n\n```js\nconsole.log("<b>literal</b>");\n**unfinished';
+    await f.delivery().started(destination, controller.signal);
+    await f.delivery().progress(destination, partial, controller.signal);
+    await f.delivery().failed(destination, 'TIMEOUT', controller.signal, partial);
+    const payload = f.calls.filter(call => call.method === (chat > 0 ? 'sendRichMessage' : 'editMessageText')).at(-1)!.payload;
+    expect(payload.rich_message).toMatchObject({ skip_entity_detection: true, blocks: [
+      { type: 'paragraph', text: ['Intro ', { type: 'bold', text: 'bold' }] },
+      { type: 'pre', language: 'js', text: 'console.log("<b>literal</b>");\n**unfinished' },
+      { type: 'paragraph', text: expect.stringContaining('Incomplete answer') },
+    ] });
+    const blocks = (payload.rich_message as { blocks: { text: string }[] }).blocks;
+    expect(blocks[1]!.text).not.toContain('TIMEOUT'); expect(blocks[2]!.text).toContain('TIMEOUT');
+  });
+
+  it.each([['image/png', 'sendPhoto'], ['audio/mpeg', 'sendAudio']] as const)('allows generated %s to be forwarded while keeping private tool files protected', async (mimeType, method) => {
+    const f = fixture(); const signal = new AbortController().signal; const destination = target();
+    await f.delivery().started(destination, signal);
+    await f.delivery().file(destination, { bytes: Buffer.from('generated bytes'), name: 'generated.bin', mimeType, protectContent: false }, signal);
+    expect(f.calls.find(call => call.method === method)!.payload).toMatchObject({ chat_id: 3, protect_content: false });
+    await f.delivery().file(destination, { bytes: Buffer.from('private tool data'), name: 'private.txt', mimeType: 'text/plain' }, signal);
+    expect(f.calls.find(call => call.method === 'sendDocument')!.payload).toMatchObject({ chat_id: 3, protect_content: true });
   });
 
   it('binds native stop without from to bot/chat/actual thread/draft and the stored initiating actor', async () => {
@@ -418,6 +557,99 @@ describe('AI delivery control lane', () => {
 });
 
 describe('informed AI approvals', () => {
+  it.each(['zh-CN', 'zh-TW', 'en', 'ja'] as const)('shows authoritative RSS names and IDs literally in %s without changing proposed parameters', async language => {
+    const f = fixture(); const s = f.controller.signal; const destination = { ...target(), language };
+    const subject = { kind: 'rss' as const, id: '3ab58ce2bce3', title: '<b>NASA</b> **literal** @not_a_mention' };
+    const approval = { ...confirmation('rss-subject-token', 'rss.update'), subject };
+    const input = { id: subject.id, revision: 7, title: 'Proposed new name' };
+    await f.delivery().started(destination, s);
+    await f.delivery().approval(destination, approval, approval.actionId, s, input);
+    const card = f.messages.at(-1)!; const serialized = JSON.stringify(card.rich_message);
+    expect(richText(card)).toContain(translator(language)('bot:ai.rssSubject', { title: subject.title }));
+    expect(richText(card)).toContain(JSON.stringify(input));
+    expect(card.rich_message).toMatchObject({ skip_entity_detection: true });
+    expect(serialized).toContain(JSON.stringify({ type: 'code', text: subject.id }));
+    expect(serialized).not.toContain('"type":"mention"');
+    expect(serialized).not.toContain('"type":"url"');
+    expect(serialized).not.toContain(approval.token);
+    const before = f.calls.length;
+    await expect(f.delivery().approval(destination, { ...approval, subject: { ...subject, title: 'Another subscription label' } }, approval.actionId, s, input))
+      .rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(f.calls).toHaveLength(before);
+  });
+
+  it('renders an unnamed RSS subject and uses authoritative fallback details when input is omitted', async () => {
+    const f = fixture(); const s = f.controller.signal; const initial = confirmation('rss-fallback', 'rss.remove');
+    const approval = { ...initial, subject: { kind: 'rss' as const, id: '3ab58ce2bce3', title: '' } };
+    f.pendingDetails.mockReturnValue({ confirmation: approval, input: { id: approval.subject.id, revision: 1 } });
+    await f.delivery().started(target(), s);
+    await f.delivery().approval(target(), initial, initial.actionId, s);
+    expect(richText(f.messages.at(-1)!)).toContain(translator('en')('bot:ai.rssSubject', { title: translator('en')('bot:rss.untitled') }));
+    expect(richText(f.messages.at(-1)!)).toContain(approval.subject.id);
+  });
+
+  it.each([
+    { kind: 'rss', id: '000000000000', title: 'Different ID' },
+    { kind: 'rss', id: 'bad', title: 'Invalid ID' },
+    { kind: 'rss', id: '3ab58ce2bce3', title: 'x'.repeat(129) },
+    { kind: 'rss', id: '3ab58ce2bce3', title: 'Name', url: 'https://private.example/token' },
+    { kind: 'rate', id: '3ab58ce2bce3', title: 'Wrong kind' },
+  ])('rejects malformed or mismatched approval subjects before display: %j', async subject => {
+    const f = fixture(); const s = f.controller.signal;
+    const approval = { ...confirmation('malformed-subject', 'rss.update'), subject } as Confirmation;
+    await f.delivery().started(target(), s);
+    await expect(f.delivery().approval(target(), approval, approval.actionId, s, { id: '3ab58ce2bce3', revision: 0, silent: true }))
+      .rejects.toMatchObject({ code: 'INVALID_OUTPUT' });
+    expect(f.calls.map(call => call.method)).toEqual(['sendRichMessageDraft']);
+  });
+
+  it('does not disclose approval tokens in subject names and budgets subject metadata with the proposal', async () => {
+    const f = fixture(); const s = f.controller.signal;
+    const approval = { ...confirmation('subject-secret-token', 'rss.update'), subject: { kind: 'rss' as const, id: '3ab58ce2bce3', title: 'subject-secret-token' } };
+    await f.delivery().started(target(), s);
+    await expect(f.delivery().approval(target(), approval, approval.actionId, s, { id: approval.subject.id, revision: 0, silent: true }))
+      .rejects.toMatchObject({ code: 'INVALID_OUTPUT' });
+    const input = { id: approval.subject.id, data: '' }; input.data = 'x'.repeat(32 * 1024 - JSON.stringify(input).length);
+    await expect(f.delivery().approval(target(), { ...approval, subject: { ...approval.subject, title: 'Visible name' } }, approval.actionId, s, input))
+      .rejects.toMatchObject({ code: 'CAPACITY' });
+    expect(f.calls.map(call => call.method)).toEqual(['sendRichMessageDraft']);
+  });
+
+  it('keeps approval details in place while processing and after acceptance instead of replacing the card with short text', async () => {
+    const f = fixture(); const s = f.controller.signal;
+    const approval = { ...confirmation('stable-card', 'rss.remove'), subject: { kind: 'rss' as const, id: '3ab58ce2bce3', title: 'NASA News' } };
+    const input = { id: approval.subject.id, revision: 2 };
+    await f.delivery().started(target(), s); await f.delivery().approval(target(), approval, approval.actionId, s, input);
+    const card = f.messages.at(-1)!; const action = callbacks(card)[0]!;
+    const original = structuredClone(card.rich_message!.blocks.filter(block => block.type !== 'buttons'));
+    const gate = Promise.withResolvers<ActionResult>();
+    f.execute.mockImplementationOnce(async () => gate.promise);
+    const clickWork = f.bot.handleUpdate(click(card, action));
+    await vi.waitFor(() => expect(f.execute).toHaveBeenCalledWith(expect.anything(), 'ai.run.confirm', expect.objectContaining({ runId: 'run-1' })));
+    expect(card.rich_message!.blocks.slice(0, original.length)).toEqual(original);
+    expect(richText(card)).toContain(translator('en')('bot:ai.busy'));
+    expect(callbacks(card)).toEqual([]);
+    gate.resolve(success({ accepted: true })); await clickWork;
+    expect(card.rich_message!.blocks.slice(0, original.length)).toEqual(original);
+    expect(richText(card)).toContain(translator('en')('bot:ai.approvalAccepted'));
+    await f.delivery().completed(target(), 'Final answer', s);
+    expect(richText(card)).toContain('NASA News'); expect(richText(card)).toContain(JSON.stringify(input));
+    expect(f.calls.some(call => ['deleteMessage', 'deleteMessages', 'sendMessageDraft'].includes(call.method))).toBe(false);
+  });
+
+  it('retains the displayed approval details on expiry without keeping executable controls', async () => {
+    vi.useFakeTimers(); const f = fixture(); const s = f.controller.signal;
+    const approval = { ...confirmation('expired-card', 'rss.remove'), expiresAt: new Date(Date.now() + 1000).toISOString(),
+      subject: { kind: 'rss' as const, id: '3ab58ce2bce3', title: 'Expired RSS label' } };
+    await f.delivery().started(target(), s);
+    await f.delivery().approval(target(), approval, approval.actionId, s, { id: approval.subject.id, revision: 0 });
+    const card = f.messages.at(-1)!;
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(richText(card)).toContain('Expired RSS label');
+    expect(richText(card)).toContain(translator('en')('bot:ai.expired'));
+    expect(callbacks(card)).toEqual([]); expect(f.execute).not.toHaveBeenCalled();
+  });
+
   it('renders exact normalized parameters, real scope, revision and native expiry as literal rich text', async () => {
     const f = fixture(); const s = f.controller.signal; const approval = confirmation('native-token', 'rss.update');
     const input = { id: 'feed-1', revision: 7, title: '<b>literal</b> **not markdown**', enabled: false };
@@ -663,7 +895,7 @@ describe('AI private management and download boundary', () => {
     const directory = await mkdtemp(join(tmpdir(), 'telegram-ai-test-')); cleanups.push(() => rm(directory, { recursive: true, force: true }));
     const path = join(directory, 'conversation.json'); await writeFile(path, '{"title":"Private"}' + ' '.repeat(2 * 1024 * 1024), { mode: 0o600 });
     f.execute.mockImplementation(async () => {
-      await f.delivery().file(target(3, undefined, 3, 'export:offline'), { path, name: 'conversation.json', mimeType: 'application/json' }, f.controller.signal);
+      await f.delivery().file(target(3, undefined, 3, 'export:offline'), { path, name: 'conversation.json', mimeType: 'application/json', protectContent: false }, f.controller.signal);
       return success({ delivered: true });
     });
     await f.bot.handleUpdate(update('/chats export conversation-1'));
@@ -760,9 +992,9 @@ describe('AI management panel lifecycle', () => {
     f.execute.mockResolvedValueOnce({ status: 'pending_confirmation', invocationId: 'prepare', confirmation: approval });
     f.pendingDetails.mockReturnValue({ confirmation: approval, input: { id: 'fact-1', revision: 1 } });
     await f.bot.handleUpdate(update('/memory delete fact-1 1'));
-    const message = f.messages.at(-1)!; const confirm = callbacks(message)[0]!;
+    const message = f.messages.at(-1)!; const confirm = callbacks(message)[0]!; const original = richText(message);
     await vi.advanceTimersByTimeAsync(60_001);
-    expect(richText(message)).toBe(translator('en')('bot:ai.expired'));
+    expect(richText(message)).toBe(`${original}\n\n${translator('en')('bot:ai.expired')}`);
     expect(callbacks(message)).not.toContain(confirm);
     await f.bot.handleUpdate(click(message, confirm));
     expect(f.confirm).not.toHaveBeenCalled();
@@ -834,14 +1066,15 @@ describe('AI management panel lifecycle', () => {
     f.pendingDetails.mockReturnValue({ confirmation: approval, input: { id: 'fact-1', revision: 2 } });
     f.confirm.mockResolvedValueOnce({ status: 'failed', invocationId: 'confirm', error: { code } });
     await f.bot.handleUpdate(update('/memory delete fact-1 2'));
-    const message = f.messages.at(-1)!; const data = callbacks(message)[0]!;
+    const message = f.messages.at(-1)!; const data = callbacks(message)[0]!; const original = richText(message);
     await f.bot.handleUpdate(click(message, data));
-    expect(richText(message)).toBe(translator('en')(code === 'OUTCOME_UNKNOWN' ? 'bot:ai.unknown' : 'bot:ai.operationFailed', {
+    expect(richText(message)).toBe(`${original}\n\n${translator('en')(code === 'OUTCOME_UNKNOWN' ? 'bot:ai.unknown' : 'bot:ai.operationFailed', {
       error: translator('en')(`common:errors.${code}`),
-    }));
+    })}`);
     await f.bot.handleUpdate(click(message, data)); await f.bot.handleUpdate(click(message));
     expect(f.confirm).toHaveBeenCalledTimes(1);
     expect(f.execute.mock.calls.at(-1)![1]).toBe('ai.memory.list');
+    expect(richText(message)).not.toContain(JSON.stringify({ id: 'fact-1', revision: 2 }));
   });
 
   it('recovers a failed read render with only fresh navigation, not stale mutation controls', async () => {
@@ -865,12 +1098,12 @@ describe('AI management panel lifecycle', () => {
     f.execute.mockResolvedValueOnce({ status: 'pending_confirmation', invocationId: 'prepare', confirmation: approval });
     f.pendingDetails.mockReturnValue({ confirmation: approval, input: { id: 'fact-1', revision: 2 } });
     await f.bot.handleUpdate(update('/memory delete fact-1 2'));
-    const message = f.messages.at(-1)!;
+    const message = f.messages.at(-1)!; const original = richText(message);
     let edits = 0;
     f.intercept(async method => { if (method === 'editMessageText' && ++edits === 2) throw new Error('lost receipt edit'); });
     await f.bot.handleUpdate(click(message));
     expect(f.confirm).toHaveBeenCalledTimes(1);
-    expect(richText(message)).toBe(translator('en')('bot:ai.saved'));
+    expect(richText(message)).toBe(`${original}\n\n${translator('en')('bot:ai.saved')}`);
     expect(f.messages).toHaveLength(1);
     expect(edits).toBe(3);
   });
@@ -910,14 +1143,14 @@ describe('AI management panel lifecycle', () => {
     f.execute.mockResolvedValueOnce({ status: 'pending_confirmation', invocationId: 'prepare', confirmation: approval });
     f.pendingDetails.mockReturnValue({ confirmation: approval, input: { id: 'fact-1', revision: 2 } });
     await adapter.command(f.context(update('/memory delete fact-1 2')), 'memory', 'delete fact-1 2');
-    const message = f.messages.at(-1)!; const confirm = callbacks(message)[0]!;
+    const message = f.messages.at(-1)!; const confirm = callbacks(message)[0]!; const original = richText(message);
     const gate = Promise.withResolvers<ActionResult>(); f.confirm.mockImplementationOnce(() => gate.promise);
     const work = adapter.callback(f.context(click(message, confirm)));
     await vi.advanceTimersByTimeAsync(0);
     expect(f.confirm).toHaveBeenCalledTimes(1);
     if (reason === 'expired') await vi.advanceTimersByTimeAsync(60_001);
     else await adapter.cancel(f.context(update('/cancel')));
-    expect(richText(message)).toBe(translator('en')('bot:ai.pendingOutcome'));
+    expect(richText(message)).toBe(`${original}\n\n${translator('en')('bot:ai.pendingOutcome')}`);
     gate.resolve(success({ deleted: true })); await work;
     expect(richText(f.messages.at(-1)!)).toBe(translator('en')('bot:ai.saved'));
     expect(callbacks(f.messages.at(-1)!)).toHaveLength(0);

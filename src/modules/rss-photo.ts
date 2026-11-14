@@ -3,9 +3,9 @@ import { defaultResourcePolicy, type ResourcePolicy } from '../resources.js';
 import { RSS_PHOTO_MAX_SOURCE_BYTES, type RssPhotoFetcher } from './rss-contract.js';
 
 export const RSS_PHOTO_MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
-export const RSS_PHOTO_MAX_INPUT_PIXELS = 1_048_576;
+export const RSS_PHOTO_MAX_INPUT_PIXELS = 20_000_000;
 export const RSS_PHOTO_MAX_DIMENSION = 1280;
-export const RSS_PHOTO_MAX_REPAIR_BYTES = 2 * 1024 * 1024;
+export const RSS_PHOTO_MAX_REPAIR_BYTES = 8 * 1024 * 1024;
 export const RSS_PHOTO_TIMEOUT_MS = 10_000;
 export type RssPhotoPreparer = (url: string, signal: AbortSignal, maxSourceBytes?: number) => Promise<{ data: Buffer; sourceBytes: number }>;
 
@@ -66,14 +66,14 @@ function validDimensions(width: number, height: number): boolean {
 let fetchModule: Promise<typeof import('./rss-feed.js')> | undefined;
 const fetchRssPhoto: RssPhotoFetcher = async (...args) => (await (fetchModule ??= import('./rss-feed.js'))).fetchRssPhoto(...args);
 
-export function createRssPhotoPreparer(fetcher: RssPhotoFetcher = fetchRssPhoto, options: { qualified?: boolean; resources?: Pick<ResourcePolicy, 'tryAcquire'>; timeoutMs?: number } = {}): RssPhotoPreparer {
+export function createRssPhotoPreparer(fetcher: RssPhotoFetcher = fetchRssPhoto, options: { resources?: Pick<ResourcePolicy, 'tryAcquire'>; timeoutMs?: number } = {}): RssPhotoPreparer {
   const timeoutMs = Math.min(options.timeoutMs ?? RSS_PHOTO_TIMEOUT_MS, RSS_PHOTO_TIMEOUT_MS);
+  const resources = options.resources ?? defaultResourcePolicy;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error('RSS_PHOTO_INVALID');
   return async (url, signal, maxSourceBytes = RSS_PHOTO_MAX_SOURCE_BYTES) => {
     if (signal.aborted) throw new Error('RSS_PHOTO_ABORTED');
     if (!Number.isSafeInteger(maxSourceBytes) || maxSourceBytes <= 0) throw new Error('RSS_PHOTO_INVALID');
-    if (!options.qualified) throw new Error('RSS_PHOTO_UNAVAILABLE');
-    const lease = (options.resources ?? defaultResourcePolicy).tryAcquire('heavy', 64 * 1024 * 1024);
+    let lease = resources.tryAcquire('heavy', 64 * 1024 * 1024);
     if (!lease) throw new Error('RSS_PHOTO_UNAVAILABLE');
     const maxBytes = Math.min(maxSourceBytes, RSS_PHOTO_MAX_SOURCE_BYTES, RSS_PHOTO_MAX_REPAIR_BYTES);
     const controller = new AbortController();
@@ -86,6 +86,12 @@ export function createRssPhotoPreparer(fetcher: RssPhotoFetcher = fetchRssPhoto,
       if (controller.signal.aborted) throw new Error('RSS_PHOTO_ABORTED');
       if (!Buffer.isBuffer(source) || !source.length || source.length > maxBytes) throw new Error('RSS_PHOTO_INVALID');
       const admitted = inspectRssPhoto(source);
+      // Re-admit synchronously before native work; this estimate is not an OS memory cap.
+      const workingBytes = Math.max(64 * 1024 * 1024, 32 * 1024 * 1024 + admitted.width * admitted.height * 8 + source.length * 2);
+      lease.release();
+      lease = undefined;
+      lease = resources.tryAcquire('heavy', workingBytes);
+      if (!lease) throw new Error('RSS_PHOTO_UNAVAILABLE');
       const data = await new Promise<Buffer>((resolve, reject) => {
         const child = fork(new URL(import.meta.url.endsWith('.ts') ? './rss-photo-worker.ts' : './rss-photo-worker.js', import.meta.url), [], {
           execArgv: ['--max-old-space-size=32', '--max-semi-space-size=2'], env: {}, serialization: 'advanced', stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
@@ -111,11 +117,12 @@ export function createRssPhotoPreparer(fetcher: RssPhotoFetcher = fetchRssPhoto,
       });
       return { data, sourceBytes: source.length };
     } catch {
-      throw new Error(signal.aborted ? 'RSS_PHOTO_ABORTED' : controller.signal.reason === 'TIMEOUT' ? 'RSS_PHOTO_TIMEOUT' : 'RSS_PHOTO_INVALID');
+      throw new Error(signal.aborted ? 'RSS_PHOTO_ABORTED' : controller.signal.reason === 'TIMEOUT' ? 'RSS_PHOTO_TIMEOUT'
+        : !lease ? 'RSS_PHOTO_UNAVAILABLE' : 'RSS_PHOTO_INVALID');
     } finally {
       clearTimeout(timer);
       signal.removeEventListener('abort', abort);
-      lease.release();
+      lease?.release();
     }
   };
 }

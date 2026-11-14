@@ -185,11 +185,24 @@ describe('legacy and frontend isolation', () => {
     { metadata: { id: 'rate', nameKey: 'web:rate.name', descriptionKey: 'web:rate.description', schema_version: 1, configurable: false } },
     { metadata: { id: 'weather', nameKey: 'web:weather.name', descriptionKey: 'web:weather.description', schema_version: 1, configurable: false } },
     { metadata: { id: 'sticker', nameKey: 'web:modules.stickerName', descriptionKey: 'web:modules.stickerDescription', schema_version: 1, configurable: false } },
-    { metadata: { id: 'subconv', nameKey: 'web:subconv.name', descriptionKey: 'web:subconv.description', schema_version: 1, configurable: false } }]);
+    { metadata: { id: 'subconv', nameKey: 'web:subconv.name', descriptionKey: 'web:subconv.description', schema_version: 1, configurable: false } },
+    { metadata: { id: 'relay', nameKey: 'web:modules.relayName', descriptionKey: 'web:modules.relayDescription', schema_version: 1, configurable: false } }]);
     expect(Object.isFrozen(modules)).toBe(true);
     const packageJson = JSON.parse(await readFile('package.json', 'utf8'));
-    expect(packageJson.scripts.start).toBe('node --max-old-space-size=96 --max-semi-space-size=4 dist/src/index.js');
+    expect(packageJson.scripts.start).toBe('node dist/src/index.js');
     expect(JSON.stringify(packageJson.dependencies)).not.toMatch(/python|ai-sdk|langchain|openai|anthropic|mcp/i);
+  });
+
+  it('keeps the low-memory benchmark opt-in without removing container security', async () => {
+    const [dockerfile, compose] = await Promise.all([readFile('Dockerfile', 'utf8'), readFile('docker-compose.yml', 'utf8')]);
+    expect(dockerfile).not.toMatch(/^ENV NODE_OPTIONS=/m);
+    expect(compose).not.toMatch(/^\s+(?:cpus|mem_limit|memswap_limit):/m);
+    expect(dockerfile).toContain('USER node');
+    expect(compose).toContain('read_only: true');
+    expect(compose).toContain('no-new-privileges:true');
+    expect(compose).toContain('pids_limit: 64');
+    expect(compose).toContain('cap_drop:');
+    expect(compose).toContain('- ALL');
   });
 
   it('keeps public shared/frontend modules independent of server imports and startup secrets', async () => {

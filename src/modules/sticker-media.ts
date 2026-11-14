@@ -180,7 +180,7 @@ async function decodeVideo(request: StickerConversionRequest, video: NonNullable
     '-frames:v', request.format === 'png' ? '1' : '91', '-threads', '1', '-c:v', 'rawvideo',
     '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1',
   ];
-  const child = spawn('ffmpeg', args, { shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn('ffmpeg', args, { shell: false, env: {}, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   let failure: AppError | undefined;
   const stop = (error: AppError) => { failure ??= error; child.kill('SIGKILL'); };
   const abort = () => stop(new AppError(signal.reason === 'TIMEOUT' ? 'TIMEOUT' : 'CANCELLED'));
@@ -289,7 +289,7 @@ async function render(job: RenderJob, source: StickerConversionRequest, signal: 
 }
 
 
-export function createStickerConverter(options: { timeoutMs?: number; maxOutputBytes?: number; qualified?: boolean; resources?: Pick<ResourcePolicy, 'tryAcquire'> } = {}): StickerConverter {
+export function createStickerConverter(options: { timeoutMs?: number; maxOutputBytes?: number; resources?: Pick<ResourcePolicy, 'tryAcquire'> } = {}): StickerConverter {
   const timeoutMs = Math.min(options.timeoutMs ?? DEADLINE_MS, DEADLINE_MS);
   const maxOutputBytes = Math.min(options.maxOutputBytes ?? MAX_OUTPUT, MAX_OUTPUT);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) throw new AppError('INVALID_INPUT');
@@ -299,9 +299,8 @@ export function createStickerConverter(options: { timeoutMs?: number; maxOutputB
       || !validDimension(request.width) || !validDimension(request.height) || typeof request.media !== 'boolean'
       || !(['static', 'animated', 'video'] as const).includes(request.kind)
       || !(request.kind === 'static' ? ['png', 'jpg', 'webp'] : ['png', 'gif']).includes(request.format)) throw new AppError('INVALID_INPUT');
-    // Qualification includes parent + native children + charged filesystem memory.
-    // An individual V8 limit is not evidence that this fits the 256 MiB runtime.
-    if (!options.qualified) throw new AppError('UNAVAILABLE');
+    // Fixed, validated codecs, not an arbitrary-script sandbox. Keep the full
+    // admission estimate and reject under-budget/busy hosts before spawning.
     const lease = (options.resources ?? defaultResourcePolicy).tryAcquire('heavy', 96 * 1024 * 1024);
     if (!lease) throw new AppError('CAPACITY');
     const controller = new AbortController();

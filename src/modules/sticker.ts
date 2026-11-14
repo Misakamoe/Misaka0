@@ -79,7 +79,7 @@ function originalFormat(data: Buffer, kind: StickerKind): StickerResult['format'
 export class StickerService {
   private readonly transport: StickerTransport;
   private readonly converter: StickerConverter;
-  private mediaModule: Promise<typeof import('./sticker-media.js')> | undefined;
+  private mediaConverter: Promise<StickerConverter> | undefined;
   private readonly now: () => number;
   private readonly capacity: number;
   private readonly tempDirectory: string | undefined;
@@ -90,16 +90,17 @@ export class StickerService {
 
   constructor(options: { transport: StickerTransport; convert?: StickerConverter; now?: () => number; capacity?: number; tempDirectory?: string; resources?: Pick<ResourcePolicy, 'tryAcquire'> }) {
     this.transport = options.transport;
+    this.resources = options.resources ?? defaultResourcePolicy;
     this.converter = options.convert ?? (async (request, signal) => {
       throwIfAborted(signal);
-      const media = await (this.mediaModule ??= import('./sticker-media.js'));
+      const convert = await (this.mediaConverter ??= import('./sticker-media.js')
+        .then(media => media.createStickerConverter({ resources: this.resources })));
       throwIfAborted(signal);
-      return media.convertSticker(request, signal);
+      return convert(request, signal);
     });
     this.now = options.now ?? Date.now;
     this.capacity = options.capacity ?? 200;
     this.tempDirectory = options.tempDirectory;
-    this.resources = options.resources ?? defaultResourcePolicy;
     if (!Number.isSafeInteger(this.capacity) || this.capacity < 1 || this.capacity > 200) throw new AppError('INVALID_INPUT');
   }
 

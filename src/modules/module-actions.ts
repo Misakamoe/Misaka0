@@ -9,6 +9,7 @@ import { subconvGenerateInputSchema, subconvResultSchema, subconvSnapshotSchema 
 import { stickerSourcesSchema, subconvGenerateOwnedSchema, subconvOptionsUpdateSchema, subconvOwnedReceiptSchema,
   subconvSafeOptionsSchema, subconvSafeSettingsSchema, subconvSourcesSchema } from '../../shared/schemas/ai-native.js';
 import type { ActionExecutor, InvocationContext } from '../actions.js';
+import { AppError } from '../errors.js';
 import type { AliasService } from './alias.js';
 import type { RssService, RssTarget } from './rss.js';
 import type { RateService } from './rate.js';
@@ -47,17 +48,22 @@ export function registerRssActions(executor: Pick<ActionExecutor, 'register'>, s
       ? { kind: 'user' as const, id: context.actorId } : { kind: 'chat' as const, id: context.chat.id },
   } as const;
   const target = (context: InvocationContext): RssTarget => ({ chatId: context.chat.id, kind: context.chat.type === 'private' ? 'private' : 'group', threadId: context.chat.threadId });
+  const confirmationSubject = (input: z.infer<typeof rssRemoveInputSchema>, context: InvocationContext) => {
+    const subscription = service.get(target(context), input.id);
+    if (subscription.revision !== input.revision) throw new AppError('CONFLICT');
+    return { kind: 'rss' as const, id: subscription.id, title: subscription.title };
+  };
   executor.register({ ...common, id: 'rss.list', input: rssListInputSchema, output: rssListSchema, effect: 'read',
     aiOutput: rssListSchema.extend({ items: z.array(modelSubscription).max(5) }), modelOutput: output => ({ ...output, items: output.items.map(project) }),
-    aiDescription: 'List scoped RSS IDs, titles and health. Group callers must be chat managers. Source URLs are withheld from the model.', execute: (input, context) => service.list(target(context), input.page) });
+    aiDescription: 'List scoped RSS IDs, titles, keyword filters and health. Group callers must be chat managers. Source URLs are withheld from the model.', execute: (input, context) => service.list(target(context), input.page) });
   executor.register({ ...common, id: 'rss.get', input: rssRemoveInputSchema.pick({ id: true }), output: rssSubscriptionSchema, effect: 'read',
     aiOutput: modelSubscription, modelOutput: project,
-    aiDescription: 'Read scoped RSS metadata and revision. Source URLs are withheld from the model.', execute: (input, context) => service.get(target(context), input.id) });
+    aiDescription: 'Read scoped RSS metadata, keyword filters and revision. Source URLs are withheld from the model.', execute: (input, context) => service.get(target(context), input.id) });
   executor.register({ ...common, id: 'rss.add', input: rssAddInputSchema, output: rssMutationSchema, effect: 'permission',
-    aiDescription: 'Subscribe the current chat and actual topic to an RSS feed. Requires chat-manager permission and human confirmation.', execute: (input, context) => service.add(target(context), input, context.language, context.signal) });
-  executor.register({ ...common, id: 'rss.update', input: rssUpdateInputSchema, output: rssMutationSchema, effect: 'permission',
-    aiDescription: 'Update an RSS subscription at its current revision, only in this chat and topic. Requires chat-manager permission and human confirmation.', execute: (input, context) => service.update(target(context), input, context.signal) });
-  executor.register({ ...common, id: 'rss.remove', input: rssRemoveInputSchema, output: rssMutationSchema, effect: 'permission',
+    aiDescription: 'Subscribe the current chat and actual topic to an RSS feed without backfilling history. Optional filters require include and exclude arrays of literal keywords: NFKC-normalized, case-insensitive substring matching on title or bounded visible feed content, include-any and exclude-any veto; empty arrays disable filtering. No regex or article-page fetch. Requires chat-manager permission and human confirmation.', execute: (input, context) => service.add(target(context), input, context.language, context.signal) });
+  executor.register({ ...common, id: 'rss.update', input: rssUpdateInputSchema, output: rssMutationSchema, effect: 'permission', confirmationSubject,
+    aiDescription: 'Update an RSS subscription at its current revision, only in this chat and topic. Filters replace both include and exclude arrays; filters:null clears them. Literal NFKC-normalized, case-insensitive keywords match title or bounded visible feed content: include-any, exclude-any veto, empty arrays disabled, no regex or article-page fetch. Rejected queued entries are dropped; clearing never backfills history or retries uncertain sends. Requires chat-manager permission and human confirmation.', execute: (input, context) => service.update(target(context), input, context.signal) });
+  executor.register({ ...common, id: 'rss.remove', input: rssRemoveInputSchema, output: rssMutationSchema, effect: 'permission', confirmationSubject,
     aiDescription: 'Remove an RSS subscription at its current revision, only in this chat and topic. Requires chat-manager permission and human confirmation.', execute: (input, context) => service.remove(target(context), input.id, input.revision, context.signal) });
 }
 

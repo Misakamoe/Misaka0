@@ -3,6 +3,7 @@ import { InlineKeyboard } from 'grammy';
 import type { Message, MessageEntity, RichMessageButton } from 'grammy/types';
 import { commandEntities, panelContent, richButtonRows } from '../src/telegram/rich.js';
 import { helpMarkdown } from '../src/telegram/commands.js';
+import { modules } from '../src/modules/index.js';
 import { buttonRows, callbacks, liveCallbacks, recordContent, richText, telegramMessage } from './support/telegram.js';
 
 describe('literal native panel content', () => {
@@ -230,7 +231,7 @@ describe('literal native panel content', () => {
       expect(markdown).not.toContain('```');
       expect(markdown).toMatch(/\*\*[^*\n]+\*\*/);
       expect(markdown).not.toContain('{{count}}');
-      expect(markdown).toMatch(/[：:]\s*6(?:\n|$)/);
+      expect(markdown).toMatch(new RegExp(`[：:]\\s*${modules.length}(?:\\n|$)`));
     }
   });
 });

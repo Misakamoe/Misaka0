@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { aiPersonalSetupSchema, type AiPersonalSetup } from '../shared/schemas/ai-admin.js';
-import { aiDefaults, aiProtocolSchema } from '../shared/schemas/ai.js';
+import { aiDefaults, aiInteractiveBudget, aiInteractiveDailyRuns, aiProtocolSchema } from '../shared/schemas/ai.js';
 import { ActionExecutor } from '../src/actions.js';
 import { AiService } from '../src/ai/service.js';
 import { AiStore } from '../src/ai/store.js';
@@ -145,7 +145,7 @@ describe('fresh personal setup transaction', () => {
     });
     const delivery = { started: vi.fn<AiDelivery['started']>(async () => {}), progress: vi.fn<AiDelivery['progress']>(async () => {}),
       approval: vi.fn<AiDelivery['approval']>(async () => {}), completed: vi.fn<AiDelivery['completed']>(async () => 42),
-      failed: vi.fn<AiDelivery['failed']>(async () => {}), file: vi.fn<AiDelivery['file']>(async () => {}) };
+      failed: vi.fn<AiDelivery['failed']>(async () => {}), file: vi.fn<AiDelivery['file']>(async () => {}), retire: vi.fn<AiDelivery['retire']>(async () => {}) };
     f.ai.attachTelegram(delivery, async () => { throw new Error('No downloads in text setup regression'); });
     f.ai.personalSetup(admin(), { ...input, protocol, baseUrl: 'https://api.openai.com/v1' });
     if (outputLimit === 2048) {
@@ -159,18 +159,10 @@ describe('fresh personal setup transaction', () => {
     const { runId } = ticket.data as { runId: string };
     await vi.waitFor(() => expect(['queued', 'running']).not.toContain(f.ai.runView(context, runId).state));
     const view = f.ai.runView(context, runId);
-    if (outputLimit === 2048) {
-      expect(view).toMatchObject({ state: 'failed' });
-      expect(requests).toHaveLength(2); expect(post).toHaveBeenCalledTimes(2);
-      expect(requests.every(request => request.maxOutputTokens === 409)).toBe(true);
-      expect(f.store.getSettings().settings.presets[0]!.budget.maxOutputTokens).toBe(2048);
-      expect(delivery.completed).not.toHaveBeenCalled();
-      return;
-    }
     expect(view, JSON.stringify({ view, requests: requests.length })).toMatchObject({ state: 'completed' });
     const budget = f.store.getSettings().settings.presets[0]!.budget;
-    expect(budget).toEqual({ maxInputTokens: 32768, maxOutputTokens: 8192, maxToolCalls: 4, maxDurationMs: 60000, maxCostMicros: 100000 });
-    expect(f.store.getSettings().settings.limits.dailyRuns).toBe(50);
+    expect(budget).toEqual({ ...aiInteractiveBudget(), maxOutputTokens: outputLimit });
+    expect(f.store.getSettings().settings.limits.dailyRuns).toBe(aiInteractiveDailyRuns);
     expect(requests).toHaveLength(2); expect(post).toHaveBeenCalledTimes(2);
     expect(requests[0]!.system).toContain(buildMisakaSystemInstructions());
     expect(Buffer.byteLength(requests[0]!.system!)).toBeGreaterThan(2000);
@@ -181,8 +173,10 @@ describe('fresh personal setup transaction', () => {
       { id: 'read-weather', result: { status: 'succeeded', data: { locations: [{ name: 'Tokyo' }] } } }]);
     const inputTokens = requests.reduce((total, request) => total + request.maxInputTokens!, 0);
     const outputTokens = requests.reduce((total, request) => total + request.maxOutputTokens!, 0);
-    expect(inputTokens).toBeLessThanOrEqual(budget.maxInputTokens); expect(outputTokens).toBeLessThanOrEqual(budget.maxOutputTokens);
-    expect(requests.every(request => request.maxOutputTokens === 1638)).toBe(true);
+    expect(inputTokens).toBeLessThanOrEqual(budget.maxInputTokens * (budget.maxToolCalls + 1));
+    expect(outputTokens).toBeLessThanOrEqual(budget.maxOutputTokens * (budget.maxToolCalls + 1));
+    expect(requests.every(request => request.maxOutputTokens === outputLimit)).toBe(true);
+    expect(requests.every(request => request.maxInputTokens === budget.maxInputTokens)).toBe(true);
     expect(f.store.runGet(aiScope(context), runId)!.continuation).toMatchObject({ inputTokens, outputTokens, calls: 2, steps: 2, billingUnknown: true });
     expect(f.store.safeStatus()).toMatchObject({ reservedCostMicros: 100000, settledCostMicros: 0 });
     expect(conversion).toHaveBeenCalledOnce(); expect(weather).toHaveBeenCalledOnce(); expect(weatherJson).toHaveBeenCalledOnce(); expect(rateJson).not.toHaveBeenCalled();
@@ -193,7 +187,7 @@ describe('fresh personal setup transaction', () => {
   it.each(aiProtocolSchema.options)('stores %s, owner and allowlisted groups in one encrypted revision', async protocol => {
     const f = await fixture(); await f.access.authorize(-100, 'test group', 1, 0);
     const result = await f.executor.execute(admin(), 'ai.admin.setup', { ...input, protocol, groupIds: [-100] });
-    expect(result).toMatchObject({ status: 'succeeded', data: { revision: 1, settings: { enabled: true, limits: { dailyRuns: 50 } } } });
+    expect(result).toMatchObject({ status: 'succeeded', data: { revision: 1, settings: { enabled: true, limits: { dailyRuns: aiInteractiveDailyRuns } } } });
     const snapshot = f.ai.admin(admin());
     expect(snapshot.settings.providers[0]).toMatchObject({ protocol, baseUrl: input.baseUrl, allowedOrigins: ['https://provider.invalid'] });
     expect(snapshot.settings.presets[0]).toMatchObject({ budgetMode: 'usage', inputCapabilities: ['text'], outputCapabilities: ['text'],

@@ -287,14 +287,14 @@ describe('encrypted SQLite store', () => {
     const reserved = store.usageReserve(alice, request);
     expect(store.usageReserve(alice, request)).toEqual(reserved);
     expect(() => store.usageReserve(alice, { ...request, amount: { ...amount, costMicros: 1 } })).toThrow('CONFLICT');
-    expect(() => store.usageReserve(alice, { ...request, id: 'reservation-2' })).toThrow('CAPACITY');
+    expect(() => store.usageReserve(alice, { ...request, id: 'reservation-2' })).toThrow('AI_BUDGET_LIMIT');
     expect(() => store.usageSettle(bob, reserved.id, null)).toThrow('NOT_FOUND');
     const unknown = store.usageSettle(alice, reserved.id, null);
     expect(unknown.state).toBe('unknown');
     expect(store.safeStatus().reservedCostMicros).toBe(60);
     store.close();
     const { store: reopened } = await fixture({ directory });
-    expect(() => reopened.usageReserve(alice, { ...request, id: 'reservation-2' })).toThrow('CAPACITY');
+    expect(() => reopened.usageReserve(alice, { ...request, id: 'reservation-2' })).toThrow('AI_BUDGET_LIMIT');
     reopened.usageSettle(alice, reserved.id, { ...amount, costMicros: 20 });
     reopened.usageReserve(alice, { ...request, id: 'reservation-2' });
     expect(reopened.safeStatus()).toMatchObject({ reservedCostMicros: 60, settledCostMicros: 20 });
@@ -310,7 +310,7 @@ describe('encrypted SQLite store', () => {
     const first = store.usageReserve(alice, { id: 'a', actorId: 1, period: '2026-11-11', amount, limitCostMicros: 100 });
     store.usageSettle(alice, first.id, null);
     for (const scope of [bob, group, { ...group, threadId: 6 }]) {
-      expect(() => store.usageReserve(scope, { id: 'b', actorId: 2, period: '2026-11-11', amount, limitCostMicros: 100 })).toThrow('CAPACITY');
+      expect(() => store.usageReserve(scope, { id: 'b', actorId: 2, period: '2026-11-11', amount, limitCostMicros: 100 })).toThrow('AI_BUDGET_LIMIT');
     }
     store.usageSettle(alice, first.id, { ...amount, costMicros: 20 });
     expect(store.usageReserve(bob, { id: 'b', actorId: 2, period: '2026-11-11', amount, limitCostMicros: 100 }).state).toBe('reserved');

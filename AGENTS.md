@@ -15,10 +15,11 @@ This file guides coding agents; it is not runtime bot configuration.
 - `shared/schemas/` holds shared Zod contracts and Draft 7 JSON Schema exports;
   settings schemas are distinct from one-shot operation schemas.
 - Native modules live in `src/modules/`; `src/modules/index.ts` explicitly registers
-  `alias`, `rss`, `rate`, `weather`, `sticker`, and `subconv`. Do not scan directories, reflectively execute
+  `alias`, `rss`, `rate`, `weather`, `sticker`, `subconv`, and `relay`. Do not scan directories, reflectively execute
   functions, or load archived modules.
-- Remaining migrations are `shuo` and AI. Do not add the obsolete `echo` example;
-  defer `reminder` until grammY supports Bot API 10.4 Widgets.
+- AI is registered separately through its Actions and adapters; `shuo` remains
+  unmigrated. Do not add the obsolete `echo` example; defer `reminder` until
+  grammY supports Bot API 10.4 Widgets.
 - Follow strict TypeScript/NodeNext settings and existing `.js` relative imports
   in backend TypeScript. Match nearby formatting and the ESLint configuration.
 - `legacy/ptb/` is an immutable archive, not a compatibility layer. Preserve its

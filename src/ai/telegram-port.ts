@@ -23,6 +23,8 @@ export interface AiCapturedFile {
 export type AiOutputFile = {
   name: string;
   mimeType: string;
+  /** Only trusted delivery code chooses this; private exports are always protected. */
+  protectContent?: boolean;
 } & ({ bytes: Uint8Array; path?: never } | { path: string; bytes?: never });
 
 export interface AiDelivery {
@@ -30,7 +32,8 @@ export interface AiDelivery {
   progress(target: AiDeliveryTarget, text: string, signal: AbortSignal): Promise<void>;
   approval(target: AiDeliveryTarget, confirmation: Confirmation, tool: string, signal: AbortSignal, input?: AiJsonValue): Promise<void>;
   completed(target: AiDeliveryTarget, text: string, signal: AbortSignal): Promise<number | undefined>;
-  failed(target: AiDeliveryTarget, code: string, signal: AbortSignal): Promise<void>;
+  failed(target: AiDeliveryTarget, code: string, signal: AbortSignal, partialText?: string): Promise<void>;
+  retire(target: AiDeliveryTarget): Promise<void>;
   file(target: AiDeliveryTarget, file: AiOutputFile, signal: AbortSignal): Promise<void>;
 }
 

@@ -83,6 +83,17 @@ describe('explicit compatible API directories', () => {
 });
 
 describe('native scoped upload references', () => {
+  it('does not let a forged tool role bypass native image-position validation', async () => {
+    const part = { type: 'image' as const, mimeType: 'image/png', bytes: Buffer.alloc(100) };
+    const mock = fixture('openai-responses', [part]);
+    const result = await mock.provider.generate(message([part]), { signal: signal() });
+    const continuation = structuredClone(result.continuation!);
+    continuation.records.push({ role: 'tool', content: [{ type: 'input_image', image_url: 'https://elsewhere.example.com/unowned.png' }] });
+    const before = mock.request.mock.calls.length;
+    await expect(mock.provider.generate({ messages: [], continuation }, { signal: signal() })).rejects.toMatchObject({ code: 'CONTINUATION_MISMATCH', billable: false });
+    expect(mock.request).toHaveBeenCalledTimes(before);
+  });
+
   it.each(['openai-responses', 'anthropic-messages', 'google-generate-content'] as const)('%s uploads media and round-trips a sub-48KiB continuation without binary copies', async protocol => {
     const content: Exclude<PreparedContent, { type: 'text' }>[] = [
       { type: 'image', mimeType: 'image/png', bytes: Buffer.alloc(90_000, 7), filename: 'image.png' },
@@ -138,7 +149,7 @@ describe('native scoped upload references', () => {
     for (const protocol of ['openai-responses', 'anthropic-messages'] as const) {
       await expect(createAiProvider(profile(protocol), { transport: mock.transport, fileScope: scope }).generate(message([image, audio]), { signal: signal() })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
     }
-    await expect(createAiProvider({ ...profile('openai-responses'), origin: 'https://api.deepseek.com' }, { transport: mock.transport, fileScope: scope }).generate(message([image]), { signal: signal() })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+    await expect(createAiProvider({ ...profile('openai-responses'), origin: 'https://api.deepseek.com' }, { transport: mock.transport, fileScope: scope }).generate(message([image]), { signal: signal() })).rejects.toMatchObject({ code: 'MEDIA_COUNT_UNAVAILABLE' });
     await expect(createAiProvider({ ...profile('anthropic-messages'), anthropicVersion: '2023-06-01' }, { transport: mock.transport, fileScope: scope }).generate(message([image]), { signal: signal() })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
     expect(mock.request).not.toHaveBeenCalled();
   });
@@ -151,11 +162,11 @@ describe('native scoped upload references', () => {
   });
   it('rejects invented generic file output and media/tool continuation combinations before network', async () => {
     for (const protocol of ['openai-responses', 'anthropic-messages', 'google-generate-content'] as const) {
-      expect(() => createAiProvider({ ...profile(protocol), capabilities: { input: ['text'], output: ['file'] } })).toThrow('UNSUPPORTED');
+      expect(() => createAiProvider({ ...profile(protocol), capabilities: { input: ['text'], output: ['file'] } })).toThrow('OUTPUT_UNSUPPORTED');
     }
     const mock = fixture('google-generate-content', []);
     const provider = createAiProvider({ ...profile('google-generate-content'), capabilities: { input: ['text'], output: ['image'] } }, { transport: mock.transport });
-    await expect(provider.generate({ ...message([{ type: 'text', text: 'Draw' }]), tools: [{ name: 'read', description: '', inputSchema: { type: 'object' } }] }, { signal: signal() })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+    await expect(provider.generate({ ...message([{ type: 'text', text: 'Draw' }]), tools: [{ name: 'read', description: '', inputSchema: { type: 'object' } }] }, { signal: signal() })).rejects.toMatchObject({ code: 'OUTPUT_UNSUPPORTED' });
     expect(mock.request).not.toHaveBeenCalled();
   });
   it('bounds raw media and prompt bytes, and rejects uncountable compatible media before network', async () => {
@@ -163,7 +174,7 @@ describe('native scoped upload references', () => {
     const mock = fixture('openai-responses', content);
     await expect(mock.provider.generate(message(content), { signal: signal() })).rejects.toMatchObject({ code: 'TOO_LARGE' });
     const compatible = createAiProvider(profile('openai-chat-completions'), { transport: mock.transport });
-    await expect(compatible.generate(message([content[0]!]), { signal: signal() })).rejects.toMatchObject({ code: 'UNSUPPORTED', billable: false });
+    await expect(compatible.generate(message([content[0]!]), { signal: signal() })).rejects.toMatchObject({ code: 'MEDIA_COUNT_UNAVAILABLE', billable: false });
     await expect(mock.provider.generate({ ...message([content[0]!]), system: 'x'.repeat(500_000) }, { signal: signal() })).rejects.toMatchObject({ code: 'TOO_LARGE' });
     expect(mock.request).not.toHaveBeenCalled();
   });
@@ -258,7 +269,7 @@ describe('media input-token admission', () => {
   it.each(['openai-responses', 'anthropic-messages', 'google-generate-content'] as const)('%s rejects huge expanded token counts from a tiny compressed PDF before inference', async protocol => {
     const content = [{ type: 'file' as const, mimeType: 'application/pdf', bytes: Buffer.from('%PDF-fixture-compressed') }];
     const mock = fixture(protocol, content, { count: 100_000 });
-    await expect(mock.provider.generate({ ...message(content), maxInputTokens: 32_768 }, { signal: signal() })).rejects.toMatchObject({ code: 'QUOTA', billable: false });
+    await expect(mock.provider.generate({ ...message(content), maxInputTokens: 32_768 }, { signal: signal() })).rejects.toMatchObject({ code: 'INPUT_LIMIT', billable: false });
     expect(mock.request.mock.calls.filter(([url]) => isCount(url))).toHaveLength(1);
     expect(mock.request.mock.calls.filter(([url]) => isGeneration(url))).toHaveLength(0);
     expect(mock.request.mock.calls.filter(([, input]) => input.method === 'DELETE')).toHaveLength(1);
@@ -296,7 +307,7 @@ describe('media input-token admission', () => {
   it('defaults media admission to 32768 tokens when maxInputTokens is omitted', async () => {
     const content = [{ type: 'audio' as const, mimeType: 'audio/mpeg', bytes: Buffer.alloc(100) }];
     const mock = fixture('google-generate-content', content, { count: 32_769 });
-    await expect(mock.provider.generate(message(content), { signal: signal() })).rejects.toMatchObject({ code: 'QUOTA', billable: false });
+    await expect(mock.provider.generate(message(content), { signal: signal() })).rejects.toMatchObject({ code: 'INPUT_LIMIT', billable: false });
     expect(mock.request.mock.calls.some(([url]) => isGeneration(url))).toBe(false);
   });
 
@@ -314,7 +325,34 @@ describe('media input-token admission', () => {
   it.each([400, 404, 405, 501])('does not fall back to generation when the count API returns %i', async countStatus => {
     const content = [{ type: 'image' as const, mimeType: 'image/png', bytes: Buffer.alloc(100) }];
     const mock = fixture('openai-responses', content, { countStatus });
-    await expect(mock.provider.generate({ ...message(content), maxInputTokens: 100 }, { signal: signal() })).rejects.toMatchObject({ code: 'UNSUPPORTED', status: countStatus, billable: false });
+    await expect(mock.provider.generate({ ...message(content), maxInputTokens: 100 }, { signal: signal() })).rejects.toMatchObject({ code: 'MEDIA_COUNT_UNAVAILABLE', status: countStatus, billable: false });
+    expect(mock.request.mock.calls.some(([url]) => isGeneration(url))).toBe(false);
+  });
+
+  it.each(['openai-responses', 'anthropic-messages', 'google-generate-content'] as const)('allows bounded %s usage when only the count endpoint is unavailable', async protocol => {
+    const content = [{ type: 'image' as const, mimeType: 'image/png', bytes: Buffer.alloc(100, 7) }];
+    const mock = fixture(protocol, content, { countStatus: 404 });
+    const provider = createAiProvider({ ...profile(protocol), mediaTokenPolicy: 'bounded' }, { transport: mock.transport, fileScope: scope });
+    const generated = await provider.generate({ ...message(content), maxInputTokens: 4096 }, { signal: signal() });
+    expect(generated.text).toBe('Read');
+    expect(mock.request.mock.calls.filter(([url]) => isGeneration(url))).toHaveLength(1);
+    expect(mock.request.mock.calls.filter(([url]) => /input_tokens|count_tokens|:countTokens/.test(url.pathname))).toHaveLength(1);
+    await provider.release!(generated.cleanup!, signal());
+  });
+
+  it.each([[401, 'AUTH'], [429, 'QUOTA'], [503, 'NETWORK']] as const)('never treats count HTTP %i as permission to generate without a counter', async (countStatus, code) => {
+    const content = [{ type: 'image' as const, mimeType: 'image/png', bytes: Buffer.alloc(100, 7) }];
+    const mock = fixture('openai-responses', content, { countStatus });
+    const provider = createAiProvider({ ...profile('openai-responses'), mediaTokenPolicy: 'bounded' }, { transport: mock.transport, fileScope: scope });
+    await expect(provider.generate({ ...message(content), maxInputTokens: 4096 }, { signal: signal() })).rejects.toMatchObject({ code, billable: false });
+    expect(mock.request.mock.calls.some(([url]) => isGeneration(url))).toBe(false);
+  });
+
+  it('does not ignore a valid over-budget media count in bounded usage mode', async () => {
+    const content = [{ type: 'image' as const, mimeType: 'image/png', bytes: Buffer.alloc(100, 7) }];
+    const mock = fixture('openai-responses', content, { count: 4097 });
+    const provider = createAiProvider({ ...profile('openai-responses'), mediaTokenPolicy: 'bounded' }, { transport: mock.transport, fileScope: scope });
+    await expect(provider.generate({ ...message(content), maxInputTokens: 4096 }, { signal: signal() })).rejects.toMatchObject({ code: 'INPUT_LIMIT', billable: false });
     expect(mock.request.mock.calls.some(([url]) => isGeneration(url))).toBe(false);
   });
 
@@ -333,7 +371,7 @@ describe('media input-token admission', () => {
     const continued: GenerationRequest = { system: 'Trusted system', tools: [tool], messages: [], continuation: JSON.parse(JSON.stringify(first.continuation)) as NativeContinuation,
       toolResults: [{ id: 'call_fixture', name: tool.name, result: { current: true } }], maxInputTokens: 99 };
     const error = await mock.provider.generate(continued, { signal: signal() }).catch(value => value as AiFileCleanupError);
-    expect(error).toMatchObject({ code: 'QUOTA', billable: false, cleanup: first.cleanup });
+    expect(error).toMatchObject({ code: 'INPUT_LIMIT', billable: false, cleanup: first.cleanup });
     expect(mock.request.mock.calls.filter(([url]) => isGeneration(url))).toHaveLength(1);
     const counted = JSON.parse(mock.request.mock.calls.filter(([url]) => isCount(url)).at(-1)![1].body.toString()) as Record<string, unknown>;
     expect(JSON.stringify(counted)).toContain('opaque-signature'); expect(JSON.stringify(counted)).toContain('call_fixture');
@@ -384,7 +422,7 @@ describe('media input-token admission', () => {
     const content = [{ type: 'file' as const, mimeType: 'application/pdf', bytes: Buffer.alloc(100) }];
     const mock = fixture('openai-responses', content, { count: 200, failDelete: true });
     const error = await mock.provider.generate({ ...message(content), maxInputTokens: 100 }, { signal: signal() }).catch(value => value as AiFileCleanupError);
-    expect(error).toBeInstanceOf(AiFileCleanupError); expect(error).toMatchObject({ code: 'QUOTA', billable: false });
+    expect(error).toBeInstanceOf(AiFileCleanupError); expect(error).toMatchObject({ code: 'INPUT_LIMIT', billable: false });
     expect((error as AiFileCleanupError).cleanup[0]).toMatchObject({ id: 'file-native1', signature: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(mock.request.mock.calls.some(([url]) => isGeneration(url))).toBe(false);
   });
@@ -395,7 +433,7 @@ describe('media input-token admission', () => {
     const input: GenerationRequest = { ...message(content), system: 'Original system', maxInputTokens: 100 };
     await expect(mock.provider.generate(input, { signal: signal(), onFiles: () => {
       input.maxInputTokens = 32_768; input.system = 'Mutated system'; input.messages[0]!.content.push({ type: 'text', text: 'Uncounted mutation' });
-    } })).rejects.toMatchObject({ code: 'QUOTA', billable: false });
+    } })).rejects.toMatchObject({ code: 'INPUT_LIMIT', billable: false });
     const counted = mock.request.mock.calls.find(([url]) => isCount(url))![1].body.toString();
     expect(counted).toContain('Original system'); expect(counted).not.toContain('Mutated system'); expect(counted).not.toContain('Uncounted mutation');
     expect(mock.request.mock.calls.some(([url]) => isGeneration(url))).toBe(false);
@@ -439,15 +477,15 @@ describe('media input-token admission', () => {
   it('rejects invalid/exhausted limits and compatible tiny binary classes before any network', async () => {
     const content = [{ type: 'image' as const, mimeType: 'image/png', bytes: Buffer.from('tiny') }];
     const mock = fixture('openai-responses', content);
-    for (const maxInputTokens of [-1, 0.5, 32_769, NaN, '100']) {
+    for (const maxInputTokens of [-1, 0.5, 131_073, NaN, '100']) {
       await expect(mock.provider.generate({ ...message(content), maxInputTokens } as GenerationRequest, { signal: signal() })).rejects.toMatchObject({ code: 'INVALID_INPUT', billable: false });
     }
-    await expect(mock.provider.generate({ ...message(content), maxInputTokens: 0 }, { signal: signal() })).rejects.toMatchObject({ code: 'QUOTA', billable: false });
+    await expect(mock.provider.generate({ ...message(content), maxInputTokens: 0 }, { signal: signal() })).rejects.toMatchObject({ code: 'INPUT_LIMIT', billable: false });
     const compatible = createAiProvider(profile('openai-chat-completions'), { transport: mock.transport });
-    await expect(compatible.generate({ ...message(content), maxInputTokens: 32_768 }, { signal: signal() })).rejects.toMatchObject({ code: 'UNSUPPORTED', billable: false });
+    await expect(compatible.generate({ ...message(content), maxInputTokens: 32_768 }, { signal: signal() })).rejects.toMatchObject({ code: 'MEDIA_COUNT_UNAVAILABLE', billable: false });
     expect(mock.request).not.toHaveBeenCalled();
     const textOnly = fixture('openai-chat-completions', []);
-    await expect(textOnly.provider.generate({ ...message([{ type: 'text', text: 'tiny text' }]), maxInputTokens: 1 }, { signal: signal() })).rejects.toMatchObject({ code: 'QUOTA', billable: false });
+    await expect(textOnly.provider.generate({ ...message([{ type: 'text', text: 'tiny text' }]), maxInputTokens: 1 }, { signal: signal() })).rejects.toMatchObject({ code: 'INPUT_LIMIT', billable: false });
     expect(textOnly.request).not.toHaveBeenCalled();
     await textOnly.provider.generate({ ...message([{ type: 'text', text: 'tiny text' }]), maxInputTokens: 32_768 }, { signal: signal() });
     expect(textOnly.request.mock.calls.filter(([url]) => isCount(url))).toHaveLength(0);

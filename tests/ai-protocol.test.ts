@@ -180,8 +180,47 @@ describe('native provider protocols', () => {
     ];
     for (const [wire, limits] of fixtures) {
       const mock = mockTransport(wire);
-      await expect(createAiProvider(profile('openai-responses', limits), { transport: mock.transport }).generate({ ...initial, tools: [] }, { signal: signal() })).rejects.toMatchObject({ code: 'TOO_LARGE' });
+      await expect(createAiProvider(profile('openai-responses', limits), { transport: mock.transport }).generate({ ...initial, tools: [] }, { signal: signal() })).rejects.toMatchObject({ code: limits.textBytes ? 'OUTPUT_LIMIT' : 'TOO_LARGE' });
     }
+  });
+  it('delivers a complete long answer even when a tool-free replay buffer would be too large', async () => {
+    const text = 'complete answer '.repeat(2000);
+    const mock = mockTransport(openaiText(text), 'text/event-stream', 4096);
+    const result = await createAiProvider(profile('openai-responses', { continuationBytes: 6000 }), { transport: mock.transport })
+      .generate({ ...initial, tools: [] }, { signal: signal() });
+    expect(result.text).toBe(text); expect(result.toolCalls).toEqual([]); expect(result.continuation).toBeUndefined();
+    expect(mock.request).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ['openai-responses', event({ type: 'response.output_text.delta', delta: 'partial answer' })
+      + event({ type: 'response.incomplete', response: { incomplete_details: { reason: 'max_output_tokens' } } })],
+    ['openai-chat-completions', event({ choices: [{ index: 0, delta: { content: 'partial answer', reasoning_content: 'private reasoning' }, finish_reason: 'length' }] })],
+    ['anthropic-messages', anthropic('message_start', { message: {} })
+      + anthropic('content_block_start', { index: 0, content_block: { type: 'text', text: 'partial answer' } })
+      + anthropic('content_block_stop', { index: 0 }) + anthropic('message_delta', { delta: { stop_reason: 'max_tokens' } }) + anthropic('message_stop')],
+    ['google-generate-content', event({ candidates: [{ content: { parts: [{ text: 'partial answer' }] }, finishReason: 'MAX_TOKENS' }] })],
+  ] as const)('classifies %s output exhaustion without losing streamed text or running partial tools', async (protocol, wire) => {
+    const mock = mockTransport(wire); const onText = vi.fn();
+    await expect(createAiProvider(profile(protocol), { transport: mock.transport }).generate(initial, { signal: signal(), onText }))
+      .rejects.toMatchObject({ code: 'OUTPUT_LIMIT' });
+    expect(onText).toHaveBeenCalledExactlyOnceWith('partial answer', expect.any(AbortSignal));
+    expect(mock.request).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ['openai-responses', openaiText()],
+    ['openai-chat-completions', event({ choices: [{ index: 0, delta: { content: 'Hello' }, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n'],
+    ['anthropic-messages', anthropic('message_start', { message: {} })
+      + anthropic('content_block_start', { index: 0, content_block: { type: 'text', text: 'Hello' } })
+      + anthropic('content_block_stop', { index: 0 }) + anthropic('message_delta', { delta: { stop_reason: 'end_turn' } }) + anthropic('message_stop')],
+    ['google-generate-content', event({ candidates: [{ content: { parts: [{ text: 'Hello' }] }, finishReason: 'STOP' }] })],
+  ] as const)('asks %s for a final answer without removing the fixed tool catalog', async (protocol, wire) => {
+    const mock = mockTransport(wire);
+    await expect(createAiProvider(profile(protocol), { transport: mock.transport }).generate({ ...initial, toolChoice: 'none' }, { signal: signal() }))
+      .resolves.toMatchObject({ text: 'Hello', toolCalls: [] });
+    const body = requestBody(mock.request);
+    expect(body.tools).toBeDefined();
+    if (protocol === 'google-generate-content') expect(body.toolConfig).toEqual({ functionCallingConfig: { mode: 'NONE' } });
+    else expect(body.tool_choice).toEqual(protocol === 'anthropic-messages' ? { type: 'none' } : 'none');
   });
   it('reconstructs Anthropic thinking/signatures and partial JSON without displaying thinking', async () => {
     const wire = anthropic('message_start', { message: { model: 'fixture-model', usage: { input_tokens: 8, output_tokens: 1 } } })
@@ -283,11 +322,11 @@ describe('native provider protocols', () => {
     })).rejects.toMatchObject({ code: 'TIMEOUT' });
     expect(effective?.aborted).toBe(true);
   });
-  it('rejects even small compatible binary inputs without pretending byte length bounds media tokens', async () => {
+  it('requires counted media for strict compatible budgets without claiming the model lacks vision', async () => {
     const mock = mockTransport(event({ choices: [{ index: 0, delta: { content: 'Hello' }, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n');
     const provider = createAiProvider(profile('openai-chat-completions'), { transport: mock.transport });
     const message: GenerationRequest = { messages: [{ role: 'user', content: [{ type: 'image', mimeType: 'image/png', bytes: Buffer.from('png') }] }] };
-    await expect(provider.generate(message, { signal: signal() })).rejects.toMatchObject({ code: 'UNSUPPORTED', billable: false });
+    await expect(provider.generate(message, { signal: signal() })).rejects.toMatchObject({ code: 'MEDIA_COUNT_UNAVAILABLE', billable: false });
     await expect(provider.generate({ messages: [{ role: 'user', content: [{ type: 'file', mimeType: 'application/pdf', bytes: Buffer.from('pdf') }] }] }, { signal: signal() })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
     expect(mock.request).not.toHaveBeenCalled();
   });

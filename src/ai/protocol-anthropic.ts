@@ -29,7 +29,7 @@ export async function generate(context: ProtocolContext, request: GenerationRequ
   };
   const body = { model: context.profile.model, messages: records, ...(request.system ? { system: request.system } : {}),
     tools: (request.tools ?? []).map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })),
-    max_tokens: request.maxOutputTokens ?? 4096, stream: true };
+    max_tokens: request.maxOutputTokens ?? 4096, stream: true, ...(request.toolChoice ? { tool_choice: { type: 'none' } } : {}) };
   await enforceInputBudget(context, request, body, options);
   options.signal.throwIfAborted(); context.inferenceStarted = true;
   await context.transport.post({ origin: context.profile.origin, path: `${context.profile.basePath}/messages`, headers: {
@@ -95,7 +95,8 @@ export async function generate(context: ProtocolContext, request: GenerationRequ
         return;
       }
       if (type === 'message_stop') {
-        if ([...blocks.values()].some(block => !block.stopped) || !finish || finish === 'max_tokens') throw new AiProtocolError('INCOMPLETE');
+        if (finish === 'max_tokens') throw new AiProtocolError('OUTPUT_LIMIT');
+        if ([...blocks.values()].some(block => !block.stopped) || !finish) throw new AiProtocolError('INCOMPLETE');
         if (!['end_turn', 'tool_use', 'stop_sequence'].includes(finish)) throw new AiProtocolError('UNSUPPORTED');
         if (Boolean(output.calls.length) !== (finish === 'tool_use')) throw new AiProtocolError('INVALID_RESPONSE');
         if (output.usage.inputTokens !== undefined && output.usage.outputTokens !== undefined) output.usage.totalTokens = output.usage.inputTokens + output.usage.outputTokens;

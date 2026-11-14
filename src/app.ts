@@ -18,6 +18,7 @@ import { RateService } from './modules/rate.js';
 import { WeatherService } from './modules/weather.js';
 import { StickerService, type StickerTransport } from './modules/sticker.js';
 import { SubconvService } from './modules/subconv.js';
+import { RelayService } from './modules/relay.js';
 import type { StickerConverter } from './modules/sticker-media.js';
 import type { ProviderJson } from './modules/provider-http.js';
 import type { FeedFetcher } from './modules/rss-feed.js';
@@ -28,6 +29,7 @@ import { AppError, throwIfAborted } from './errors.js';
 import { JsonStorage, type StorageOptions } from './storage.js';
 import { createTelegramAdapter, createTelegramEffects } from './telegram/index.js';
 import { telegramSignal } from './telegram/effects.js';
+import { createRelayTransport } from './telegram/relay.js';
 import type { WebDependencies } from './web/server.js';
 import { AiService } from './ai/service.js';
 import type { AiProvider, ProviderProfile } from './ai/providers.js';
@@ -76,7 +78,7 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
   const storage = new JsonStorage(config.dataDir, options.storage);
   const access = new AccessService(storage, config.adminIds);
   const configuration = new ConfigurationService(storage);
-  const resources = options.resources ?? new ResourcePolicy({ heavyBytes: 64 * 1024 * 1024 });
+  const resources = options.resources ?? new ResourcePolicy();
   const statusMetrics = options.statusMetrics ?? new SystemMetrics();
   const ai = new AiService({ config, access, resources, storageLock: storage.lock, provider: options.aiProvider,
     stickerFile: async (context, reference) => {
@@ -95,6 +97,7 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
   const stickers = new StickerService({ transport: options.stickerTransport ?? createStickerTransport(bot, config.botToken), convert: options.stickerConverter,
     resources, tempDirectory: join(config.dataDir, 'tmp', 'sticker') });
   const subconv = new SubconvService(storage);
+  const relay = new RelayService(storage, { transport: createRelayTransport(bot, configuration), isAdmin: id => access.isAdmin(id) });
   let initialized = false;
   let ready = false;
   let stopping = false;
@@ -127,7 +130,7 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
     allowed: target => target.kind === 'private' || access.isAllowed(target.chatId),
     send: async (target, title, payload, language, silent, signal) => {
       throwIfAborted(signal);
-      const send = await (rssSender ??= import('./telegram/rss.js').then(module => module.createRssSender(bot)));
+      const send = await (rssSender ??= import('./telegram/rss.js').then(module => module.createRssSender(bot, { resources })));
       throwIfAborted(signal);
       await send(target, title, payload,
         target.kind === 'private' ? configuration.resolveLanguage(target.chatId, language) : language, silent, signal);
@@ -156,7 +159,7 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
     }
   });
   const executor = new ActionExecutor({
-    access, configuration, aliases, rss, rate, weather, stickers, subconv, ai, effects: createTelegramEffects(bot, configuration, metrics, config.adminIds), status,
+    access, configuration, aliases, rss, rate, weather, stickers, subconv, relay, ai, effects: createTelegramEffects(bot, configuration, metrics, config.adminIds), status,
     aiPolicy: { available: context => ai.available(context), authorize: (context, id, effect) => ai.authorize(context, id, effect),
       approvalExempt: (context, id) => ai.approvalExempt(context, id) },
     aiNativeDelivery: (context, file) => ai.deliverNative(context, file),
@@ -168,7 +171,7 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
     },
   });
   ai.attachExecutor(executor);
-  const telegram = createTelegramAdapter(bot, { config, executor, access, configuration, stickers, ai, health: metrics, signal: shutdown.signal });
+  const telegram = createTelegramAdapter(bot, { config, executor, access, configuration, stickers, relay, ai, health: metrics, signal: shutdown.signal });
   const completion = Promise.withResolvers<void>();
   // Consumers may attach after start; an early startup failure must not be unhandled.
   void completion.promise.catch(() => undefined);
@@ -238,8 +241,8 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
         const stoppedRunner = Promise.resolve().then(() => runner?.stop());
         const stoppedWeb = Promise.resolve().then(() => web?.close());
         const stoppedRss = rss.stop();
-        const results = await Promise.allSettled([stoppedRunner, stoppedWeb, stoppedRss, rate.stop(), weather.stop(), stickers.stop(), ai.stop(false), subconv.stop(), statusMetrics.stop(), ...inFlight]);
-        if (!failure && (results.slice(0, 9).some(result => result.status === 'rejected')
+        const results = await Promise.allSettled([stoppedRunner, stoppedWeb, stoppedRss, rate.stop(), weather.stop(), stickers.stop(), ai.stop(false), subconv.stop(), relay.stop(), statusMetrics.stop(), ...inFlight]);
+        if (!failure && (results.slice(0, 10).some(result => result.status === 'rejected')
           || !shutdown.signal.aborted && results.some(result => result.status === 'rejected'))) failure = new AppError('UNAVAILABLE');
         shutdown.abort();
         for (const close of [() => executor.close(), () => telegram.stop(), () => ai.stop(), () => storage.close()]) {
@@ -280,6 +283,7 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
         await rate.initialize();
         await weather.initialize();
         await subconv.initialize();
+        await relay.initialize();
         await ai.initialize();
         await statusMetrics.start();
         initialized = true;
@@ -334,6 +338,6 @@ export function createApplication(config: StartupConfig, options: ApplicationOpt
     return stopTask;
   }
 
-  return { start, stop, done: completion.promise, status, bot, executor, access, configuration, rss, rate, weather, ai,
+  return { start, stop, done: completion.promise, status, bot, executor, access, configuration, rss, rate, weather, relay, ai,
     get web() { return web; }, get runner() { return runner; } };
 }

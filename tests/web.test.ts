@@ -9,11 +9,12 @@ import { AiService } from '../src/ai/service.js';
 import { AccessService } from '../src/access.js';
 import { ConfigurationService } from '../src/configuration.js';
 import { aliasMetadata, AliasService } from '../src/modules/alias.js';
-import { rssMetadata, RssService } from '../src/modules/rss.js';
+import { rssMetadata, RssService, type RssOptions } from '../src/modules/rss.js';
 import { rateMetadata, RateService } from '../src/modules/rate.js';
 import { weatherMetadata, WeatherService } from '../src/modules/weather.js';
 import { stickerMetadata } from '../src/modules/sticker.js';
 import { subconvMetadata, SubconvService } from '../src/modules/subconv.js';
+import { relayMetadata } from '../src/modules/metadata.js';
 import { offlineStickers } from './support/core.js';
 import { commands } from '../src/telegram/commands.js';
 import type { StartupConfig } from '../src/config.js';
@@ -21,7 +22,7 @@ import { JsonStorage, type StorageOptions } from '../src/storage.js';
 import { createWebServer, type WebDependencies } from '../src/web/server.js';
 import { LOGIN_COOKIE, SESSION_COOKIE, OIDC_ISSUER, type OidcAdapter } from '../src/web/auth.js';
 import type { ActionResult, Me } from '../shared/schemas/index.js';
-import type { AiAdminSnapshot } from '../shared/schemas/ai-admin.js';
+import { aiToolCatalogSchema, type AiAdminSnapshot, type AiToolCatalog } from '../shared/schemas/ai-admin.js';
 
 const config: StartupConfig = {
   botToken: '123456789:TEST_ONLY_NOT_A_REAL_BOT_TOKEN_000000', adminIds: [42], dataDir: '/tmp/kilo/not-used',
@@ -45,7 +46,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function fixture(options: { storage?: StorageOptions; signal?: AbortSignal; oidc?: OidcAdapter; oidcConfigured?: boolean; timeout?: number } = {}) {
+async function fixture(options: { storage?: StorageOptions; signal?: AbortSignal; oidc?: OidcAdapter; oidcConfigured?: boolean; timeout?: number; rss?: Partial<RssOptions> } = {}) {
   const directory = await mkdtemp('/tmp/kilo/misaka-web-');
   cleanup.push(() => rm(directory, { recursive: true, force: true }));
   const staticRoot = join(directory, 'static');
@@ -59,7 +60,7 @@ async function fixture(options: { storage?: StorageOptions; signal?: AbortSignal
   const configuration = new ConfigurationService(storage);
   const aliases = new AliasService(storage, commands.map(command => command.name));
   await access.initialize(); await configuration.initialize(); await aliases.initialize();
-  const rss = new RssService(storage, { allowed: target => target.kind === 'private' || access.isAllowed(target.chatId), send: async () => {} });
+  const rss = new RssService(storage, { allowed: target => target.kind === 'private' || access.isAllowed(target.chatId), send: async () => {}, ...options.rss });
   await rss.initialize(); cleanup.push(() => rss.stop());
   const rate = new RateService(storage); await rate.initialize(); cleanup.push(() => rate.stop());
   const weather = new WeatherService(storage); await weather.initialize(); cleanup.push(() => weather.stop());
@@ -414,6 +415,59 @@ describe('HTTP authentication and CSRF', () => {
 });
 
 describe('HTTP adapters share the real Action executor', () => {
+  it('serves a strict read-only admin catalog that sees registrations after AI initialization', async () => {
+    const h = await fixture({ oidcConfigured: false });
+    const provider = vi.fn(() => { throw new Error('Unexpected provider call'); });
+    const network = { lookup: vi.fn(async () => { throw new Error('Unexpected DNS'); }),
+      request: vi.fn(async () => { throw new Error('Unexpected network'); }) };
+    const ai = new AiService({ config: { ...h.deps.config, dataDir: h.storage.directory }, access: h.access,
+      storageLock: h.storage.lock, provider, retrievalNetwork: network, extensionNetwork: network });
+    const groupAdmin = vi.fn(async () => { throw new Error('Unexpected Telegram lookup'); });
+    const executor = new ActionExecutor({ ...h.services, ai, groupAdmin });
+    ai.attachExecutor(executor);
+    cleanup.push(async () => { await ai.stop(); await executor.close(); });
+    const server = await createWebServer({ ...h.deps, executor });
+    cleanup.push(() => server.close());
+    const url = '/api/ai/admin/tools';
+    const host = { host: 'console.example' };
+    expect((await server.inject({ method: 'GET', url, headers: host })).statusCode).toBe(401);
+    expect((await server.inject({ method: 'POST', url: '/auth/miniapp', headers: { ...host, origin },
+      payload: { initData: signedInit(43) } })).statusCode).toBe(403);
+    const login = await server.inject({ method: 'POST', url: '/auth/miniapp', headers: { ...host, origin }, payload: { initData: signedInit() } });
+    expect(login.statusCode).toBe(200);
+    const headers = { ...host, authorization: `Bearer ${login.json<{ token: string }>().token}` };
+    const read = async () => {
+      const response = await server.inject({ method: 'GET', url, headers });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      const result = response.json<ActionResult<AiToolCatalog>>();
+      expect(result.status).toBe('succeeded');
+      if (result.status !== 'succeeded') throw new Error('Expected tool catalog');
+      expect(aiToolCatalogSchema.parse(result.data)).toEqual(result.data);
+      return result.data;
+    };
+    const before = await read();
+    expect(before.items).toHaveLength(31);
+    await ai.initialize();
+    const state = ai.admin(createInvocation({ actorId: 42, botId: 123456789, source: 'http', chat: { id: 42, type: 'private' }, language: 'en' }));
+    expect(state.settings).toMatchObject({ enabled: false, presets: [], grants: [] });
+    const catalog = await read();
+    expect(catalog.items).toHaveLength(49);
+    expect(catalog.items.map(item => item.id)).toEqual(catalog.items.map(item => item.id).sort());
+    expect(catalog.items.map(item => item.id)).toEqual(expect.arrayContaining(['ai.search', 'alias.add', 'ai.mcp.call', 'ai.mcp.stdio.call', 'ai.sandbox.local.execute']));
+    expect(catalog.items.some(item => item.id.startsWith('ai.admin.'))).toBe(false);
+    for (const query of ['?actorId=42', '?scope=private', '?tools=ai.search', '?page=0', '?page=0&page=1', '?confirmed=true']) {
+      const response = await server.inject({ method: 'GET', url: `${url}${query}`, headers });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ status: 'rejected', error: { code: 'INVALID_INPUT' } });
+    }
+    expect((await server.inject({ method: 'POST', url, headers: { ...headers, origin }, payload: {} })).statusCode).toBe(404);
+    expect(ai.admin(createInvocation({ actorId: 42, botId: 123456789, source: 'http', chat: { id: 42, type: 'private' }, language: 'en' }))).toEqual(state);
+    vi.spyOn(h.access, 'isAdmin').mockReturnValue(false);
+    expect((await server.inject({ method: 'GET', url, headers })).statusCode).toBe(403);
+    for (const callback of [provider, network.lookup, network.request, groupAdmin, fetch, ...Object.values(h.effects)]) expect(callback).not.toHaveBeenCalled();
+  });
+
   it('reads status, schema, native registry, RSS, groups and preferences as ActionResult', async () => {
     const h = await fixture(); const { headers } = await h.bearer();
     for (const url of ['/api/status', '/api/settings/core', '/api/settings/core/schema', '/api/modules', '/api/groups?page=0', '/api/preferences', '/api/rss?page=0']) {
@@ -423,10 +477,47 @@ describe('HTTP adapters share the real Action executor', () => {
       expect(response.body).not.toContain(config.botToken);
       expect(response.body).not.toContain(config.web.oidcClientSecret);
     }
-    expect((await h.inject({ method: 'GET', url: '/api/modules', headers })).json()).toMatchObject({ data: [aliasMetadata, rssMetadata, rateMetadata, weatherMetadata, stickerMetadata, subconvMetadata] });
+    expect((await h.inject({ method: 'GET', url: '/api/modules', headers })).json()).toMatchObject({ data: [aliasMetadata, rssMetadata, rateMetadata, weatherMetadata, stickerMetadata, subconvMetadata, relayMetadata] });
     const http = (await h.inject({ method: 'GET', url: '/api/status', headers })).json<ActionResult>();
     const telegram = await h.executor.execute(createInvocation({ actorId: 42, source: 'telegram', botId: 123456789, chat: { id: 42, type: 'private' }, language: 'en' }), 'core.status', {});
     expect(http.status === 'succeeded' && http.data).toEqual(telegram.status === 'succeeded' && telegram.data);
+  });
+
+  it('round-trips per-subscription RSS keyword filters through authenticated Actions without refetching', async () => {
+    const fetcher = vi.fn(async url => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }));
+    const h = await fixture({ rss: { fetcher } }); const { headers } = await h.bearer();
+    const added = await h.inject({ method: 'POST', url: '/api/rss', headers, payload: {
+      url: 'https://feeds.example.com/rss', filters: { include: [' NASA '], exclude: ['spoiler'] },
+    } });
+    expect(added.statusCode).toBe(200);
+    const id = added.json<{ data: { id: string } }>().data.id;
+    const read = async () => (await h.inject({ method: 'GET', url: '/api/rss', headers })).json<{ data: { items: { id: string; revision: number; filters?: unknown }[] } }>().data.items[0]!;
+    expect(await read()).toMatchObject({ id, revision: 0, filters: { include: ['NASA'], exclude: ['spoiler'] } });
+    const filters = { include: ['space telescope'], exclude: ['[ad]', '广告'] };
+    expect((await h.inject({ method: 'PUT', url: '/api/rss', headers, payload: { id, revision: 0, filters } })).statusCode).toBe(200);
+    expect((await h.inject({ method: 'PUT', url: '/api/rss', headers, payload: { id, revision: 1, silent: false } })).statusCode).toBe(200);
+    expect(await read()).toMatchObject({ id, revision: 2, filters });
+    expect((await h.inject({ method: 'PUT', url: '/api/rss', headers, payload: { id, revision: 0, filters: null } })).statusCode).toBe(409);
+    expect(await read()).toMatchObject({ revision: 2, filters });
+    const foreign = await h.services.rss.add({ kind: 'private', chatId: 99 }, { url: 'https://feeds.example.com/rss' }, 'en');
+    expect((await h.inject({ method: 'PUT', url: '/api/rss', headers, payload: { id: foreign.id, revision: 0, filters: null } })).statusCode).toBe(404);
+    expect((await h.inject({ method: 'PUT', url: '/api/rss', headers: { ...headers, origin: 'https://evil.example' }, payload: { id, revision: 2, filters: null } })).statusCode).toBe(403);
+    expect(await read()).toMatchObject({ revision: 2, filters });
+    expect((await h.inject({ method: 'PUT', url: '/api/rss', headers, payload: { id, revision: 2, filters: null } })).statusCode).toBe(200);
+    expect(await read()).toMatchObject({ revision: 3 }); expect((await read()).filters).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { include: 'NASA', exclude: [] }, { include: [], exclude: [], regex: true }, { include: [1], exclude: [] },
+    { include: [' '], exclude: [] }, { include: ['x'.repeat(65)], exclude: [] }, { include: Array(21).fill('word'), exclude: [] },
+  ])('rejects malformed HTTP RSS keyword filters without performing a fetch: %j', async filters => {
+    const fetcher = vi.fn(async url => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }));
+    const h = await fixture({ rss: { fetcher } }); const { headers } = await h.bearer();
+    const response = await h.inject({ method: 'POST', url: '/api/rss', headers, payload: { url: 'https://feeds.example.com/rss', filters } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ status: 'rejected', error: { code: 'INVALID_INPUT' } });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('binds actor/source/chat/bot/language/deadline exclusively from trusted authentication', async () => {

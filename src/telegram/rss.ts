@@ -2,9 +2,10 @@ import { GrammyError, InputFile, type Bot } from 'grammy';
 import type { RichText } from 'grammy/types';
 import { translator } from '../i18n.js';
 import { FEED_MAX_IMAGES, RSS_PHOTO_MAX_SOURCE_BYTES, contentLinkUrl, findFeedLinks, isGifImageUrl, type FeedEntry, type FeedLink } from '../modules/rss-feed.js';
-import { RSS_PHOTO_MAX_OUTPUT_BYTES, prepareRssPhoto, type RssPhotoPreparer } from '../modules/rss-photo.js';
+import { RSS_PHOTO_MAX_OUTPUT_BYTES, createRssPhotoPreparer, type RssPhotoPreparer } from '../modules/rss-photo.js';
 import { feedContentFormatSchema, isValidFeedContentFormat, type FeedContentBlock, type FeedRange, type FeedTextRange } from '../modules/rss-format.js';
 import { RSS_IMAGES_PER_MESSAGE, RssDeliveryError, type RssOptions } from '../modules/rss.js';
+import type { ResourcePolicy } from '../resources.js';
 import { telegramSignal, type ApiHealth } from './effects.js';
 
 const PREVIEW_LENGTH = 120;
@@ -151,7 +152,7 @@ function formattedBody(entry: FeedEntry, links: readonly FeedLink[], images: rea
   return { blocks: scope(entry.contentFormat!.blocks, 0, content.length), literals };
 }
 
-export function createRssSender(bot: Bot, health?: ApiHealth, prepare: RssPhotoPreparer = prepareRssPhoto): RssOptions['send'] {
+export function createRssSender(bot: Bot, options: Partial<ApiHealth> & { resources?: Pick<ResourcePolicy, 'tryAcquire'> } = {}, prepare: RssPhotoPreparer = createRssPhotoPreparer(undefined, options)): RssOptions['send'] {
   const timeZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
   return async (target, source, payload, language, silent, signal) => {
     const t = translator(language);
@@ -279,7 +280,7 @@ export function createRssSender(bot: Bot, health?: ApiHealth, prepare: RssPhotoP
         await deliver(false);
       }
     } catch (error) {
-      if (!signal.aborted) health?.recordApiError(error instanceof GrammyError ? `TELEGRAM_${error.error_code}` : 'TELEGRAM_UNAVAILABLE');
+      if (!signal.aborted) options.recordApiError?.(error instanceof GrammyError ? `TELEGRAM_${error.error_code}` : 'TELEGRAM_UNAVAILABLE');
       if (error instanceof GrammyError && error.error_code === 429) throw new RssDeliveryError('RATE_LIMITED', (error.parameters.retry_after ?? 60) * 1000);
       if (error instanceof GrammyError && error.error_code === 403) throw new RssDeliveryError('BLOCKED');
       if (error instanceof GrammyError && error.error_code === 400) throw new RssDeliveryError('REJECTED');

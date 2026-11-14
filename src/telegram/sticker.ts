@@ -77,18 +77,28 @@ export function createStickerTransport(bot: Bot, token: string, fetcher: typeof 
         if (response.status !== 200 || !response.body || encoding && encoding !== 'identity'
           || length !== null && (!/^[0-9]+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) < 1 || Number(length) > maxBytes)) throw new AppError('INVALID_INPUT');
         reader = response.body.getReader();
-        const data = Buffer.allocUnsafe(length === null ? info.file_size ?? maxBytes : Number(length));
+        const size = length === null ? info.file_size : Number(length);
+        // Captured metadata is only a sizing hint; unknown-length bodies may still grow to the cap.
+        const hint = file.fileSize !== undefined && Number.isSafeInteger(file.fileSize) && file.fileSize > 0
+          ? file.fileSize : 64 * 1024;
+        let data = Buffer.allocUnsafe(size ?? Math.min(hint, maxBytes));
         let bytes = 0;
         for (;;) {
           const part = await reader.read();
           throwIfAborted(request);
           if (part.done) break;
-          bytes += part.value.byteLength;
-          if (bytes > data.length) throw new AppError('INVALID_INPUT');
-          data.set(part.value, bytes - part.value.byteLength);
+          const nextBytes = bytes + part.value.byteLength;
+          if (nextBytes > (size ?? maxBytes)) throw new AppError('INVALID_INPUT');
+          if (nextBytes > data.length) {
+            const grown = Buffer.allocUnsafe(Math.min(maxBytes, Math.max(nextBytes, data.length * 2)));
+            grown.set(data.subarray(0, bytes));
+            data = grown;
+          }
+          data.set(part.value, bytes);
+          bytes = nextBytes;
         }
         if (!bytes || length !== null && bytes !== Number(length) || info.file_size !== undefined && bytes !== info.file_size) throw new AppError('INVALID_INPUT');
-        return data.subarray(0, bytes);
+        return bytes === data.length ? data : Buffer.from(data.subarray(0, bytes));
       } catch (error) {
         if (signal.aborted) throw new AppError('CANCELLED');
         if (request.aborted) throw new AppError('TIMEOUT');

@@ -30,9 +30,9 @@ export class OutputCollector {
   async append(value: unknown): Promise<void> {
     const text = string(value);
     if (!text) return;
-    if (!this.context.profile.capabilities.output.includes('text')) throw new AiProtocolError('UNSUPPORTED');
+    if (!this.context.profile.capabilities.output.includes('text')) throw new AiProtocolError('OUTPUT_UNSUPPORTED');
     this.textBytes += Buffer.byteLength(text);
-    if (this.textBytes > this.context.limits.textBytes) throw new AiProtocolError('TOO_LARGE');
+    if (this.textBytes > this.context.limits.textBytes) throw new AiProtocolError('OUTPUT_LIMIT');
     this.options.signal.throwIfAborted(); this.text += text;
     await this.options.onText?.(text, this.options.signal);
   }
@@ -67,7 +67,12 @@ export class OutputCollector {
       // Native generated media may not have a replayable file handle. This is terminal output, not a stripped prefix.
       return { text: this.text, toolCalls: [], usage, artifacts: this.artifacts, ...(this.context.files.length ? { cleanup: this.context.files } : {}) };
     }
-    boundedJson(continuation, this.context.limits.continuationBytes);
+    try { boundedJson(continuation, this.context.limits.continuationBytes); }
+    catch (error) {
+      // A complete text answer needs no replay buffer. Pending tool calls must retain theirs intact.
+      if (this.calls.length || !(error instanceof AiProtocolError) || error.code !== 'TOO_LARGE') throw error;
+      return { text: this.text, toolCalls: [], usage, ...(this.context.files.length ? { cleanup: this.context.files } : {}) };
+    }
     return { text: this.text, toolCalls: this.calls, usage, continuation, ...(this.context.files.length ? { cleanup: this.context.files } : {}) };
   }
 }

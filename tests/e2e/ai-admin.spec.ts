@@ -1,11 +1,22 @@
 import { expect, test, type Page } from '@playwright/test';
-import { aiDefaults, aiSettingsSchema } from '../../shared/schemas/ai.js';
-import { aiAdminSnapshotSchema, aiPersonalSetupSchema, type AiAdminSnapshot, type AiPersonalSetup } from '../../shared/schemas/ai-admin.js';
+import { resources as locales } from '../../shared/locales/index.js';
+import { aiDefaults, aiInteractiveBudget, aiInteractiveDailyRuns, aiSettingsSchema } from '../../shared/schemas/ai.js';
+import { aiAdminSnapshotSchema, aiPersonalSetupSchema, aiToolCatalogSchema, type AiAdminSnapshot, type AiPersonalSetup, type AiToolCatalog } from '../../shared/schemas/ai-admin.js';
 import { aiSkillInstallSchema, aiSkillReviewSchema, aiMcpReviewInputSchema, aiSandboxReviewInputSchema, aiLocalSandboxReviewInputSchema, aiStdioMcpReviewInputSchema } from '../../shared/schemas/ai-extensions.js';
 import type { LanguagePreference } from '../../shared/schemas/index.js';
 import { mockApi } from './mock.js';
 
 const setupKey = 'test-only-setup-key';
+type CatalogTool = AiToolCatalog['items'][number];
+function tool(id: string, group: CatalogTool['group'], effect: CatalogTool['effect'] = 'read', scopes: CatalogTool['scopes'] = ['private', 'group'], permission: CatalogTool['permission'] = 'any'): CatalogTool {
+  return { id, group, effect, scopes, permission, approval: effect === 'read' ? 'none' : effect === 'personal_write' ? 'conditional' : 'required' };
+}
+const toolCatalog: AiToolCatalog = { items: [
+  tool('ai.fetch', 'search'), tool('ai.search', 'search'), tool('core.info', 'core'), tool('modules.list', 'core'),
+  tool('rate.convert', 'rate'), tool('rate.currencies', 'rate'), tool('weather.search', 'weather'), tool('weather.query', 'weather'),
+  tool('rss.list', 'rss', 'read', ['private', 'group'], 'chat_manager'), tool('rss.remove', 'rss', 'destructive', ['private', 'group'], 'chat_manager'),
+  tool('alias.add', 'alias', 'write', ['private'], 'superadmin'), tool('ai.sandbox.local.execute', 'local', 'write'),
+] };
 function setupSnapshot(current: AiAdminSnapshot, input: Omit<AiPersonalSetup, 'apiKey'>): AiAdminSnapshot {
   const providerId = 'personal-test'; const presetId = 'text-test'; const ref = 'vault:personal-test';
   return aiAdminSnapshotSchema.parse({ ...current, revision: current.revision + 1,
@@ -13,11 +24,17 @@ function setupSnapshot(current: AiAdminSnapshot, input: Omit<AiPersonalSetup, 'a
       providers: [{ id: providerId, enabled: true, protocol: input.protocol, baseUrl: input.baseUrl, allowedOrigins: [new URL(input.baseUrl).origin], credentialRef: ref }],
       presets: [{ id: presetId, providerId, model: input.model, tools: ['rate.convert', 'rate.currencies', 'weather.search', 'weather.query'],
         inputCapabilities: ['text'], outputCapabilities: ['text'], budgetMode: 'usage',
-        budget: { maxInputTokens: 32768, maxOutputTokens: 8192, maxToolCalls: 4, maxDurationMs: 60000, maxCostMicros: 100000 } }],
+        budget: aiInteractiveBudget() }],
       grants: [{ id: 'owner-test', kind: 'private', subjectId: 42, presetId }, ...input.groupIds.map((subjectId, index) => ({ id: `group-${index}-test`, kind: 'group', subjectId, presetId }))],
-      limits: { ...current.settings.limits, dailyRuns: current.settings.limits.dailyRuns ?? 50 } },
+      limits: { ...current.settings.limits, dailyRuns: current.settings.limits.dailyRuns ?? aiInteractiveDailyRuns } },
     credentials: [...current.credentials, { ref, source: 'vault', hasValue: true }],
   });
+}
+function limitedSnapshot(current: AiAdminSnapshot): AiAdminSnapshot {
+  const next = setupSnapshot(current, { revision: current.revision, protocol: 'openai-chat-completions', baseUrl: 'https://api.deepseek.com/v1', model: 'existing-model', groupIds: [-10042] });
+  next.settings.presets[0]!.budget = { maxInputTokens: 4096, maxOutputTokens: 1024, maxToolCalls: 4, maxDurationMs: 60_000, maxCostMicros: 123 };
+  next.settings.limits.dailyRuns = 50;
+  return next;
 }
 
 async function openAdvanced(page: Page) {
@@ -43,6 +60,7 @@ async function mockAi(page: Page, language: LanguagePreference = 'en') {
     reads: 0, writes: 0, confirmations: 0, replacements: 0, deletions: 0,
     setupRequests: 0, setupInput: undefined as Omit<AiPersonalSetup, 'apiKey'> | undefined, groupPages: [] as number[],
     localEnabled: false, extensionInputs: [] as { path: string; body: unknown }[],
+    toolCatalog: structuredClone(toolCatalog), toolReads: 0, toolFailure: '',
     extensionRequests: 0, installs: 0, discoveries: 0, statusReads: 0, statusFailure: '', skipExtensionApproval: false,
     localProbes: 0, localReviews: 0, stdioDiscoveries: 0, stdioFailure: '', probeReason: 'C_COMPILER_UNAVAILABLE',
     extensionPending: undefined as { kind: string; result: unknown; install?: ReturnType<typeof aiSkillInstallSchema.parse> } | undefined,
@@ -62,6 +80,11 @@ async function mockAi(page: Page, language: LanguagePreference = 'en') {
       state.statusReads++;
       if (state.statusFailure) { await fail(state.statusFailure, 503); return; }
       await success({ skills: (state.snapshot.settings.skills ?? []).filter(item => item.enabled).length, mcp: (state.snapshot.settings.mcp ?? []).filter(item => item.enabled).length, remoteExecutors: 0, localExecutors: 0, stdioMcp: 0, localEnabled: state.localEnabled, localRunnerImplemented: true, localReason: state.localEnabled ? 'QUALIFIED' : state.probeReason }); return;
+    }
+    if (path === '/api/ai/admin/tools') {
+      expect(request.method()).toBe('GET'); state.toolReads++;
+      if (state.toolFailure) { await fail(state.toolFailure, 503); return; }
+      await success(aiToolCatalogSchema.parse(state.toolCatalog)); return;
     }
     if (request.method() === 'GET') { state.reads++; await success(state.snapshot); return; }
     expect(request.headers()['x-csrf-token']).toBe('test-csrf');
@@ -169,7 +192,208 @@ test('AI defaults are disabled, expose safe status only and keep established res
   expect(mock.state.reads).toBe(1);
   expect(mock.state.writes).toBe(0);
   expect(mock.state.statusReads).toBe(0);
+  expect(mock.state.toolReads).toBe(0);
   expect(mock.state.groupPages).toEqual([]);
+  mock.assertClean();
+});
+
+test('tool picker adds tools by localized name or ID and saves through one server confirmation', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot); mock.state.confirm = true;
+  const before = structuredClone(mock.state.snapshot.settings);
+  await openAi(page, false); expect(mock.state.toolReads).toBe(0);
+  await openAdvanced(page);
+  const picker = page.getByRole('group', { name: 'Allowed tools', exact: true });
+  const search = picker.getByRole('searchbox', { name: 'Find tools', exact: true });
+  await expect(picker.getByRole('checkbox', { name: 'Convert currencies', exact: true })).toBeChecked();
+  await expect(picker.getByText('Selected: 4 / 64', { exact: true })).toBeVisible();
+  await expect(picker.locator('input[type="text"]')).toHaveCount(0);
+  await expect(picker.getByText('Saved search configuration is not ready.', { exact: false })).toBeVisible();
+  await search.fill('Search the web');
+  const web = picker.getByRole('checkbox', { name: 'Search the web', exact: true });
+  await expect(web).toBeEnabled(); await web.focus(); await page.keyboard.press('Space');
+  await expect(web).toBeChecked(); await expect(web).toBeFocused(); await expect(search).toHaveValue('Search the web');
+  await search.fill('ai.fetch'); await picker.getByRole('checkbox', { name: 'Read a webpage', exact: true }).check();
+  await search.fill('');
+  await expect(picker.getByText('Selected: 6 / 64', { exact: true })).toBeVisible();
+  expect(mock.state.writes).toBe(0); expect(mock.state.toolReads).toBe(1);
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible();
+  await expect(picker.getByRole('checkbox', { name: 'Search the web', exact: true })).toBeDisabled();
+  expect(mock.state.snapshot.settings).toEqual(before);
+  await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  const expected = structuredClone(before); expected.presets[0]!.tools.push('ai.search', 'ai.fetch');
+  expect(mock.state.snapshot.settings).toEqual(expected);
+  expect(mock.state.writes).toBe(1); expect(mock.state.confirmations).toBe(1);
+  expect(mock.state.discoveries).toBe(0); expect(mock.state.localProbes).toBe(0);
+  await openAi(page);
+  await expect(page.getByRole('group', { name: 'Allowed tools', exact: true }).getByRole('checkbox', { name: 'Search the web', exact: true })).toBeChecked();
+  await expect(page.getByRole('group', { name: 'Allowed tools', exact: true }).getByRole('checkbox', { name: 'Read a webpage', exact: true })).toBeChecked();
+  expect(mock.state.writes).toBe(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  mock.assertClean();
+});
+
+for (const [language, tab, imageInput, textOutput, imageOutput] of [
+  ['en', 'AI administration', 'Image understanding', 'Text answers', 'Image generation'],
+  ['zh-CN', 'AI 管理', '图片理解（看图）', '文字回答', '生成图片'],
+  ['zh-TW', 'AI 管理', '圖片理解（看圖）', '文字回答', '產生圖片'],
+  ['ja', 'AI 管理', '画像理解', '文章回答', '画像生成'],
+] as const) test(`vision input is distinct from generated image output in ${language}`, async ({ page }) => {
+  const mock = await mockAi(page, language); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  const inputGroup = locales[language].web.ai.fields.inputCapabilities;
+  const { add: addInput, save } = locales[language].common.actions;
+  await page.goto('/'); await page.getByRole('button', { name: tab, exact: true }).click(); await openAdvanced(page);
+  await page.getByRole('group', { name: new RegExp(`^${inputGroup}\\*?$`) }).getByRole('button', { name: addInput, exact: true }).click();
+  const input = page.locator('#root_presets_0_inputCapabilities_1');
+  await expect(input.getByRole('option', { name: imageInput, exact: true })).toHaveCount(1);
+  await input.selectOption({ label: imageInput });
+  const output = page.locator('#root_presets_0_outputCapabilities_0');
+  await expect(output.getByRole('option', { name: textOutput, exact: true })).toHaveCount(1);
+  await expect(output.getByRole('option', { name: imageOutput, exact: true })).toHaveCount(1);
+  await expect(output.getByRole('option', { name: imageInput, exact: true })).toHaveCount(0);
+  await expect(output.locator('option:checked')).toHaveText(textOutput);
+  await page.getByRole('button', { name: save, exact: true }).click();
+  await expect.poll(() => mock.state.writes).toBe(1);
+  expect(mock.state.snapshot.settings.presets[0]!.inputCapabilities).toEqual(['text', 'image']);
+  expect(mock.state.snapshot.settings.presets[0]!.outputCapabilities).toEqual(['text']);
+  mock.assertClean();
+});
+
+test('catalog retry keeps unsaved edits and unknown saved IDs until explicitly removed', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  mock.state.snapshot.settings.presets[0]!.tools = ['rate.convert', 'legacy.custom']; mock.state.toolFailure = 'UNAVAILABLE';
+  await openAi(page);
+  const picker = page.getByRole('group', { name: 'Allowed tools', exact: true });
+  await expect(picker.getByRole('alert')).toContainText('Existing selections are unchanged');
+  await expect(picker.getByRole('checkbox', { name: 'legacy.custom', exact: true })).toBeChecked();
+  expect(mock.state.snapshot.settings.presets[0]!.tools).toEqual(['rate.convert', 'legacy.custom']); expect(mock.state.writes).toBe(0);
+  await page.locator('#root_presets_0_model').fill('unsaved-model');
+  mock.state.toolFailure = ''; await picker.getByRole('button', { name: 'Reload tools', exact: true }).click();
+  await expect(picker.getByRole('checkbox', { name: 'Search the web', exact: true })).toBeVisible();
+  await expect(picker.getByRole('alert')).toHaveCount(0);
+  await expect(page.locator('#root_presets_0_model')).toHaveValue('unsaved-model');
+  await expect(picker.getByRole('heading', { name: 'Saved tools not in this catalog', exact: true })).toBeVisible();
+  await picker.getByRole('checkbox', { name: 'Search the web', exact: true }).check();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  expect(mock.state.snapshot.settings.presets[0]).toMatchObject({ model: 'unsaved-model', tools: ['rate.convert', 'legacy.custom', 'ai.search'] });
+  await picker.getByRole('checkbox', { name: 'legacy.custom', exact: true }).click();
+  await expect(picker.getByRole('checkbox', { name: 'legacy.custom', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect.poll(() => mock.state.writes).toBe(2);
+  expect(mock.state.snapshot.settings.presets[0]!.tools).toEqual(['rate.convert', 'ai.search']);
+  expect(mock.state.reads).toBe(1);
+  mock.assertClean();
+});
+
+test('empty allowlists stay empty until a click and clearing selection never grants defaults', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  mock.state.snapshot.settings.presets[0]!.tools = [];
+  await openAi(page);
+  const picker = page.getByRole('group', { name: 'Allowed tools', exact: true });
+  await expect(picker.getByRole('checkbox', { name: 'Search the web', exact: true })).not.toBeChecked();
+  await expect(picker.getByText('Selected: 0 / 64', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeDisabled();
+  await picker.getByRole('checkbox', { name: 'Selected only', exact: true }).check();
+  await expect(picker.getByText('No tools match these filters.', { exact: true })).toBeVisible();
+  await picker.getByRole('checkbox', { name: 'Selected only', exact: true }).uncheck();
+  await picker.getByRole('checkbox', { name: 'Search the web', exact: true }).check();
+  await picker.getByRole('button', { name: 'Clear selection', exact: true }).click();
+  await expect(picker.getByText('Selected: 0 / 64', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeDisabled();
+  expect(mock.state.writes).toBe(0); expect(mock.state.snapshot.settings.presets[0]!.tools).toEqual([]);
+  mock.assertClean();
+});
+
+test('tool picker enforces the 64-tool cap without blocking removals or reordering retained IDs', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  const items = Array.from({ length: 65 }, (_, index) => tool(`fixture.tool_${index}`, 'other'));
+  mock.state.toolCatalog = { items }; mock.state.snapshot.settings.presets[0]!.tools = items.slice(0, 64).map(item => item.id);
+  await openAi(page);
+  const picker = page.getByRole('group', { name: 'Allowed tools', exact: true });
+  await expect(picker.getByRole('checkbox', { name: 'fixture.tool_64', exact: true })).toBeDisabled();
+  await picker.getByRole('checkbox', { name: 'fixture.tool_0', exact: true }).uncheck();
+  await expect(picker.getByRole('checkbox', { name: 'fixture.tool_64', exact: true })).toBeEnabled();
+  await picker.getByRole('checkbox', { name: 'fixture.tool_64', exact: true }).check();
+  await expect(picker.getByText('Selected: 64 / 64', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  expect(mock.state.snapshot.settings.presets[0]!.tools).toEqual(items.slice(1).map(item => item.id));
+  mock.assertClean();
+});
+
+test('preset pickers stay independent and do not replace upstream MCP tool-name fields', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  const original = structuredClone(mock.state.snapshot.settings.presets[0]!);
+  mock.state.snapshot.settings.presets.push({ ...structuredClone(original), id: 'second-preset', tools: [] });
+  mock.state.snapshot.settings.mcp = [{ ...mcpProfile(), tools: ['upstream_only'], readTools: [] }];
+  await openAi(page);
+  const pickers = page.getByRole('group', { name: 'Allowed tools', exact: true }); await expect(pickers).toHaveCount(2);
+  await pickers.nth(1).getByRole('checkbox', { name: 'Search the web', exact: true }).check();
+  await expect(pickers.nth(0).getByRole('checkbox', { name: 'Search the web', exact: true })).not.toBeChecked();
+  await expect(page.locator('#root_mcp_0_tools_0')).toHaveValue('upstream_only');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  expect(mock.state.snapshot.settings.presets[0]).toEqual(original);
+  expect(mock.state.snapshot.settings.presets[1]!.tools).toEqual(['ai.search']);
+  expect(mock.state.snapshot.settings.mcp?.[0]?.tools).toEqual(['upstream_only']);
+  mock.assertClean();
+});
+
+test('selecting a local tool does not probe or enable execution and cancelling confirmation retains the draft', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot); mock.state.confirm = true;
+  const original = structuredClone(mock.state.snapshot.settings);
+  await openAi(page);
+  const picker = page.getByRole('group', { name: 'Allowed tools', exact: true });
+  const local = picker.getByRole('checkbox', { name: 'Run a local task', exact: true });
+  await expect(local).toBeEnabled(); await local.check();
+  await expect(picker.getByText('The last server snapshot does not confirm local isolation.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0); await expect(local).toBeChecked();
+  expect(mock.state.snapshot.settings).toEqual(original);
+  expect(mock.state.localProbes).toBe(0); expect(mock.state.extensionRequests).toBe(0); expect(mock.state.confirmations).toBe(0);
+  mock.assertClean();
+});
+
+test('loading and malformed catalogs preserve saved tool values without restoring manual ID entry', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  const before = [...mock.state.snapshot.settings.presets[0]!.tools];
+  const gate = Promise.withResolvers<void>();
+  await page.route('**/api/ai/admin/tools', async route => {
+    await gate.promise;
+    await route.fulfill({ json: { status: 'succeeded', invocationId: 'invalid-catalog', data: { items: [{ id: '<img src=x onerror=alert(1)>' }] } } });
+  });
+  try {
+    await openAi(page);
+    const picker = page.getByRole('group', { name: 'Allowed tools', exact: true });
+    await expect(picker.getByRole('status')).toHaveText('Loading tool catalog...');
+    await expect(picker.getByRole('checkbox', { name: 'Convert currencies', exact: true })).toBeChecked();
+    await expect(picker.getByRole('checkbox', { name: 'Search the web', exact: true })).toHaveCount(0);
+    expect(mock.state.writes).toBe(0);
+  } finally { gate.resolve(); }
+  const picker = page.getByRole('group', { name: 'Allowed tools', exact: true });
+  await expect(picker.getByRole('alert')).toContainText('Could not load the tool catalog');
+  await expect(picker.locator('input[type="text"], img, script, svg')).toHaveCount(0);
+  expect(mock.state.snapshot.settings.presets[0]!.tools).toEqual(before); expect(mock.state.writes).toBe(0);
+  mock.assertClean();
+});
+
+for (const [language, tab, group, search, name] of [
+  ['en', 'AI administration', 'Allowed tools', 'Find tools', 'Search the web'],
+  ['zh-CN', 'AI 管理', '允许的工具', '查找工具', '联网搜索'],
+  ['zh-TW', 'AI 管理', '允許的工具', '尋找工具', '網路搜尋'],
+  ['ja', 'AI 管理', '許可するツール', 'ツールを検索', 'ウェブを検索'],
+] as const) test(`tool picker names and search are localized in ${language}`, async ({ page }) => {
+  const mock = await mockAi(page, language); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  await page.goto('/'); await page.getByRole('button', { name: tab, exact: true }).click(); await openAdvanced(page);
+  const picker = page.getByRole('group', { name: group, exact: true });
+  await picker.getByRole('searchbox', { name: search, exact: true }).fill(name);
+  await picker.getByRole('checkbox', { name, exact: true }).check();
+  await expect(picker.getByRole('checkbox', { name, exact: true })).toBeChecked();
+  expect(mock.state.writes).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   mock.assertClean();
 });
 
@@ -201,6 +425,9 @@ for (const [service, protocol, baseUrl] of [
   await expect(page.getByText('AI is enabled.', { exact: false })).toBeVisible();
   expect(mock.state.snapshot.settings.providers).toEqual([{ id: 'personal-test', enabled: true, protocol, baseUrl, allowedOrigins: [new URL(baseUrl).origin], credentialRef: 'vault:personal-test' }]);
   expect(mock.state.snapshot.settings.presets[0]).toMatchObject({ id: 'text-test', providerId: 'personal-test', model: 'explicit-model', budgetMode: 'usage', inputCapabilities: ['text'], outputCapabilities: ['text'] });
+  expect(mock.state.snapshot.settings.presets[0]?.budget).toEqual(aiInteractiveBudget());
+  expect(mock.state.snapshot.settings.limits.dailyRuns).toBe(aiInteractiveDailyRuns);
+  await expect(page.getByRole('button', { name: 'Apply recommended limits', exact: true })).toBeDisabled();
   expect(mock.state.snapshot.settings.grants).toEqual([{ id: 'owner-test', kind: 'private', subjectId: 42, presetId: 'text-test' }]);
   expect(mock.state.snapshot.credentials).toEqual([{ ref: 'vault:personal-test', source: 'vault', hasValue: true }]);
   expect(JSON.stringify(mock.state)).not.toContain(setupKey);
@@ -335,6 +562,179 @@ test('existing disabled configuration stays intact and never offers setup', asyn
   mock.assertClean();
 });
 
+test('recommended limits require an explicit write and one server confirmation, preserving cost presets and permissions', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.confirm = true;
+  mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  const settings = mock.state.snapshot.settings;
+  settings.enabled = false;
+  settings.deniedUserIds = [99];
+  settings.search = { enabled: false, providerId: 'personal-test', maxResults: 3 };
+  settings.skills = []; settings.mcp = []; settings.sandbox = { enabled: false, profiles: [] };
+  settings.presets[0]!.system = 'Keep this instruction';
+  settings.presets.push({ ...settings.presets[0]!, id: 'larger-usage', tools: [], budget: { maxInputTokens: 131_072, maxOutputTokens: 2048, maxToolCalls: 12, maxDurationMs: 240_000, maxCostMicros: 777 } });
+  settings.presets.push({ ...settings.presets[0]!, id: 'priced', budgetMode: 'cost', pricing: { currency: 'CNY', inputMicrosPerMillion: 100, outputMicrosPerMillion: 200 } });
+  settings.presets.push({ ...settings.presets[2]!, id: 'legacy-cost' });
+  delete settings.presets[3]!.budgetMode;
+  const original = structuredClone(mock.state.snapshot);
+  const expected = structuredClone(settings);
+  expected.presets[0]!.budget = { ...aiInteractiveBudget(), maxCostMicros: 123 };
+  expected.presets[1]!.budget.maxOutputTokens = 8192;
+  expected.limits.dailyRuns = aiInteractiveDailyRuns;
+  await openAi(page, false);
+  const apply = page.getByRole('button', { name: 'Apply recommended limits', exact: true });
+  await expect(apply).toBeEnabled();
+  const status = page.getByRole('region', { name: 'Safe runtime status', exact: true });
+  await expect(status).toContainText('65,536 input and 8,192 output tokens per request');
+  await expect(status).toContainText('May increase provider spending.');
+  await openAdvanced(page);
+  await expect(page.locator('#root_presets_0_budget_maxInputTokens')).toHaveValue('4096');
+  expect(mock.state.writes).toBe(0); expect(mock.state.snapshot).toEqual(original);
+  const outbound = page.waitForRequest(request => new URL(request.url()).pathname === '/api/ai/admin' && request.method() === 'PUT');
+  await apply.click();
+  expect((await outbound).postDataJSON()).toEqual({ revision: original.revision, settings: expected });
+  await expect(page.getByRole('dialog')).toHaveCount(1);
+  await expect(page.getByRole('dialog')).toContainText('one-time server approval');
+  await expect(apply).toBeDisabled();
+  expect(mock.state.writes).toBe(1); expect(mock.state.confirmations).toBe(0);
+  expect(mock.state.snapshot).toEqual(original);
+  await page.getByRole('dialog').getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(apply).toBeDisabled();
+  await expect(page.locator('#root_presets_0_budget_maxInputTokens')).toHaveValue('65536');
+  expect(mock.state.snapshot).toEqual({ ...original, revision: original.revision + 1, settings: expected });
+  expect(mock.state.writes).toBe(1); expect(mock.state.confirmations).toBe(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  mock.assertClean();
+});
+
+test('recommended limits preserve dirty settings, credentials and extension drafts until explicit refresh', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  const original = structuredClone(mock.state.snapshot);
+  await openAi(page);
+  const apply = page.getByRole('button', { name: 'Apply recommended limits', exact: true });
+  const queued = page.locator('#root_limits_maxQueuedRuns');
+  await expect(apply).toBeEnabled();
+  await queued.fill(String(original.settings.limits.maxQueuedRuns + 1));
+  await expect(apply).toBeDisabled();
+  await queued.fill(String(original.settings.limits.maxQueuedRuns));
+  await expect(apply).toBeEnabled();
+  const secret = page.getByLabel('New credential value', { exact: true });
+  await secret.fill('test-only-unsaved-value');
+  await expect(apply).toBeDisabled();
+  await expect(secret).toHaveValue('test-only-unsaved-value');
+  await secret.fill('');
+  await expect(apply).toBeEnabled();
+  await page.getByText('Open extension workflows', { exact: true }).click();
+  await page.locator('#extension_id').fill('unsaved-draft');
+  await expect(apply).toBeDisabled();
+  await expect(page.locator('#extension_id')).toHaveValue('unsaved-draft');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('Your edits have not been saved.');
+  await page.getByRole('dialog').getByRole('button', { name: 'Reload latest data', exact: true }).click();
+  await expect(apply).toBeEnabled();
+  expect(mock.state.snapshot).toEqual(original);
+  expect(mock.state.writes).toBe(0); expect(mock.state.reads).toBe(2);
+  mock.assertClean();
+});
+
+for (const code of ['CONFLICT', 'OUTCOME_UNKNOWN']) test(`recommended limits stay locked while busy and after ${code}, without replay`, async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot); mock.state.failure = code;
+  await openAi(page, false);
+  let release!: () => void; let requests = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/ai/admin', async route => { if (route.request().method() === 'PUT') { requests++; await gate; } await route.fallback(); });
+  const apply = page.getByRole('button', { name: 'Apply recommended limits', exact: true });
+  await apply.click();
+  try { await expect.poll(() => requests).toBe(1); await expect(apply).toBeDisabled(); }
+  finally { release(); }
+  await expect(page.getByRole('alert')).toContainText('Reload and inspect');
+  await expect(apply).toBeDisabled();
+  expect(mock.state.writes).toBe(1);
+  mock.state.failure = ''; mock.state.snapshot.revision += 10;
+  mock.state.snapshot.settings.presets[0]!.model = 'changed-elsewhere';
+  await page.getByRole('button', { name: 'Reload latest data', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Reload latest data', exact: true }).click();
+  await expect(apply).toBeEnabled();
+  expect(mock.state.writes).toBe(1);
+  await apply.click();
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  expect(mock.state.snapshot.settings.presets[0]!.model).toBe('changed-elsewhere');
+  expect(mock.state.writes).toBe(2); expect(mock.state.reads).toBe(2);
+  mock.assertClean();
+});
+
+for (const dailyRuns of [undefined, 700]) test(`recommended limits handle ${dailyRuns ?? 'missing'} daily runs without lowering a saved limit`, async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  if (dailyRuns === undefined) delete mock.state.snapshot.settings.limits.dailyRuns;
+  else mock.state.snapshot.settings.limits.dailyRuns = dailyRuns;
+  await openAi(page, false);
+  expect(mock.state.writes).toBe(0);
+  await page.getByRole('button', { name: 'Apply recommended limits', exact: true }).click();
+  await expect(page.getByText('Changes saved.', { exact: true })).toBeVisible();
+  expect(mock.state.snapshot.settings.limits.dailyRuns).toBe(dailyRuns ?? aiInteractiveDailyRuns);
+  expect(mock.state.writes).toBe(1);
+  mock.assertClean();
+});
+
+test('recommended limits are unavailable without storage and absent for cost-only presets', async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot); mock.state.snapshot.status.available = false;
+  await openAi(page, false);
+  const apply = page.getByRole('button', { name: 'Apply recommended limits', exact: true });
+  await expect(apply).toBeDisabled();
+  mock.state.snapshot.settings.presets[0]!.budgetMode = 'cost';
+  mock.state.snapshot.settings.presets[0]!.tools = [];
+  mock.state.snapshot.status.available = true;
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Reload latest data', exact: true }).click();
+  await expect(page.getByText('existing-model', { exact: true })).toBeVisible();
+  await expect(apply).toHaveCount(0);
+  expect(mock.state.snapshot.settings.limits.dailyRuns).toBe(50);
+  expect(mock.state.writes).toBe(0);
+  mock.assertClean();
+});
+
+for (const [state, expected] of [
+  ['absent', 'Disabled or not configured'], ['disabled', 'Disabled or not configured'],
+  ['nonofficial', 'Provider disabled or not the official DeepSeek service'], ['provider-disabled', 'Provider disabled or not the official DeepSeek service'],
+  ['credential-absent', 'Referenced credential is missing'], ['credential-empty', 'Referenced credential is missing'],
+  ['no-tools', 'Configured, but no preset allows search or retrieval tools'],
+  ['search', 'Configured (not live-validated)'], ['fetch', 'Configured (not live-validated)'],
+] as const) test(`search readiness ${state} uses metadata only and opens the existing editor`, async ({ page }) => {
+  const mock = await mockAi(page); mock.state.snapshot = limitedSnapshot(mock.state.snapshot);
+  const settings = mock.state.snapshot.settings;
+  if (state !== 'absent') settings.search = { enabled: state !== 'disabled', providerId: 'personal-test', maxResults: 3 };
+  if (state === 'nonofficial') { settings.providers[0]!.baseUrl = 'https://api.deepseek.com.example/v1'; settings.providers[0]!.allowedOrigins = ['https://api.deepseek.com.example']; }
+  if (state === 'provider-disabled') settings.providers[0]!.enabled = false;
+  if (state === 'credential-absent') mock.state.snapshot.credentials = [];
+  if (state === 'credential-empty') mock.state.snapshot.credentials[0]!.hasValue = false;
+  if (state === 'search' || state === 'fetch') settings.presets[0]!.tools.push(`ai.${state}`);
+  const original = structuredClone(mock.state.snapshot);
+  const upstream: string[] = []; const aiRequests: string[] = [];
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (url.origin !== 'http://127.0.0.1:4173' && url.hostname !== 'telegram.org') upstream.push(request.url());
+    if (url.pathname.startsWith('/api/ai/')) aiRequests.push(`${request.method()} ${url.pathname}`);
+  });
+  await openAi(page, false);
+  const status = page.getByRole('region', { name: 'Safe runtime status', exact: true });
+  await expect(status.getByText(expected, { exact: true })).toBeVisible();
+  await expect(status).toContainText('DeepSeek official search needs its own API key');
+  await expect(status).toContainText('https://api.deepseek.com');
+  await expect(status).not.toContainText('vault:personal-test');
+  expect(mock.state.statusReads).toBe(0);
+  expect(aiRequests).toEqual(['GET /api/ai/admin']);
+  await page.getByRole('button', { name: 'Review search settings', exact: true }).click();
+  await expect(page.locator('#root_enabled')).toBeVisible();
+  await expect(status.getByText(expected, { exact: true })).toBeVisible();
+  await expect.poll(() => [...aiRequests].sort()).toEqual([
+    'GET /api/ai/admin', 'GET /api/ai/admin/extensions/status', 'GET /api/ai/admin/tools',
+  ]);
+  expect(upstream).toEqual([]); expect(mock.state.snapshot).toEqual(original); expect(mock.state.writes).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  mock.assertClean();
+});
+
 for (const [language, title, service, key, model, groups, save] of [
   ['en', 'Set up your AI', 'Service', 'API key', 'Model', 'Also enable selected groups', 'Save and enable'],
   ['zh-CN', '配置你的 AI', '服务商', 'API Key', '模型', '同时启用选定群组', '保存并启用'],
@@ -371,8 +771,8 @@ test('structured provider, preset and grant forms save through a single-use conf
   await page.locator('#root_presets_0_id').fill('daily');
   await page.locator('#root_presets_0_providerId').fill('native');
   await page.locator('#root_presets_0_model').fill('reviewed-model');
-  await page.locator('#root_presets_0_inputCapabilities_0').selectOption({ label: 'Text' });
-  await page.locator('#root_presets_0_outputCapabilities_0').selectOption({ label: 'Text' });
+  await page.locator('#root_presets_0_inputCapabilities_0').selectOption({ label: 'Text input' });
+  await page.locator('#root_presets_0_outputCapabilities_0').selectOption({ label: 'Text answers' });
   for (const [key, value] of Object.entries({ maxInputTokens: 4096, maxOutputTokens: 1024, maxToolCalls: 0, maxDurationMs: 30000, maxCostMicros: 10000 })) await page.locator(`#root_presets_0_budget_${key}`).fill(String(value));
   await page.locator('#root_grants').getByRole('button', { name: 'Add', exact: true }).click();
   await page.locator('#root_grants_0_id').fill('owner');
@@ -484,7 +884,7 @@ test('write-only credentials clear on submit, navigation, logout and never enter
   expect(mock.state.deletions).toBe(0);
   await page.getByRole('dialog').getByRole('button', { name: 'Delete credential', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByText('Not configured', { exact: false })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Write-only credentials', exact: true }).getByText('Not configured', { exact: false })).toBeVisible();
   expect(mock.state.deletions).toBe(1);
   await value.fill('test-only-write-only-value');
   await page.getByRole('button', { name: 'Modules', exact: true }).click();

@@ -1,8 +1,8 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Confirmation } from '../../shared/schemas';
-import { aiAdminSnapshotSchema, type AiAdminSnapshot } from '../../shared/schemas/ai-admin';
-import { aiCredentialChangeSchema } from '../../shared/schemas/ai';
+import { aiAdminSnapshotSchema, aiToolCatalogSchema, type AiAdminSnapshot, type AiToolCatalog } from '../../shared/schemas/ai-admin';
+import { aiCredentialChangeSchema, aiInteractiveBudget, aiInteractiveDailyRuns } from '../../shared/schemas/ai';
 import { action, ApiError, errorCode, query } from './api';
 import { AiSetupForm } from './AiSetupForm';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -28,6 +28,10 @@ export function AiAdminPage({ onDirty, clearSensitive }: { onDirty(dirty: boolea
   const [setupDirty, setSetupDirty] = useState(false);
   const [advancedLoaded, setAdvancedLoaded] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [toolCatalog, setToolCatalog] = useState<AiToolCatalog>();
+  const [toolsLoading, setToolsLoading] = useState(true);
+  const [toolsError, setToolsError] = useState<ReturnType<typeof errorCode>>();
+  const [toolsVersion, setToolsVersion] = useState(0);
   const [secretDirty, setSecretDirty] = useState(false);
   const [extensionDirty, setExtensionDirty] = useState(false);
   const [extensionBusy, setExtensionBusy] = useState(false);
@@ -53,6 +57,18 @@ export function AiAdminPage({ onDirty, clearSensitive }: { onDirty(dirty: boolea
       .catch((failure: unknown) => { if (current) setError(errorCode(failure)); });
     return () => { current = false; };
   }, [version]);
+  useEffect(() => {
+    if (!advancedLoaded || data?.revision === undefined) return;
+    let current = true;
+    setToolsLoading(true); setToolsError(undefined); setToolCatalog(undefined);
+    void query<unknown>('/api/ai/admin/tools').then(value => {
+      const parsed = aiToolCatalogSchema.safeParse(value);
+      if (!parsed.success) throw new ApiError('INVALID_OUTPUT');
+      if (current) setToolCatalog(parsed.data);
+    }).catch((failure: unknown) => { if (current) setToolsError(errorCode(failure)); })
+      .finally(() => { if (current) setToolsLoading(false); });
+    return () => { current = false; };
+  }, [advancedLoaded, toolsVersion, data?.revision]);
 
   function accept(value: unknown) {
     setData(snapshot(value)); setBlocked(false); setSetupDirty(false); setSettingsDirty(false); setSecretDirty(false); setSaved(true);
@@ -87,6 +103,17 @@ export function AiAdminPage({ onDirty, clearSensitive }: { onDirty(dirty: boolea
   const vaultRefValid = ref.startsWith('vault:') && aiCredentialChangeSchema.safeParse({ operation: 'delete', ref }).success;
   if (!data) return error ? <div className="notice error" role="alert"><p>{t(`common:errors.${error}`)}</p><button onClick={reload}>{t('common:actions.retry')}</button></div>
     : <p className="loading" role="status">{t('state.loading')}</p>;
+  const recommended = aiInteractiveBudget();
+  const usagePresets = data.settings.presets.filter(preset => preset.budgetMode === 'usage');
+  const needsRecommended = usagePresets.length > 0 && ((data.settings.limits.dailyRuns ?? 0) < aiInteractiveDailyRuns
+    || usagePresets.some(preset => (['maxInputTokens', 'maxOutputTokens', 'maxToolCalls', 'maxDurationMs'] as const).some(key => preset.budget[key] < recommended[key])));
+  const recommendationLocked = locked || extensionBusy || setupDirty || settingsDirty || secretDirty || extensionDirty || !needsRecommended;
+  const search = data.settings.search;
+  const searchProvider = data.settings.providers.find(provider => provider.id === search?.providerId);
+  const searchReadiness = !search?.enabled ? 'disabled'
+    : !searchProvider?.enabled || new URL(searchProvider.baseUrl).origin !== 'https://api.deepseek.com' ? 'provider'
+    : !data.credentials.some(credential => credential.ref === searchProvider.credentialRef && credential.hasValue) ? 'credential'
+    : !data.settings.presets.some(preset => preset.tools.some(tool => tool === 'ai.search' || tool === 'ai.fetch')) ? 'noTools' : 'configured';
   return <div className="schema-editor">
     <div className="section-tools"><span className="mono help">{t('state.revision', { revision: data.revision })}</span><button disabled={busy || Boolean(pending) || extensionBusy} onClick={() => setIntent('reload')}>{t('common:actions.refresh')}</button></div>
     {error && <div className="notice error" role="alert"><p>{t(`common:errors.${error}`)}</p>{blocked && <><p>{t('ai.refreshRequired')}</p><button onClick={() => setIntent('reload')}>{t('state.reload')}</button></>}</div>}
@@ -95,13 +122,27 @@ export function AiAdminPage({ onDirty, clearSensitive }: { onDirty(dirty: boolea
       <dl className="effective-values">
         <div><dt>{t('ai.configured')}</dt><dd>{t(data.settings.enabled ? 'common:yes' : 'common:no')}</dd></div>
         <div><dt>{t('ai.storageAvailable')}</dt><dd>{t(data.status.available ? 'common:yes' : 'common:no')}</dd></div>
+        <div><dt>{t('ai.searchStatus.title')}</dt><dd>{t(`ai.searchStatus.${searchReadiness}`)}</dd></div>
       </dl>
       {!data.status.available && <p className="notice">{t('ai.storageUnavailable')}</p>}
       {!data.settings.providers.length && <p className="notice">{t('ai.blank')}</p>}
       {data.settings.presets.map(preset => <p key={preset.id} className="help">{t('ai.setup.model')}: <code>{preset.model}</code></p>)}
       {data.settings.enabled && <p className="notice">{t('ai.ready')}</p>}
       {data.settings.limits.dailyRuns !== undefined && <p className="help">{t('ai.dailyRunLimit', { limit: data.settings.limits.dailyRuns })}</p>}
-      <button className="danger-text" disabled={locked || !data.settings.enabled} onClick={() => setIntent('disable')}>{t('ai.disable')}</button>
+      {usagePresets.length > 0 && <><p id="ai-recommended-help" className="help">{t('ai.recommendedHelp')}</p>
+        <button disabled={recommendationLocked} aria-describedby="ai-recommended-help" onClick={() => {
+          if (recommendationLocked) return;
+          const settings = { ...data.settings, presets: data.settings.presets.map(preset => preset.budgetMode !== 'usage' ? preset : { ...preset, budget: { ...preset.budget,
+            maxInputTokens: Math.max(preset.budget.maxInputTokens, recommended.maxInputTokens),
+            maxOutputTokens: Math.max(preset.budget.maxOutputTokens, recommended.maxOutputTokens),
+            maxToolCalls: Math.max(preset.budget.maxToolCalls, recommended.maxToolCalls),
+            maxDurationMs: Math.max(preset.budget.maxDurationMs, recommended.maxDurationMs),
+          } }), limits: { ...data.settings.limits, dailyRuns: Math.max(data.settings.limits.dailyRuns ?? 0, aiInteractiveDailyRuns) } };
+          void mutate('/api/ai/admin', 'PUT', { revision: data.revision, settings }).catch(() => {});
+        }}>{t('ai.applyRecommended')}</button></>}
+      <p className="help">{t('ai.searchStatus.help')}</p>
+      <div className="button-row"><button onClick={() => { setAdvancedLoaded(true); setAdvancedOpen(true); document.getElementById('ai-advanced')?.focus(); }}>{t('ai.searchStatus.open')}</button>
+        <button className="danger-text" disabled={locked || !data.settings.enabled} onClick={() => setIntent('disable')}>{t('ai.disable')}</button></div>
     </section>
     {fresh && <AiSetupForm key={`setup-${data.revision}-${version}`} revision={data.revision} disabled={locked || settingsDirty || secretDirty || extensionDirty} clearSensitive={clearSensitive}
       onDirty={setSetupDirty} onSave={input => mutate('/api/ai/setup', 'POST', input)} />}
@@ -144,7 +185,9 @@ export function AiAdminPage({ onDirty, clearSensitive }: { onDirty(dirty: boolea
     {extensionDirty && <p className="notice">{t('ai.extensions.finishDraft')}</p>}
     <section aria-labelledby="ai-settings"><h2 id="ai-settings">{t('ai.settings')}</h2><p className="notice">{t('ai.invalidation')}</p>
       <fieldset disabled={locked || setupDirty || extensionDirty}>
-        <AiSettingsForm key={`${data.revision}-${version}`} settings={data.settings} onDirty={setSettingsDirty}
+        <AiSettingsForm key={`${data.revision}-${version}`} settings={data.settings} tools={{ catalog: toolCatalog, loading: toolsLoading, error: toolsError,
+          searchConfigured: searchReadiness === 'configured' || searchReadiness === 'noTools', localQualified: data.sandbox.qualified,
+          reload: () => setToolsVersion(value => value + 1) }} onDirty={setSettingsDirty}
           onSave={settings => mutate('/api/ai/admin', 'PUT', { revision: data.revision, settings })} />
       </fieldset>
     </section>

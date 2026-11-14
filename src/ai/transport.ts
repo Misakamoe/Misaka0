@@ -4,10 +4,29 @@ import { isIP } from 'node:net';
 import type { LookupAddress } from 'node:dns';
 import { finished } from 'node:stream/promises';
 import { abortable, normalizePublicUrl, publicAddress, resolveFeedAddresses, type NetworkResponse } from '../network.js';
+import type { ErrorCode } from '../../shared/schemas/index.js';
 
-export type AiErrorCode = 'INVALID_INPUT' | 'UNSAFE_URL' | 'AUTH' | 'QUOTA' | 'CAPACITY' | 'NETWORK' | 'TIMEOUT' | 'CANCELLED' | 'TOO_LARGE' | 'INVALID_RESPONSE' | 'INCOMPLETE' | 'UNSUPPORTED' | 'CONTINUATION_MISMATCH';
+export type AiErrorCode = 'INVALID_INPUT' | 'UNSAFE_URL' | 'AUTH' | 'QUOTA' | 'CAPACITY' | 'NETWORK' | 'TIMEOUT' | 'CANCELLED' | 'TOO_LARGE' | 'INPUT_LIMIT' | 'OUTPUT_LIMIT' | 'INVALID_RESPONSE' | 'INCOMPLETE' | 'UNSUPPORTED' | 'CONTINUATION_MISMATCH' | 'INPUT_DISABLED' | 'OUTPUT_UNSUPPORTED' | 'MEDIA_COUNT_UNAVAILABLE';
 export class AiProtocolError extends Error {
   constructor(readonly code: AiErrorCode, readonly status?: number, readonly billable: boolean | 'unknown' = 'unknown') { super(code); }
+}
+export function protocolErrorCode(error: AiProtocolError): ErrorCode {
+  switch (error.code) {
+    case 'AUTH': return 'AI_PROVIDER_AUTH';
+    case 'QUOTA': return 'AI_PROVIDER_QUOTA';
+    case 'INPUT_LIMIT': return 'AI_CONTEXT_LIMIT';
+    case 'OUTPUT_LIMIT': return 'AI_OUTPUT_LIMIT';
+    case 'INCOMPLETE': return 'AI_RESPONSE_INCOMPLETE';
+    case 'UNSUPPORTED': return 'AI_PROVIDER_UNSUPPORTED';
+    case 'INPUT_DISABLED': return 'AI_INPUT_DISABLED';
+    case 'OUTPUT_UNSUPPORTED': return 'AI_OUTPUT_UNSUPPORTED';
+    case 'MEDIA_COUNT_UNAVAILABLE': return 'AI_MEDIA_COUNT_UNAVAILABLE';
+    case 'INVALID_RESPONSE': case 'CONTINUATION_MISMATCH': return 'INVALID_OUTPUT';
+    case 'UNSAFE_URL': case 'INVALID_INPUT': return 'INVALID_INPUT';
+    case 'TOO_LARGE': case 'CAPACITY': return 'CAPACITY';
+    case 'CANCELLED': case 'TIMEOUT': return error.code;
+    default: return 'UNAVAILABLE';
+  }
 }
 export interface ProtocolLimits {
   requestBytes: number; responseBytes: number; eventBytes: number; events: number;
@@ -192,6 +211,7 @@ export function createAiTransport(dependencies: AiTransportDependencies = {}): A
     const timer = setTimeout(() => timeout.abort(), limits.timeoutMs); timer.unref();
     const signal = AbortSignal.any([options.signal, timeout.signal]);
     let response: NetworkResponse | undefined;
+    let dispatched = false;
     const abort = () => response?.body.destroy(new AiProtocolError(options.signal.aborted ? 'CANCELLED' : 'TIMEOUT'));
     signal.addEventListener('abort', abort, { once: true });
     try {
@@ -200,6 +220,7 @@ export function createAiTransport(dependencies: AiTransportDependencies = {}): A
         : await abortable((dependencies.lookup ?? resolveFeedAddresses)(hostname, signal), signal);
       if (!addresses.length || addresses.length > 32 || addresses.some(item => !publicAddress(item.address) || isIP(item.address) !== item.family)) throw new AiProtocolError('UNSAFE_URL', undefined, false);
       signal.throwIfAborted();
+      dispatched = true;
       const pending = (dependencies.request ?? nativeRequest)(url, { addresses, headers, body, signal, method: input.method }).then(value => {
         if (signal.aborted) { value.body.destroy(); throw new AiProtocolError('CANCELLED'); }
         return value;
@@ -256,9 +277,9 @@ export function createAiTransport(dependencies: AiTransportDependencies = {}): A
       try { return { status: response.status, headers: response.headers, value: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size))) as unknown }; }
       catch { throw new AiProtocolError('INVALID_RESPONSE'); }
     } catch (error) {
-      if (signal.aborted) throw new AiProtocolError(options.signal.aborted ? 'CANCELLED' : 'TIMEOUT');
-      if (error instanceof AiProtocolError) throw error;
-      throw new AiProtocolError('NETWORK');
+      if (signal.aborted) throw new AiProtocolError(options.signal.aborted ? 'CANCELLED' : 'TIMEOUT', undefined, dispatched ? 'unknown' : false);
+      if (error instanceof AiProtocolError) throw dispatched ? error : new AiProtocolError(error.code, error.status, false);
+      throw new AiProtocolError('NETWORK', undefined, dispatched ? 'unknown' : false);
     } finally {
       if (response) {
         const drained = finished(response.body, { cleanup: true }).catch(() => undefined);

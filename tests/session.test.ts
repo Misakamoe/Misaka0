@@ -67,18 +67,40 @@ describe('bounded on-demand Telegram sessions', () => {
     const sessions = new SessionStore(100, 2, () => 0);
     sessions.set('a', { rssInput: { panelId: 'a', messageId: 1 } });
     sessions.set('b', { rssInput: { panelId: 'b', messageId: 2 } });
-    sessions.set('c', { rssInput: { panelId: 'c', messageId: 3 } });
+    expect(() => sessions.set('c', { rssInput: { panelId: 'c', messageId: 3 } })).toThrow('CAPACITY');
     expect(sessions.size).toBe(2);
-    expect(sessions.get('a')).toBeUndefined();
+    expect(sessions.get('a')?.rssInput?.panelId).toBe('a');
     const detached = sessions.get('b')!;
     detached.rssInput!.messageId = 100;
     expect(sessions.get('b')?.rssInput?.messageId).toBe(2);
     sessions.delete('b');
+    sessions.set('c', { rssInput: { panelId: 'c', messageId: 3 } });
     expect(sessions.get('c')?.rssInput?.messageId).toBe(3);
     sessions.stop();
     expect(sessions.size).toBe(0);
     expect(() => sessions.set('c', {})).toThrow('CANCELLED');
     expect(new SessionStore().size).toBe(0);
+  });
+
+  it('keeps module claims independent without refreshing other modules or evicting live inputs', () => {
+    let now = 0;
+    const sessions = new SessionStore(100, 1, () => now);
+    sessions.setInput('a', 'rssInput', { panelId: 'rss', messageId: 1 });
+    now = 50;
+    sessions.setInput('a', 'weatherInput', { panelId: 'weather', messageId: 2, mode: 'current', days: 1 });
+    expect(() => sessions.setInput('b', 'rssInput', { panelId: 'other', messageId: 3 })).toThrow('CAPACITY');
+    expect(sessions.clearInput('a', 'weatherInput', 'old-panel')).toBe(false);
+    now = 100;
+    expect(sessions.get('a')).toEqual({ weatherInput: { panelId: 'weather', messageId: 2, mode: 'current', days: 1 } });
+    sessions.setInput('a', 'rssInput', { panelId: 'rss-new', messageId: 4 });
+    expect(sessions.clearInput('a', 'rssInput', 'rss')).toBe(false);
+    expect(sessions.clearInput('a', 'rssInput', 'rss-new')).toBe(true);
+    expect(sessions.get('a')?.weatherInput?.messageId).toBe(2);
+    now = 150;
+    expect(sessions.get('a')).toBeUndefined();
+    sessions.setInput('b', 'rssInput', { panelId: 'other', messageId: 3 });
+    sessions.stop();
+    expect(() => sessions.setInput('b', 'rssInput', { panelId: 'other', messageId: 3 })).toThrow('CANCELLED');
   });
 
   it('excludes edited, anonymous, bot, business, inaccessible and inline updates', () => {

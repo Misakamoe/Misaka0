@@ -1,11 +1,12 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { aiToolCatalogSchema, type AiToolCatalog } from '../shared/schemas/ai-admin.js';
 import {
-  coreSettingsMetadata, coreSettingsSchema, emptyInputSchema, groupMutationResultSchema,
+  confirmationSubjectSchema, coreSettingsMetadata, coreSettingsSchema, emptyInputSchema, groupMutationResultSchema,
   groupMutationSchema, groupPageInputSchema, groupPageSchema, groupStateInputSchema, groupStateSchema, infoSchema, inputJsonSchema,
   localeSchema, moduleListSchema, preferenceInputSchema, preferenceSchema, settingsSnapshotSchema,
   settingsUpdateSchema, statusSchema, userIdSchema,
-  type ActionResult, type Confirmation, type Locale, type RuntimeStatus,
+  type ActionResult, type Confirmation, type ConfirmationSubject, type Locale, type RuntimeStatus,
 } from '../shared/schemas/index.js';
 import type { AccessService } from './access.js';
 import type { ConfigurationService } from './configuration.js';
@@ -20,6 +21,8 @@ import type { RateService } from './modules/rate.js';
 import type { WeatherService } from './modules/weather.js';
 import type { StickerService } from './modules/sticker.js';
 import type { SubconvService } from './modules/subconv.js';
+import type { RelayService } from './modules/relay.js';
+import { registerRelayActions } from './modules/relay-actions.js';
 
 export type InvocationSource = 'telegram' | 'http' | 'ai';
 export interface InvocationInput {
@@ -88,6 +91,7 @@ export interface ActionDefinition<I, O> {
   timeoutMs: number;
   target?: (input: I, context: InvocationContext) => { kind: 'user' | 'chat'; id: number };
   confirmation?: (input: I, context: InvocationContext) => boolean;
+  confirmationSubject?: (input: I, context: InvocationContext) => ConfirmationSubject;
   execute: (input: I, context: InvocationContext) => Promise<O> | O;
 }
 
@@ -117,6 +121,7 @@ export interface ActionServices {
   weather: WeatherService;
   stickers: StickerService;
   subconv: SubconvService;
+  relay?: RelayService;
   effects: TelegramEffects;
   status: () => RuntimeStatus;
   aiEnabled?: boolean;
@@ -161,7 +166,7 @@ interface Execution {
 }
 
 const MAX_ACTION_BYTES = 262_144;
-const CONTROL_ACTIONS = new Set(['ai.run.stop', 'ai.run.status', 'ai.admin.disable', 'sticker.cancel', 'core.status']);
+const CONTROL_ACTIONS = new Set(['ai.run.stop', 'ai.run.status', 'ai.admin.disable', 'sticker.cancel', 'relay.cancel', 'relay.contact.status', 'core.status']);
 function canonical(value: unknown, depth = 0, budget = { nodes: 0, bytes: 0 }): string {
   if (++budget.nodes > 16_384 || depth > 24) throw new AppError('INVALID_OUTPUT');
   if (typeof value === 'string') budget.bytes += Buffer.byteLength(value);
@@ -189,6 +194,7 @@ export class ActionExecutor {
   private readonly byteCapacity: number;
   private retainedBytes = 0;
   private approvalBytes = 0;
+  private expiryTimer?: ReturnType<typeof setTimeout>;
   private closed = false;
 
   constructor(private readonly services: ActionServices) {
@@ -202,6 +208,7 @@ export class ActionExecutor {
     registerWeatherActions(this, services.weather);
     registerStickerActions(this, services.stickers);
     registerSubconvActions(this, services.subconv, services.aiNativeDelivery);
+    if (services.relay) registerRelayActions(this, services.relay);
     if (services.ai) registerAiActions(this, services.ai);
   }
 
@@ -231,7 +238,8 @@ export class ActionExecutor {
       if (existing) {
         if (existing.fingerprint !== fingerprint) throw new AppError('CONFLICT');
         const result = await existing.promise;
-        return (result.status === 'succeeded' ? { ...result, replayed: true } : result) as ActionResult<T>;
+        return (result.status === 'succeeded' ? { ...result, replayed: true }
+          : result.status === 'pending_confirmation' ? structuredClone(result) : result) as ActionResult<T>;
       }
       const reservedBytes = MAX_ACTION_BYTES + Buffer.byteLength(canonical(input)) + Buffer.byteLength(key) + 256;
       const reserve = this.capacity > 16 && this.byteCapacity >= 4 * MAX_ACTION_BYTES && !CONTROL_ACTIONS.has(id);
@@ -244,15 +252,17 @@ export class ActionExecutor {
         : this.run(action, context, input);
       const record: Execution = { fingerprint, promise, expires: this.now() + 600_000, active: true, bytes: reservedBytes };
       this.executions.set(key, record);
+      this.scheduleExpiry();
       let finalBytes = 256;
       try {
         const result = await promise;
         finalBytes += Buffer.byteLength(canonical(result)) + Buffer.byteLength(key);
-        return result as ActionResult<T>;
+        return (result.status === 'pending_confirmation' ? structuredClone(result) : result) as ActionResult<T>;
       } finally {
         this.retainedBytes -= record.bytes - finalBytes;
         record.bytes = finalBytes;
         record.active = false; record.expires = this.now() + 600_000;
+        this.scheduleExpiry();
       }
     } catch (error) { return this.reject(context, id, error) as ActionResult<T>; }
   }
@@ -275,7 +285,7 @@ export class ActionExecutor {
     this.checkApproval(context, item);
     if (binding && (item.original.source !== 'ai' || item.original.aiRunId !== binding.runId
       || item.original.invocationId !== binding.invocationId || item.action.id !== binding.actionId)) throw new AppError('CONFIRMATION_EXPIRED');
-    return { ...item.confirmation };
+    return structuredClone(item.confirmation);
   }
 
   pendingDetails(context: InvocationContext, token: string): { confirmation: Confirmation; input: unknown } {
@@ -291,12 +301,44 @@ export class ActionExecutor {
       const item = this.approvals.get(token)!;
       this.approvals.delete(token);
       this.approvalBytes -= item.bytes;
+      this.scheduleExpiry();
       id = item.action.id;
       const execution = this.approvedInvocation(context, item);
       await this.policy(item.action, execution, item.input);
       this.checkApproval(context, item);
       return await this.run(item.action, execution, item.input) as ActionResult<T>;
     } catch (error) { return this.reject(context, id, error) as ActionResult<T>; }
+  }
+
+  listAiToolCatalog(context: InvocationContext): AiToolCatalog {
+    this.assertContext(context);
+    if (context.source !== 'http' || context.chat.type !== 'private' || context.chat.id !== context.actorId
+      || !this.services.access.isAdmin(context.actorId)) throw new AppError('FORBIDDEN');
+    const items: AiToolCatalog['items'] = [];
+    // Configuration metadata is not runtime discovery: never evaluate an entry's policy or callbacks here.
+    for (const action of this.registry.values()) {
+      if (action.aiVisible !== true || !action.sources.includes('ai')) continue;
+      if (items.length >= 256) throw new AppError('CAPACITY');
+      const root = action.id.includes('.') ? action.id.split('.')[0]! : '';
+      let group = 'other';
+      if (root === 'core' || root === 'modules') group = 'core';
+      else if (['alias', 'rss', 'rate', 'weather', 'sticker', 'subconv'].includes(root)) group = root;
+      else if (action.id === 'ai.search' || action.id === 'ai.fetch') group = 'search';
+      else if (action.id.startsWith('ai.memory.')) group = 'memory';
+      else if (action.id.startsWith('ai.automation') || action.id.startsWith('ai.jobs')) group = 'automation';
+      else if (action.id.startsWith('ai.skills.')) group = 'skills';
+      else if (action.id.startsWith('ai.mcp.stdio.') || action.id.startsWith('ai.sandbox.local.')) group = 'local';
+      else if (action.id.startsWith('ai.mcp.')) group = 'mcp';
+      else if (action.id.startsWith('ai.sandbox.')) group = 'sandbox';
+      else if (root === 'ai') group = 'ai';
+      items.push({ id: action.id, group, effect: action.effect, scopes: [...action.scopes], permission: action.permission,
+        approval: ['write', 'destructive', 'permission'].includes(action.effect) ? 'required'
+          : action.effect === 'personal_write' || action.confirmation !== undefined ? 'conditional' : 'none' });
+    }
+    items.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const result = aiToolCatalogSchema.safeParse({ items });
+    if (!result.success) throw new AppError('INVALID_OUTPUT');
+    return result.data;
   }
 
   async discoverTools(context: InvocationContext): Promise<{ id: string; description: string; effect: Effect; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown> }[]> {
@@ -325,6 +367,7 @@ export class ActionExecutor {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.scheduleExpiry();
     this.approvals.clear();
     this.approvalBytes = 0;
     for (const controller of this.controllers) controller.abort();
@@ -416,15 +459,22 @@ export class ActionExecutor {
 
   private approval(context: InvocationContext, action: AnyAction, input: unknown): ActionResult {
     this.prune();
-    const bytes = Buffer.byteLength(canonical(input)) + 1024;
-    if (this.approvals.size >= this.capacity || this.approvalBytes + bytes > 1024 * 1024) throw new AppError('CAPACITY');
+    let subject: ConfirmationSubject | undefined;
+    if (action.confirmationSubject) {
+      const parsed = confirmationSubjectSchema.safeParse(action.confirmationSubject(input, context));
+      if (!parsed.success) throw new AppError('INVALID_OUTPUT');
+      subject = parsed.data;
+    }
     const token = randomBytes(20).toString('hex');
     const expires = this.now() + 600_000;
     const target = action.target?.(input, context) ?? { kind: 'user', id: context.actorId };
     const groupIds = new Set<number>();
     if (context.chat.type !== 'private') groupIds.add(context.chat.id);
     if (target.kind === 'chat' && target.id < 0) groupIds.add(target.id);
-    const confirmation: Confirmation = { token, actionId: action.id, expiresAt: new Date(expires).toISOString(), target: `${target.kind}:${target.id}` };
+    const confirmation: Confirmation = { token, actionId: action.id, expiresAt: new Date(expires).toISOString(), target: `${target.kind}:${target.id}`,
+      ...(subject ? { subject } : {}) };
+    const bytes = Buffer.byteLength(canonical(input)) + Buffer.byteLength(canonical(confirmation)) + 1024;
+    if (this.approvals.size >= this.capacity || this.approvalBytes + bytes > 1024 * 1024) throw new AppError('CAPACITY');
     this.approvals.set(token, {
       confirmation, action, input: structuredClone(input), actorId: context.actorId, botId: context.botId,
       source: context.source === 'ai' ? context.confirmationSource ?? 'telegram' : context.source,
@@ -435,7 +485,8 @@ export class ActionExecutor {
       ...(this.services.ai && (context.source === 'ai' || action.id.startsWith('ai.')) ? { aiPolicyKey: this.services.ai.approvalPolicyKey(context, action.id) } : {}),
     });
     this.approvalBytes += bytes;
-    const result: ActionResult = { status: 'pending_confirmation', invocationId: context.invocationId, confirmation };
+    this.scheduleExpiry();
+    const result: ActionResult = { status: 'pending_confirmation', invocationId: context.invocationId, confirmation: structuredClone(confirmation) };
     this.audit(context, action.id, result, 0);
     return result;
   }
@@ -507,6 +558,23 @@ export class ActionExecutor {
     const now = this.now();
     for (const [key, item] of this.approvals) if (item.expires <= now) { this.approvalBytes -= item.bytes; this.approvals.delete(key); }
     for (const [key, item] of this.executions) if (!item.active && item.expires <= now) { this.retainedBytes -= item.bytes; this.executions.delete(key); }
+    this.scheduleExpiry();
+  }
+
+  private scheduleExpiry(): void {
+    if (this.expiryTimer) clearTimeout(this.expiryTimer);
+    this.expiryTimer = undefined;
+    if (this.closed) return;
+    let next = Infinity;
+    for (const item of this.approvals.values()) next = Math.min(next, item.expires);
+    for (const item of this.executions.values()) if (!item.active) next = Math.min(next, item.expires);
+    if (next === Infinity) return;
+    this.expiryTimer = setTimeout(() => {
+      this.expiryTimer = undefined;
+      // Recheck the injected clock; elapsed timer time alone does not expire entries.
+      this.prune();
+    }, Math.max(1, Math.min(2_147_483_647, next - this.now())));
+    this.expiryTimer.unref();
   }
 
   private registerCore(): void {
