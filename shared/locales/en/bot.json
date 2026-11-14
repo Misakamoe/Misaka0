@@ -39,7 +39,7 @@
   "idInfo": {
     "self": "Current user", "reply": "Sender of the replied message", "name": "Name:", "username": "Username:", "type": "Type:",
     "user": "User", "bot": "Bot", "group": "Group", "channel": "Channel", "userId": "User ID:", "senderChatId": "Sender chat ID:", "chatId": "Chat ID:", "threadId": "Thread ID:",
-    "unavailable": "Not provided", "anonymous": "This message was sent as a group or channel; it does not identify a personal account.", "missing": "The message does not provide an identifiable sender. No identity was inferred.", "copy": "Copy"
+    "unavailable": "Not provided", "anonymous": "This message was sent as a group or channel; it does not identify a personal account.", "missing": "The message does not provide an identifiable sender. No identity was inferred."
   },
   "noThread": "None",
   "modulesEmpty": "No native modules were returned. Archived modules are never loaded.",
@@ -193,6 +193,7 @@
     "usage": "/alias\n/alias add help guide\n/alias remove help guide"
   },
   "cancelled": "Transient work in this user/chat/topic context has been cancelled and drained; forms and non-approval panels are closed, and default relay forwarding is paused. Saved contacts, conversations and delivered messages are not deleted. Independent approvals unrelated to a cancelled AI run remain valid until their own expiry.",
+  "inputClosed": "Input closed.",
   "privateOnly": "Use this command in a private chat with the bot.",
   "unknownCommand": "Unknown command. Use /help to see the available commands.",
   "unknownCommandSuggestion": "Unknown command. Did you mean {{commands}}?",

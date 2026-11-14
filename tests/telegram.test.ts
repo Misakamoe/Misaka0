@@ -314,7 +314,7 @@ describe('offline Telegram admission and commands', () => {
     expect(f.execute.mock.calls[0]![0]).toMatchObject({ actorId: 1, source: 'telegram', botId: me.id, chat: { id: 1, type: 'private', threadId: 42 }, language: 'en' });
   });
 
-  it.each(['zh-CN', 'zh-TW', 'en', 'ja'] as const)('reports the replied sender with literal names and copyable monospace IDs in %s', async language => {
+  it.each(['zh-CN', 'zh-TW', 'en', 'ja'] as const)('reports the replied sender with literal names and monospace IDs without copy buttons in %s', async language => {
     const f = fixture(); const update = message('/id', { thread: 7 });
     update.message!.from!.language_code = language;
     update.message!.reply_to_message = { ...message('visible', { user: 42, chat: -100, thread: 7 }).message!,
@@ -324,10 +324,10 @@ describe('offline Telegram admission and commands', () => {
     expect(richText(response)).toContain('<b>Alice</b> @untrusted');
     expect(richText(response)).toContain('@alice_example');
     expect(rich).toMatchObject({ skip_entity_detection: true });
-    for (const id of ['42', '1', '7']) {
-      expect(serialized).toContain(JSON.stringify({ type: 'code', text: id }));
-      expect(serialized).toContain(`"copy_text":{"text":"${id}"}`);
-    }
+    for (const id of ['42', '1', '7']) expect(serialized).toContain(JSON.stringify({ type: 'code', text: id }));
+    expect(serialized).not.toContain('copy_text');
+    expect(serialized).not.toContain('"type":"button"');
+    expect(response.reply_markup).toBeUndefined();
     expect(serialized).not.toContain('"type":"mention"');
     expect(serialized).not.toContain('callback_data');
     expect(f.calls.at(-1)?.payload).toMatchObject({ reply_parameters: { message_id: update.message!.message_id } });
@@ -344,7 +344,8 @@ describe('offline Telegram admission and commands', () => {
     const response = f.last(); const serialized = JSON.stringify(response.rich_message);
     expect(richText(response)).toContain('<literal> Sender');
     expect(richText(response)).toContain('does not identify a personal account');
-    expect(serialized).toContain('"copy_text":{"text":"-100123"}');
+    expect(serialized).toContain('"type":"code","text":"-100123"');
+    expect(serialized).not.toContain('copy_text');
     expect(serialized).not.toContain('1087968824');
     expect(serialized).not.toContain('Placeholder');
   });
@@ -356,7 +357,7 @@ describe('offline Telegram admission and commands', () => {
       forward_origin: { type: 'user', date: 10, sender_user: { id: 99, is_bot: false, first_name: 'Original author' } } };
     await f.bot.handleUpdate(update);
     expect(richText(f.last())).toContain('User ID: 42');
-    expect(JSON.stringify(f.last().rich_message)).not.toContain('"copy_text":{"text":"99"}');
+    expect(JSON.stringify(f.last().rich_message)).not.toContain('"type":"code","text":"99"');
     expect(richText(f.last())).not.toContain('Original author');
   });
 
@@ -368,7 +369,7 @@ describe('offline Telegram admission and commands', () => {
     await f.bot.handleUpdate(update);
     expect(richText(f.last())).toContain('No identity was inferred');
     expect(richText(f.last())).toContain('Thread ID: None');
-    expect(JSON.stringify(f.last().rich_message)).not.toContain('"copy_text":{"text":"55"}');
+    expect(JSON.stringify(f.last().rich_message)).not.toContain('"type":"code","text":"55"');
     expect(richText(f.last())).not.toContain('Hidden original');
     expect(f.calls.at(-1)?.payload.message_thread_id).toBeUndefined();
   });
@@ -378,6 +379,8 @@ describe('offline Telegram admission and commands', () => {
     f.adapter.sessions.setInput(key, 'rssInput', { panelId: 'rss', messageId: 12, promptMessageId: 13 });
     await f.bot.handleUpdate(message('/id'));
     expect(richText(f.last())).toContain('User ID: 1');
+    expect(JSON.stringify(f.last().rich_message)).toContain('"type":"code","text":"1"');
+    expect(JSON.stringify(f.last().rich_message)).not.toContain('"type":"button"');
     expect(f.adapter.sessions.get(key)?.rssInput).toEqual({ panelId: 'rss', messageId: 12, promptMessageId: 13 });
     expect(f.execute).not.toHaveBeenCalled();
   });

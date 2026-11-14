@@ -2,7 +2,7 @@ import { GrammyError, InputFile, type Bot } from 'grammy';
 import type { RichText } from 'grammy/types';
 import { translator } from '../i18n.js';
 import { FEED_MAX_IMAGES, RSS_PHOTO_MAX_SOURCE_BYTES, contentLinkUrl, findFeedLinks, isGifImageUrl, type FeedEntry, type FeedLink } from '../modules/rss-feed.js';
-import { RSS_PHOTO_MAX_OUTPUT_BYTES, createRssPhotoPreparer, type RssPhotoPreparer } from '../modules/rss-photo.js';
+import { RSS_PHOTO_MAX_OUTPUT_BYTES, RSS_PHOTO_MAX_REPAIR_BYTES, createRssPhotoPreparer, type RssPhotoPreparer } from '../modules/rss-photo.js';
 import { feedContentFormatSchema, isValidFeedContentFormat, type FeedContentBlock, type FeedRange, type FeedTextRange } from '../modules/rss-format.js';
 import { RSS_IMAGES_PER_MESSAGE, RssDeliveryError, type RssOptions } from '../modules/rss.js';
 import type { ResourcePolicy } from '../resources.js';
@@ -13,13 +13,17 @@ const PHOTO_REPAIR_TIMEOUT_MS = 20_000;
 type RichBlocks = NonNullable<Parameters<Bot['api']['sendRichMessage']>[1]['blocks']>;
 
 function uploadedPhotos(blocks: RichBlocks, photos: ReadonlyMap<string, Buffer>): RichBlocks {
-  return blocks.map(block => {
+  return blocks.flatMap((block): RichBlocks => {
     if (block.type === 'photo' && typeof block.photo.media === 'string') {
       const data = photos.get(block.photo.media);
-      if (data) return { ...block, photo: { ...block.photo, media: new InputFile(data, 'rss-preview.jpg') } };
+      if (data) return [{ ...block, photo: { ...block.photo, media: new InputFile(data, 'rss-preview.jpg') } }];
     }
-    if (block.type === 'slideshow') return { ...block, blocks: uploadedPhotos(block.blocks, photos) };
-    return block;
+    if (block.type === 'slideshow') {
+      const repaired = uploadedPhotos(block.blocks, photos);
+      return repaired.length > 1 ? [{ ...block, blocks: repaired }] : repaired;
+    }
+    // Never carry a failed remote reference or an unrepaired animation into the upload retry.
+    return [];
   });
 }
 
@@ -158,7 +162,7 @@ export function createRssSender(bot: Bot, options: Partial<ApiHealth> & { resour
     const t = translator(language);
     const blocks: NonNullable<Parameters<Bot['api']['sendRichMessage']>[1]['blocks']> = [];
     const media: typeof blocks = [];
-    const imageFallback: typeof blocks = [];
+    const imageLinks: { url: string; label: string; animation: boolean }[] = [];
     let staticPhotos: string[] = [];
     const attribution: RichText[] = [t('bot:rss.from', { source })];
     if (payload.kind === 'entry') {
@@ -189,12 +193,9 @@ export function createRssSender(bot: Bot, options: Partial<ApiHealth> & { resour
           ? { type: 'animation' as const, animation: { type: 'animation' as const, media: image } }
           : { type: 'photo' as const, photo: { type: 'photo' as const, media: image } });
         media.push(items.length === 1 ? items[0]! : { type: 'slideshow', blocks: items });
-        const originals: RichText[] = [];
         for (const [index, image] of selected.entries()) {
-          if (index) originals.push(' | ');
-          originals.push({ type: 'url', text: label(start + index), url: image });
+          imageLinks.push({ url: image, label: label(start + index), animation: animations.has(start + index) });
         }
-        imageFallback.push({ type: 'paragraph', text: t('bot:rss.imagesUnavailable') }, { type: 'paragraph', text: originals });
       }
       blocks.push({ type: 'paragraph', text: { type: 'bold', text: entry.title || t('bot:rss.untitled') } });
       if (payload.part) blocks.push({ type: 'paragraph', text: t('bot:rss.imagePart', { part: payload.part.index, total: payload.part.total }) });
@@ -239,21 +240,30 @@ export function createRssSender(bot: Bot, options: Partial<ApiHealth> & { resour
       if (payload.error) blocks.push({ type: 'paragraph', text: t(`bot:rss.errors.${payload.error}`) });
     }
     blocks.push({ type: 'blockquote', blocks: [{ type: 'paragraph', text: attribution }] });
-    const deliver = (images: boolean, photos?: ReadonlyMap<string, Buffer>) => bot.api.sendRichMessage(target.chatId, {
-      blocks: images ? [...(photos ? uploadedPhotos(media, photos) : media), ...blocks] : [blocks[0]!, ...imageFallback, ...blocks.slice(1)], skip_entity_detection: true,
-    }, { message_thread_id: target.threadId, disable_notification: silent }, telegramSignal(signal));
+    const deliver = (images: boolean, photos?: ReadonlyMap<string, Buffer>) => {
+      const omitted = images && !photos ? [] : imageLinks.filter(image => image.animation || !photos?.has(image.url));
+      const imageFallback: RichBlocks = omitted.length ? [
+        { type: 'paragraph', text: t('bot:rss.imagesUnavailable') },
+        { type: 'paragraph', text: omitted.flatMap<RichText>((image, index) => [
+          ...(index ? [' | '] : []), { type: 'url', text: image.label, url: image.url },
+        ]) },
+      ] : [];
+      return bot.api.sendRichMessage(target.chatId, {
+        blocks: [...(images ? photos ? uploadedPhotos(media, photos) : media : []), blocks[0]!, ...imageFallback, ...blocks.slice(1)], skip_entity_detection: true,
+      }, { message_thread_id: target.threadId, disable_notification: silent }, telegramSignal(signal));
+    };
     try {
       try { await deliver(true); }
       catch (error) {
         if (!(error instanceof GrammyError && error.error_code === 400 && media.length)) throw error;
-        if (staticPhotos.length && /failed to get http|wrong file identifier|(?:photo|image)_[a-z_]+|webpage_(?:curl_failed|media_empty)|file (?:is )?too (?:big|large)/i.test(error.description)) {
+        if (staticPhotos.length && /failed to get http|wrong type of the web page content|wrong file identifier|(?:photo|image)_[a-z_]+|webpage_(?:curl_failed|media_empty)|file (?:is )?too (?:big|large)/i.test(error.description)) {
           const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(PHOTO_REPAIR_TIMEOUT_MS)]);
           const photos = new Map<string, Buffer>();
           let sourceRemaining = RSS_PHOTO_MAX_SOURCE_BYTES * 2; let uploadBytes = 0;
           for (const image of staticPhotos) {
             if (repairSignal.aborted || sourceRemaining <= 0) break;
-            const allowance = Math.min(RSS_PHOTO_MAX_SOURCE_BYTES, sourceRemaining);
-            // Failed downloads keep their reservation, so unreported partial bytes cannot bypass the batch cap.
+            const allowance = Math.min(RSS_PHOTO_MAX_REPAIR_BYTES, sourceRemaining);
+            // Reserve the preparer's 8 MiB cap; failures keep it so unknown partial bytes cannot bypass 40 MiB.
             sourceRemaining -= allowance;
             try {
               const prepared = await prepare(image, repairSignal, allowance);

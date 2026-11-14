@@ -92,7 +92,8 @@ try {
   const identity = sent.at(-1)?.rich_message;
   assert.equal(identity?.skip_entity_detection, true);
   assert.ok(JSON.stringify(identity).includes('"type":"code","text":"12345"'));
-  assert.ok(JSON.stringify(identity).includes('"copy_text":{"text":"12345"}'));
+  assert.equal(JSON.stringify(identity).includes('"copy_text"'), false);
+  assert.equal(JSON.stringify(identity).includes('"type":"button"'), false);
   assert.equal(methods.has('getUpdates'), false);
   const local = await new LocalSandbox().probe();
   console.log(JSON.stringify({ runtimeStarted: true, pollingIsMocked: true, networkDisabled: true,

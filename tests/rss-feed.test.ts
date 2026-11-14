@@ -213,12 +213,23 @@ describe('Bounded RSS static-photo fetching', () => {
     expect(stream.destroyed).toBe(true);
   });
 
-  it.each([undefined, '', 'image/jpeg', 'image/png', 'image/webp', 'IMAGE/JPEG; charset=binary', 'application/octet-stream', 'binary/octet-stream', 'application/binary'])('accepts MIME %s and leaves magic validation to the preparer', async mime => {
+  it.each([undefined, '', 'image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/svg+xml', 'IMAGE/AVIF; charset=binary', 'IMAGE/SVG+XML; charset=utf-8', 'IMAGE/JPEG; charset=binary', 'application/octet-stream', 'binary/octet-stream', 'application/binary'])('accepts MIME %s and leaves content validation to the preparer', async mime => {
     const photo = photoSetup(async () => response(bytes, mime === undefined ? {} : { 'content-type': mime }));
     await expect(photo.fetch(photoUrl, new AbortController().signal)).resolves.toEqual(bytes);
   });
 
-  it.each(['text/html', 'image/svg+xml', 'image/gif', 'IMAGE/GIF; charset=binary', 'video/mp4', 'video/webm', 'image/avif', 'application/json', 'text/plain', 'application/pdf'])('rejects MIME %s without retaining the body', async mime => {
+  it.each(['image/avif', 'image/svg+xml'])('keeps byte and encoding restrictions for newly admitted MIME %s', async mime => {
+    const compressed = response(gzipSync(bytes), { 'content-type': mime, 'content-encoding': 'gzip' });
+    const photo = photoSetup(async () => compressed);
+    await expect(photo.fetch(photoUrl, new AbortController().signal)).rejects.toMatchObject({ code: 'INVALID_FEED' });
+    expect(compressed.body.destroyed).toBe(true);
+    const oversized = response(bytes, { 'content-type': mime, 'content-length': '1' });
+    photo.request.mockResolvedValueOnce(oversized);
+    await expect(photo.fetch(photoUrl, new AbortController().signal, bytes.length - 1)).rejects.toMatchObject({ code: 'TOO_LARGE' });
+    expect(oversized.body.destroyed).toBe(true);
+  });
+
+  it.each(['text/html', 'image/gif', 'IMAGE/GIF; charset=binary', 'video/mp4', 'video/webm', 'image/heic', 'image/avif-sequence', 'application/svg+xml', 'application/xml', 'application/json', 'text/plain', 'application/pdf'])('rejects MIME %s without retaining the body', async mime => {
     const reply = response('private response body', { 'content-type': mime });
     const photo = photoSetup(async () => reply);
     await expect(photo.fetch(photoUrl, new AbortController().signal)).rejects.toMatchObject({ code: 'INVALID_FEED', message: 'INVALID_FEED' });
@@ -272,7 +283,7 @@ describe('Bounded RSS static-photo fetching', () => {
     expect(redirect.body.destroyed).toBe(true);
     for (const [, options] of photo.request.mock.calls) {
       expect(options.addresses).toEqual([{ address: '8.8.8.8', family: 4 }]);
-      expect(options.headers).toEqual({ 'user-agent': 'MisakaRSS/0.1', accept: 'image/jpeg, image/png, image/webp, application/octet-stream;q=0.5', 'accept-encoding': 'identity' });
+      expect(options.headers).toEqual({ 'user-agent': 'MisakaRSS/0.1', accept: 'image/jpeg, image/png, image/webp, image/avif;q=0.9, image/svg+xml;q=0.8, application/octet-stream;q=0.5', 'accept-encoding': 'identity' });
     }
     expect(photo.request.mock.calls[0]![1].signal).toBe(photo.request.mock.calls[1]![1].signal);
     expect(photo.lookup).toHaveBeenCalledTimes(2);
@@ -504,6 +515,16 @@ describe('RSS and Atom parsing', () => {
 describe('RSS image extraction', () => {
   const wrap = (item: string) => `<rss xmlns:media="http://search.yahoo.com/mrss/" xmlns:content="urn:content"><channel><item>${item}</item></channel></rss>`;
   const body = (images: readonly string[]) => `<description><![CDATA[${images.map(image => `<img src="${image}">`).join('')}]]></description>`;
+
+  it.each(['html', 'enclosures'])('extracts appinn-shaped JPEG/AVIF and SVG %s sources as static photos', source => {
+    const images = ['jpg', 'avif', 'svg'].map(extension => `https://img3.appinn.com/static/wp-content/uploads/2026/11/sample.${extension}`);
+    const mime = ['image/jpeg', 'image/avif', 'image/svg+xml'];
+    const item = source === 'html' ? body(images) : images.map((image, index) => `<enclosure url="${image}" type="${mime[index]}"/>`).join('');
+    const entry = parseFeed(wrap(item), 'https://www.appinn.com/feed/').entries[0]!;
+    expect(entry.images).toEqual(images);
+    expect(entry.animationIndices).toEqual([]);
+    expect(entry.imagePositions).toEqual(source === 'html' ? images.map((_image, imageIndex) => ({ offset: 0, imageIndex })) : []);
+  });
 
   it.each([11, 51, 75, FEED_MAX_IMAGES])('retains all %i unique HTML images instead of capping at ten or fifty', count => {
     const images = Array.from({ length: count }, (_, index) => `https://images.example.com/${index}.jpg`);

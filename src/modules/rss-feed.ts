@@ -276,7 +276,7 @@ export function createRssPhotoFetcher(options: {
         const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await abortable((options.lookup ?? resolveFeedAddresses)(host, signal), signal);
         if (!addresses.length || addresses.some(address => !publicAddress(address.address))) throw new FeedFetchError('UNSAFE_URL');
         signal.throwIfAborted();
-        const headers = { 'user-agent': 'MisakaRSS/0.1', accept: 'image/jpeg, image/png, image/webp, application/octet-stream;q=0.5', 'accept-encoding': 'identity' };
+        const headers = { 'user-agent': 'MisakaRSS/0.1', accept: 'image/jpeg, image/png, image/webp, image/avif;q=0.9, image/svg+xml;q=0.8, application/octet-stream;q=0.5', 'accept-encoding': 'identity' };
         let received: FeedTransportResponse | undefined;
         const pending = Promise.resolve().then(() => {
           signal.throwIfAborted();
@@ -297,7 +297,7 @@ export function createRssPhotoFetcher(options: {
           if (response.status !== 200) throw new FeedFetchError(response.status === 401 || response.status === 403 ? 'BLOCKED' : 'HTTP_ERROR', response.status);
           if (Number(response.headers['content-length']) > maxBytes) throw new FeedFetchError('TOO_LARGE');
           const mime = (response.headers['content-type'] ?? '').split(';', 1)[0]!.trim().toLowerCase();
-          if (!['', 'image/jpeg', 'image/png', 'image/webp', 'application/octet-stream', 'binary/octet-stream', 'application/binary'].includes(mime)) throw new FeedFetchError('INVALID_FEED');
+          if (!['', 'image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/svg+xml', 'application/octet-stream', 'binary/octet-stream', 'application/binary'].includes(mime)) throw new FeedFetchError('INVALID_FEED');
           // Batch callers account returned bytes; forbid a differently sized compressed transfer.
           const encoding = response.headers['content-encoding']?.trim().toLowerCase();
           if (encoding && encoding !== 'identity') throw new FeedFetchError('INVALID_FEED');

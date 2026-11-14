@@ -3,7 +3,7 @@ import type { RichText } from 'grammy/types';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RSS_PHOTO_MAX_SOURCE_BYTES, parseFeed, type FeedEntry } from '../src/modules/rss-feed.js';
 import { clipFeedContentFormat, type FeedContentFormat } from '../src/modules/rss-format.js';
-import type { RssPhotoPreparer } from '../src/modules/rss-photo.js';
+import { RSS_PHOTO_MAX_REPAIR_BYTES, type RssPhotoPreparer } from '../src/modules/rss-photo.js';
 import { RSS_IMAGES_PER_MESSAGE, type RssPayload } from '../src/modules/rss.js';
 import { createRssSender } from '../src/telegram/rss.js';
 
@@ -195,15 +195,18 @@ describe('RSS Telegram publishing', () => {
     expect(messageBlocks(second)[0]).toMatchObject({ type: 'animation', animation: { media: images[50] } });
   });
 
-  it('retains native code and tables when rejected media falls back to original links', async () => {
-    const f = fixture(); f.fail(400);
-    const entry = parseFeed('<rss><channel><item><description><![CDATA[<pre>literal</pre><table><tr><th>A</th></tr><tr><td>B</td></tr></table><img src="https://example.com/photo.jpg">]]></description></item></channel></rss>', 'https://example.com/feed').entries[0]!;
+  it.each([false, true])('retains native code and tables with omitted-media links (partial repair=%s)', async repaired => {
+    const f = fixture(); f.fail(400, 1, 'Bad Request: Wrong type of the web page content');
+    if (repaired) f.prepare.mockResolvedValueOnce({ data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 });
+    const entry = parseFeed('<rss><channel><item><description><![CDATA[<pre>literal</pre><table><tr><th>A</th></tr><tr><td>B</td></tr></table><img src="https://example.com/photo.jpg"><img src="https://example.com/invalid.svg"><img src="https://example.com/motion.gif">]]></description></item></channel></rss>', 'https://example.com/feed').entries[0]!;
     expect(entry.contentFormat).toBeDefined();
     await f.send(target, 'Feed', { kind: 'entry', entry }, 'en', true, new AbortController().signal);
     expect(f.calls).toHaveLength(2);
     expect(nodes(messageBlocks(f, 1), 'pre')).toEqual(nodes(messageBlocks(f), 'pre'));
     expect(nodes(messageBlocks(f, 1), 'table')).toEqual(nodes(messageBlocks(f), 'table'));
-    expect(nodes(messageBlocks(f, 1), 'photo')).toEqual([]);
+    expect(messageBlocks(f, 1).filter(block => block.type === 'photo')).toHaveLength(repaired ? 1 : 0);
+    expect(nodes(messageBlocks(f, 1), 'animation')).toEqual([]);
+    for (const image of entry.images!) expect(nodes(messageBlocks(f, 1), 'url').map(node => node.url)).toContain(image);
   });
 
   it.each([
@@ -349,13 +352,13 @@ describe('RSS Telegram publishing', () => {
     expect(f.calls.every(call => call.body.disable_notification === true)).toBe(true);
     expect(f.prepare).not.toHaveBeenCalled();
   });
-  it.each(['Bad Request: failed to get HTTP URL content', 'Bad Request: PHOTO_INVALID_DIMENSIONS', 'Bad Request: file is too big'])('repairs a static image after %s and uploads it without changing original links', async description => {
+  it.each(['Bad Request: failed to get HTTP URL content', 'Bad Request: Wrong type of the web page content', 'Bad Request: PHOTO_INVALID_DIMENSIONS', 'Bad Request: file is too big'])('repairs a static image after %s and uploads it without changing original links', async description => {
     const f = fixture(); f.fail(400, 1, description);
     const url = 'https://images.example.com/original.jpg?signature=keep';
     f.prepare.mockResolvedValue({ data: Buffer.from('prepared-jpeg'), sourceBytes: 6_604_333 });
     await f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, content: 'AB', images: [url], imagePositions: [{ offset: 1, imageIndex: 0 }] } }, 'en', true, new AbortController().signal);
     expect(f.calls).toHaveLength(2);
-    expect(f.prepare).toHaveBeenCalledWith(url, expect.any(AbortSignal), RSS_PHOTO_MAX_SOURCE_BYTES);
+    expect(f.prepare).toHaveBeenCalledWith(url, expect.any(AbortSignal), RSS_PHOTO_MAX_REPAIR_BYTES);
     const uploaded = (f.rawCalls[1]!.body.rich_message as Parameters<Bot['api']['sendRichMessage']>[1]).blocks!;
     expect(uploaded[0]).toMatchObject({ type: 'photo', photo: { media: expect.any(InputFile) } });
     expect(JSON.stringify(messageBlocks(f, 1))).toContain(url);
@@ -363,17 +366,23 @@ describe('RSS Telegram publishing', () => {
     expect(JSON.stringify(messageBlocks(f, 1))).not.toContain('Images could not be embedded');
     expect(f.calls.every(call => call.body.disable_notification === true)).toBe(true);
   });
-  it('repairs only static media in a mixed slideshow, leaving animations intact', async () => {
+  it('retries only a successfully repaired photo, replacing failed images and animations with original links', async () => {
     const f = fixture(); f.fail(400, 1, 'Bad Request: failed to get HTTP URL content');
-    const images = ['https://example.com/photo.jpg', 'https://example.com/motion.gif'];
-    f.prepare.mockResolvedValue({ data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 });
-    await f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, images, animationIndices: [1] } }, 'en', true, new AbortController().signal);
-    expect(f.prepare.mock.calls.map(call => call[0])).toEqual([images[0]]);
+    const images = ['https://example.com/invalid.svg?b=2&a=1', 'https://example.com/photo.jpg', 'https://example.com/motion.gif'];
+    f.prepare.mockRejectedValueOnce(new Error('invalid image')).mockResolvedValue({ data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 });
+    await f.send(target, '<b>Feed @admin</b>', { ...payload, entry: { ...payload.entry, images, animationIndices: [2] } }, 'en', true, new AbortController().signal);
+    expect(f.prepare.mock.calls.map(call => call[0])).toEqual(images.slice(0, 2));
     const uploaded = (f.rawCalls[1]!.body.rich_message as Parameters<Bot['api']['sendRichMessage']>[1]).blocks!;
-    expect(uploaded[0]).toMatchObject({ type: 'slideshow', blocks: [
-      { type: 'photo', photo: { media: expect.any(InputFile) } },
-      { type: 'animation', animation: { type: 'animation', media: images[1] } },
+    expect(uploaded[0]).toMatchObject({ type: 'photo', photo: { media: expect.any(InputFile) } });
+    expect(nodes(uploaded, 'slideshow')).toEqual([]);
+    expect(nodes(uploaded, 'animation')).toEqual([]);
+    expect(messageBlocks(f, 1)).toContainEqual({ type: 'paragraph', text: [
+      { type: 'url', text: 'Image 1', url: images[0] }, ' | ', { type: 'url', text: 'Animation 3', url: images[2] },
     ] });
+    expect(messageBlocks(f, 1).slice(4)).toEqual(messageBlocks(f).slice(2));
+    expect(f.calls.every(call => call.body.disable_notification === true && call.body.message_thread_id === target.threadId)).toBe(true);
+    expect(f.calls.every(call => (call.body.rich_message as { skip_entity_detection: boolean }).skip_entity_detection)).toBe(true);
+    expect(f.calls).toHaveLength(2);
   });
   it('keeps original links when preparation fails or the prepared upload is definitely rejected', async () => {
     for (const repaired of [false, true]) {
@@ -386,11 +395,23 @@ describe('RSS Telegram publishing', () => {
       expect(JSON.stringify(messageBlocks(f, f.calls.length - 1))).not.toContain('"type":"photo"');
     }
   });
-  it.each([['network', 'UNKNOWN'], [429, 'RATE_LIMITED'], [403, 'BLOCKED']] as const)('does not resend after an uploaded-photo %s outcome', async (code, expected) => {
+  it.each([['network', 'UNKNOWN'], [500, 'UNKNOWN'], [429, 'RATE_LIMITED'], [403, 'BLOCKED']] as const)('does not resend after a partial uploaded-photo %s outcome', async (code, expected) => {
     const f = fixture(); f.fail(400, 1, 'Bad Request: failed to get HTTP URL content');
-    f.prepare.mockImplementation(async () => { f.fail(code); return { data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 }; });
-    await expect(f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, image: 'https://example.com/photo.jpg' } }, 'en', true, new AbortController().signal)).rejects.toMatchObject({ code: expected });
+    f.prepare.mockRejectedValueOnce(new Error('invalid image')).mockImplementation(async () => { f.fail(code); return { data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 }; });
+    await expect(f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, images: ['https://example.com/bad.svg', 'https://example.com/photo.jpg'] } }, 'en', true, new AbortController().signal)).rejects.toMatchObject({ code: expected });
     expect(f.calls).toHaveLength(2);
+  });
+  it('stops after three definite 400 rejections, including the all-image link fallback', async () => {
+    const f = fixture(); f.fail(400, 3, 'Bad Request: Wrong type of the web page content');
+    const images = ['https://example.com/bad.svg', 'https://example.com/photo.jpg', 'https://example.com/motion.gif'];
+    f.prepare.mockRejectedValueOnce(new Error('invalid image')).mockResolvedValue({ data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 });
+    await expect(f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, images } }, 'en', true, new AbortController().signal)).rejects.toMatchObject({ code: 'REJECTED' });
+    expect(f.calls).toHaveLength(3);
+    expect(nodes(messageBlocks(f, 2), 'photo')).toEqual([]);
+    expect(nodes(messageBlocks(f, 2), 'slideshow')).toEqual([]);
+    expect(nodes(messageBlocks(f, 2), 'animation')).toEqual([]);
+    expect(nodes(messageBlocks(f, 2), 'url').map(node => node.url)).toEqual(images);
+    expect(f.health.recordApiError).toHaveBeenCalledExactlyOnceWith('TELEGRAM_400');
   });
   it('makes no further Telegram request after cancellation during photo preparation', async () => {
     const f = fixture(); const controller = new AbortController();
@@ -399,14 +420,49 @@ describe('RSS Telegram publishing', () => {
     await expect(f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, image: 'https://example.com/photo.jpg' } }, 'en', true, controller.signal)).rejects.toMatchObject({ code: 'UNKNOWN' });
     expect(f.calls).toHaveLength(1);
   });
+  it('stops preparing at the batch deadline while preserving already repaired photos in one retry', async () => {
+    const f = fixture(); f.fail(400, 1, 'Bad Request: PHOTO_INVALID_DIMENSIONS');
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    try {
+      f.prepare.mockResolvedValueOnce({ data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 })
+        .mockImplementationOnce(async () => { deadline.abort(); throw new Error('batch timeout'); });
+      const images = Array.from({ length: 3 }, (_, index) => `https://example.com/${index}.jpg`);
+      await f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, images } }, 'en', true, new AbortController().signal);
+      expect(timeout).toHaveBeenCalledExactlyOnceWith(20_000);
+      expect(f.prepare).toHaveBeenCalledTimes(2);
+      expect(f.calls).toHaveLength(2);
+      expect(messageBlocks(f, 1)[0]?.type).toBe('photo');
+      expect(nodes(messageBlocks(f, 1), 'url').map(node => node.url)).toEqual(images.slice(1));
+    } finally { timeout.mockRestore(); }
+  });
   it('keeps byte reservations for failed preparations instead of retrying an unbounded set', async () => {
     const f = fixture(); f.fail(400, 1, 'Bad Request: failed to get HTTP URL content');
-    const images = Array.from({ length: 3 }, (_, index) => `https://example.com/${index}.jpg`);
+    const images = Array.from({ length: RSS_IMAGES_PER_MESSAGE }, (_, index) => `https://example.com/${index}.jpg`);
     await f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, images } }, 'en', true, new AbortController().signal);
-    expect(f.prepare).toHaveBeenCalledTimes(2);
-    expect(f.prepare.mock.calls.map(call => call[2])).toEqual([RSS_PHOTO_MAX_SOURCE_BYTES, RSS_PHOTO_MAX_SOURCE_BYTES]);
+    expect(f.prepare).toHaveBeenCalledTimes(5);
+    expect(f.prepare.mock.calls.map(call => call[2])).toEqual(Array(5).fill(RSS_PHOTO_MAX_REPAIR_BYTES));
+    expect(f.prepare.mock.calls.reduce((bytes, call) => bytes + call[2]!, 0)).toBe(RSS_PHOTO_MAX_SOURCE_BYTES * 2);
     expect(f.calls).toHaveLength(2);
+    expect(nodes(messageBlocks(f, 1), 'slideshow')).toEqual([]);
+    expect(nodes(messageBlocks(f, 1), 'photo')).toEqual([]);
     for (const image of images) expect(JSON.stringify(messageBlocks(f, 1))).toContain(image);
+  });
+  it('recovers a later good photo after four unknown failures without exceeding 40 MiB', async () => {
+    const f = fixture(); f.fail(400, 1, 'Bad Request: Wrong type of the web page content');
+    const images = Array.from({ length: 8 }, (_, index) => `https://example.com/${index}.jpg`);
+    for (let index = 0; index < 4; index++) f.prepare.mockRejectedValueOnce(new Error('unknown partial download'));
+    f.prepare.mockResolvedValueOnce({ data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 });
+    await f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, images } }, 'en', true, new AbortController().signal);
+    expect(f.prepare.mock.calls.map(call => call[2])).toEqual([
+      ...Array<number>(5).fill(RSS_PHOTO_MAX_REPAIR_BYTES), RSS_PHOTO_MAX_REPAIR_BYTES - 1024,
+    ]);
+    const chargedBytes = f.prepare.mock.calls.reduce((bytes, call, index) => bytes + (index === 4 ? 1024 : call[2]!), 0);
+    expect(chargedBytes).toBe(40 * 1024 * 1024);
+    expect(f.calls).toHaveLength(2);
+    const uploaded = (f.rawCalls[1]!.body.rich_message as Parameters<Bot['api']['sendRichMessage']>[1]).blocks!;
+    expect(uploaded[0]).toMatchObject({ type: 'photo', photo: { media: expect.any(InputFile) } });
+    expect(nodes(messageBlocks(f, 1), 'url').map(node => node.url)).toEqual(images.filter((_image, index) => index !== 4));
   });
   it('refunds unused preparation allowance for small successful photos', async () => {
     const f = fixture(); f.fail(400, 1, 'Bad Request: failed to get HTTP URL content');
@@ -420,12 +476,12 @@ describe('RSS Telegram publishing', () => {
     const f = fixture(); f.fail(400, 1, 'Bad Request: failed to get HTTP URL content');
     f.prepare.mockRejectedValueOnce(new Error('partial download failed'))
       .mockResolvedValue({ data: Buffer.from('prepared-jpeg'), sourceBytes: 5 * 1024 * 1024 });
-    const images = Array.from({ length: 6 }, (_, index) => `https://example.com/${index}.jpg`);
+    const images = Array.from({ length: 9 }, (_, index) => `https://example.com/${index}.jpg`);
     await f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, images } }, 'en', true, new AbortController().signal);
-    expect(f.prepare.mock.calls.map(call => call[2])).toEqual([20, 20, 15, 10, 5].map(size => size * 1024 * 1024));
+    expect(f.prepare.mock.calls.map(call => call[2])).toEqual([8, 8, 8, 8, 8, 8, 7, 2].map(size => size * 1024 * 1024));
     expect(f.calls).toHaveLength(2);
   });
-  it('limits attached preview bytes without discarding unprepared original media', async () => {
+  it('limits attached previews to 20 MiB and retains omitted media as original links only', async () => {
     const f = fixture(); f.fail(400, 1, 'Bad Request: failed to get HTTP URL content');
     f.prepare.mockResolvedValue({ data: Buffer.alloc(10 * 1024 * 1024), sourceBytes: 1024 });
     const images = ['https://example.com/one.jpg', 'https://example.com/two.jpg', 'https://example.com/three.jpg'];
@@ -434,17 +490,22 @@ describe('RSS Telegram publishing', () => {
     expect(uploaded[0]).toMatchObject({ type: 'slideshow', blocks: [
       { type: 'photo', photo: { media: expect.any(InputFile) } },
       { type: 'photo', photo: { media: expect.any(InputFile) } },
-      { type: 'photo', photo: { media: images[2] } },
     ] });
+    expect(messageBlocks(f, 1)).toContainEqual({ type: 'paragraph', text: [{ type: 'url', text: 'Image 3', url: images[2] }] });
     expect(f.calls).toHaveLength(2);
   });
   it('repairs only the selected later page while keeping global media numbering', async () => {
     const f = fixture(); f.fail(400, 1, 'Bad Request: failed to get HTTP URL content');
-    f.prepare.mockResolvedValue({ data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 });
-    const images = Array.from({ length: 51 }, (_, index) => `https://example.com/${index + 1}.jpg`);
+    f.prepare.mockRejectedValueOnce(new Error('invalid image')).mockResolvedValue({ data: Buffer.from('prepared-jpeg'), sourceBytes: 1024 });
+    const images = Array.from({ length: 53 }, (_, index) => `https://example.com/${index + 1}.${index === 52 ? 'gif' : 'jpg'}`);
     await f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, images }, part: { index: 2, total: 2 } }, 'en', true, new AbortController().signal);
-    expect(f.prepare.mock.calls.map(call => call[0])).toEqual([images[50]]);
+    expect(f.prepare.mock.calls.map(call => call[0])).toEqual(images.slice(50, 52));
     expect(messageBlocks(f, 1)).toContainEqual({ type: 'paragraph', text: 'Images, part 2/2' });
+    expect(messageBlocks(f, 1)).toContainEqual({ type: 'paragraph', text: [
+      { type: 'url', text: 'Image 51', url: images[50] }, ' | ', { type: 'url', text: 'Animation 53', url: images[52] },
+    ] });
+    expect(messageBlocks(f, 1)[0]?.type).toBe('photo');
+    expect(nodes(messageBlocks(f, 1), 'url').map(node => node.url)).toEqual([images[50], images[52]]);
     expect(JSON.stringify(messageBlocks(f, 1))).not.toContain('content content');
     expect(f.calls).toHaveLength(2);
   });
@@ -472,6 +533,16 @@ describe('RSS Telegram publishing', () => {
     ] });
     expect(entry.content).toBe('正文');
     expect(JSON.stringify(f.calls)).not.toContain('127.0.0.1');
+  });
+  it('publishes appinn-shaped JPEG, AVIF and SVG URLs as static photos before any repair', async () => {
+    const f = fixture();
+    const images = ['jpg', 'avif', 'svg'].map(extension => `https://img3.appinn.com/static/wp-content/uploads/2026/11/sample.${extension}`);
+    const html = images.map(image => `<img src="${image}" width="80" height="40">`).join('');
+    const entry = parseFeed(`<rss><channel><item><description><![CDATA[${html}]]></description></item></channel></rss>`, 'https://www.appinn.com/feed/').entries[0]!;
+    await f.send(target, 'Feed', { kind: 'entry', entry }, 'en', true, new AbortController().signal);
+    expect(messageBlocks(f)[0]).toEqual({ type: 'slideshow', blocks: images.map(media => ({ type: 'photo', photo: { type: 'photo', media } })) });
+    expect(f.calls).toHaveLength(1);
+    expect(f.prepare).not.toHaveBeenCalled();
   });
   it.each([1, 2, 10, 50])('includes all %s photos in one message with the title below the media', async count => {
     const f = fixture();
@@ -513,10 +584,11 @@ describe('RSS Telegram publishing', () => {
     expect(JSON.stringify(f.calls[1]!.body)).not.toContain('"type":"slideshow"');
     expect(JSON.stringify(f.calls[1]!.body)).not.toContain('"type":"photo"');
   });
-  it.each([['network', 'UNKNOWN'], [429, 'RATE_LIMITED'], [403, 'BLOCKED']] as const)('never retries a gallery after %s', async (code, expected) => {
-    const f = fixture(); f.fail(code);
+  it.each([['network', 'UNKNOWN'], [500, 'UNKNOWN'], [429, 'RATE_LIMITED'], [403, 'BLOCKED']] as const)('never retries a gallery after %s', async (code, expected) => {
+    const f = fixture(); f.fail(code, 1, 'Bad Request: Wrong type of the web page content');
     await expect(f.send(target, 'Feed', { ...payload, entry: { ...payload.entry, images: ['https://example.com/1.jpg', 'https://example.com/2.jpg'] } }, 'en', true, new AbortController().signal)).rejects.toMatchObject({ code: expected });
     expect(f.calls).toHaveLength(1);
+    expect(f.prepare).not.toHaveBeenCalled();
   });
   it('rejects an unsafe persisted image URL before attempting delivery', async () => {
     const f = fixture();

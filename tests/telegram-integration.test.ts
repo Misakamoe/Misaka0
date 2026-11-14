@@ -588,6 +588,8 @@ describe('Telegram with real Actions and persistent services', () => {
   const inputFields = { alias: 'aliasInput', rss: 'rssInput', weather: 'weatherInput', subconv: 'subconvInput' } as const;
   const inputKinds = ['alias', 'rss', 'weather', 'subconv'] as const;
   const values = { alias: 'isolated_alias', rss: 'https://feeds.example.com/isolated Isolated feed', weather: '北京海淀区', subconv: 'https://convert.example/sub' };
+  const keyboardRemovals = (f: Awaited<ReturnType<typeof fixture>>) => f.sent()
+    .filter(call => (call.payload.reply_markup as { remove_keyboard?: boolean } | undefined)?.remove_keyboard);
   function availableAi() {
     return { available: vi.fn(() => true), capture: vi.fn<AiTelegramPort['capture']>(async () => 'offline-file'),
       isReply: vi.fn(() => false), attachTelegram: vi.fn<AiTelegramPort['attachTelegram']>() } satisfies AiTelegramPort;
@@ -647,10 +649,105 @@ describe('Telegram with real Actions and persistent services', () => {
     if (kind === 'subconv') expect(f.subconv.settings(createInvocation({ actorId: 1, botId: me.id, source: 'telegram',
       chat: { id: 1, type: 'private', threadId: 9 }, language: 'en' })).settings.backend).toBe(values.subconv);
     expect(ai.capture).not.toHaveBeenCalled(); expect(ai.available).not.toHaveBeenCalled();
+    expect(keyboardRemovals(f)).toHaveLength(kind === 'subconv' ? 1 : 0);
     execute.mockClear();
     await f.bot.handleUpdate(formReply(values[kind], form.prompts[kind], 1, 1, 9));
     expect(execute).not.toHaveBeenCalled();
     expect(f.adapter.sessions.get(form.key)?.[inputFields[kind]]).toBeUndefined();
+  });
+
+  it('dismisses each completed ForceReply with a selective acknowledgment without clearing older forms', async () => {
+    const providers = lookupProviders();
+    const f = await fixture({ fetcher: async url => ({ finalUrl: url, notModified: false, feed: { title: 'Feed', entries: [] } }) }, undefined, providers);
+    const form = await waitingForms(f);
+    for (const kind of inputKinds.toReversed()) {
+      const before = f.adapter.sessions.get(form.key)!;
+      const update = formReply(values[kind], form.prompts[kind], 1, 1, 9);
+      await f.bot.handleUpdate(update);
+      expect(f.sent().at(-1)).toMatchObject({ method: 'sendRichMessage', payload: {
+        chat_id: 1, message_thread_id: 9, reply_parameters: { message_id: update.message!.message_id },
+        reply_markup: { remove_keyboard: true, selective: true },
+      } });
+      expect(richText(f.last(1, 9))).toBe(translator('en')('bot:inputClosed'));
+      expect(f.adapter.sessions.get(form.key)?.[inputFields[kind]]).toBeUndefined();
+      for (const other of inputKinds.filter(other => other !== kind)) {
+        expect(f.adapter.sessions.get(form.key)?.[inputFields[other]]).toEqual(before[inputFields[other]]);
+      }
+    }
+    expect(keyboardRemovals(f)).toHaveLength(4);
+  });
+
+  it('does not dismiss a retained invalid subconv input before a corrected reply', async () => {
+    const f = await fixture({}, undefined, lookupProviders());
+    const form = await waitingForms(f);
+    await f.bot.handleUpdate(formReply('not a backend URL', form.prompts.subconv, 1, 1, 9));
+    expect(f.adapter.sessions.get(form.key)).toEqual(form.pending);
+    expect(keyboardRemovals(f)).toHaveLength(0);
+    await f.bot.handleUpdate(formReply(values.subconv, form.prompts.subconv, 1, 1, 9));
+    expect(f.adapter.sessions.get(form.key)?.subconvInput).toBeUndefined();
+    expect(keyboardRemovals(f)).toHaveLength(1);
+  });
+
+  it('does not dismiss the replacement weather ForceReply after an empty search', async () => {
+    const providers = lookupProviders(); const f = await fixture({}, undefined, providers);
+    await f.bot.handleUpdate(text('/weather', 10, 10, 9)); const original = f.last(10, 9);
+    providers.weatherJson.mockResolvedValueOnce({ code: '200', location: [] });
+    await f.bot.handleUpdate(formReply('unknown city', original, 10, 10, 9));
+    const replacement = f.last(10, 9);
+    expect(replacement.message_id).not.toBe(original.message_id);
+    expect(replacement.reply_markup).toMatchObject({ force_reply: true, selective: true });
+    expect(f.adapter.sessions.get(`${me.id}:10:10:9`)?.weatherInput?.promptMessageId).toBe(replacement.message_id);
+    expect(keyboardRemovals(f)).toHaveLength(0);
+    await f.bot.handleUpdate(formReply(values.weather, replacement, 10, 10, 9));
+    expect(keyboardRemovals(f)).toHaveLength(1);
+  });
+
+  it('targets group keyboard removal to the actual replying user and topic', async () => {
+    const f = await fixture({}, undefined, lookupProviders());
+    await f.access.authorize(-100, 'Group', 1, 0);
+    await f.bot.handleUpdate(text('/weather', 10, -100, 9)); const prompt = f.last(-100, 9);
+    await f.bot.handleUpdate(text('/weather', 11, -100, 9));
+    await f.bot.handleUpdate(text('/weather', 10, -100, 10));
+    const otherUser = f.adapter.sessions.get(`${me.id}:-100:11:9`);
+    const otherTopic = f.adapter.sessions.get(`${me.id}:-100:10:10`);
+    const update = formReply(values.weather, prompt, 10, -100, 9);
+    await f.bot.handleUpdate(update);
+    expect(keyboardRemovals(f)).toHaveLength(1);
+    expect(keyboardRemovals(f)[0]!.payload).toMatchObject({ chat_id: -100, message_thread_id: 9,
+      reply_parameters: { message_id: update.message!.message_id }, reply_markup: { remove_keyboard: true, selective: true } });
+    expect(f.adapter.sessions.get(`${me.id}:-100:10:9`)).toBeUndefined();
+    expect(f.adapter.sessions.get(`${me.id}:-100:11:9`)).toEqual(otherUser);
+    expect(f.adapter.sessions.get(`${me.id}:-100:10:10`)).toEqual(otherTopic);
+  });
+
+  it('does not replay a saved input when reply-keyboard cleanup fails', async () => {
+    const f = await fixture(); const pane = await aliasInput(f, 9); const prompt = f.last(1, 9);
+    const execute = vi.spyOn(f.executor, 'execute');
+    f.fail(call => (call.payload.reply_markup as { remove_keyboard?: boolean } | undefined)?.remove_keyboard === true);
+    const update = formReply('cleanup_safe_alias', prompt, 1, 1, 9);
+    await f.bot.handleUpdate(update);
+    expect(f.aliases.resolve('cleanup_safe_alias')).toBe('help');
+    expect(richText(pane)).toContain('cleanup_safe_alias');
+    expect(f.adapter.sessions.get(`${me.id}:1:1:9`)).toBeUndefined();
+    expect(keyboardRemovals(f)).toHaveLength(1);
+    expect(f.health.recordApiError).toHaveBeenCalledOnce();
+    await f.bot.handleUpdate(update);
+    expect(execute.mock.calls.filter(call => call[1] === 'alias.add')).toHaveLength(1);
+    expect(f.aliases.snapshot().revision).toBe(1);
+    expect(keyboardRemovals(f)).toHaveLength(1);
+  });
+
+  it.each([false, true])('dismisses ForceReply on /cancel even when its input has expired: %s', async expired => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const f = await fixture(); await aliasInput(f, 9);
+    if (expired) await vi.advanceTimersByTimeAsync(600_001);
+    const update = text('/cancel', 1, 1, 9);
+    await f.bot.handleUpdate(update);
+    expect(keyboardRemovals(f)).toHaveLength(1);
+    expect(f.sent().at(-1)!.payload).toMatchObject({ chat_id: 1, message_thread_id: 9,
+      reply_parameters: { message_id: update.message!.message_id }, reply_markup: { remove_keyboard: true, selective: true } });
+    expect(richText(f.last(1, 9))).toBe(translator('en')('bot:cancelled'));
+    expect(f.adapter.sessions.get(`${me.id}:1:1:9`)).toBeUndefined();
   });
 
   it('does not treat bare values as any waiting form input or leak them to available AI', async () => {
@@ -692,6 +789,7 @@ describe('Telegram with real Actions and persistent services', () => {
     }
     expect(execute).not.toHaveBeenCalled(); expect(ai.capture).not.toHaveBeenCalled(); expect(ai.available).not.toHaveBeenCalled();
     expect(fetcher).not.toHaveBeenCalled(); expect(providers.weatherJson).not.toHaveBeenCalled();
+    expect(keyboardRemovals(f)).toHaveLength(0);
   });
 
   it.each(inputKinds)('keeps captioned and non-text attachments out of AI, stickers and weather while %s waits', async kind => {
@@ -1155,7 +1253,8 @@ describe('Telegram with real Actions and persistent services', () => {
     await f.bot.handleUpdate(f.click('rssremove', pane, 10));
     expect(f.rss.list({ kind: 'private', chatId: 10, threadId: 9 }).total).toBe(0);
     expect(richText(pane)).toContain('Unsubscribed');
-    expect(f.calls.filter(call => call.method === 'sendRichMessage' && call.payload.chat_id === 10)).toHaveLength(2);
+    expect(f.calls.filter(call => call.method === 'sendRichMessage' && call.payload.chat_id === 10)).toHaveLength(3);
+    expect(keyboardRemovals(f)).toHaveLength(1);
   });
 
   it.each(['zh-CN', 'zh-TW', 'en', 'ja'] as const)('edits and clears RSS keyword lists through dedicated native prompts in %s', async locale => {
@@ -1177,8 +1276,12 @@ describe('Telegram with real Actions and persistent services', () => {
     await handle(text('Not a filter input', 10, 10, 9));
     await handle(formReply('Wrong prompt', pane, 10, 10, 9));
     expect(f.rss.list(target).items[0]?.filters).toBeUndefined();
-    await handle(formReply(' NASA \n\n宇宙\n[a-z]+', includePrompt, 10, 10, 9));
+    const input = formReply(' NASA \n\n宇宙\n[a-z]+', includePrompt, 10, 10, 9);
+    await handle(input);
     expect(f.rss.list(target).items[0]).toMatchObject({ revision: 1, filters: { include: ['NASA', '宇宙', '[a-z]+'], exclude: [] } });
+    expect(f.sent().at(-1)!.payload).toMatchObject({ reply_parameters: { message_id: input.message!.message_id },
+      reply_markup: { remove_keyboard: true, selective: true } });
+    expect(richText(f.last(10, 9))).toBe(translator(locale)('bot:inputClosed'));
     expect(pane.rich_message).toMatchObject({ skip_entity_detection: true });
     expect(richText(pane)).toContain('[a-z]+');
     await handle(f.click('rssexclude', pane, 10));
@@ -1305,7 +1408,9 @@ describe('Telegram with real Actions and persistent services', () => {
     expect(fetcher).not.toHaveBeenCalled();
     expect(f.rss.snapshot().subscriptions).toEqual([]);
     expectClosed(pane, 'r', 10);
-    expect(richText(f.last(-100, 9))).toMatch(/permission/i);
+    expect(richText(f.messages.at(-2)!)).toMatch(/permission/i);
+    expect(keyboardRemovals(f)).toHaveLength(1);
+    expect(richText(f.last(-100, 9))).toBe(translator('en')('bot:inputClosed'));
   });
 
   it('does not let RSS controls cross users, topics or subscription revisions', async () => {

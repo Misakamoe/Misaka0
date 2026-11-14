@@ -21,7 +21,7 @@ function fixture(resources?: Pick<ResourcePolicy, 'tryAcquire'>) {
   const sendRichMessage = vi.fn<Bot['api']['sendRichMessage']>().mockResolvedValue({} as never);
   const bot = { api: { sendRichMessage } } as unknown as Bot;
   const send = createRssSender(bot, { resources });
-  return { sendRichMessage, send: () => send({ chatId: -100, kind: 'group', threadId: 9 }, '<b>Source @admin</b>', payload, 'en', true, new AbortController().signal) };
+  return { sendRichMessage, send: (input = payload, signal = new AbortController().signal) => send({ chatId: -100, kind: 'group', threadId: 9 }, '<b>Source @admin</b>', input, 'en', true, signal) };
 }
 const photo = () => sharp({ create: { width: 20, height: 10, channels: 3, background: '#204080' } }).png().toBuffer();
 
@@ -42,6 +42,48 @@ describe('RSS sender default photo repair', () => {
     expect(fetchRssPhoto).toHaveBeenCalledWith(images[0], expect.any(AbortSignal), RSS_PHOTO_MAX_REPAIR_BYTES);
     expect(f.sendRichMessage.mock.calls[0]![1].blocks?.[0]).toMatchObject({ type: 'slideshow', blocks: images.map(media => ({ type: 'photo', photo: { media } })) });
     expect(f.sendRichMessage.mock.calls[1]![1].blocks?.[0]).toMatchObject({ type: 'slideshow', blocks: images.map(() => ({ type: 'photo', photo: { media: expect.any(InputFile) } })) });
+  });
+
+  it('repairs an ordinary JPEG after the wrong-web-content 400 response', async () => {
+    const data = await sharp({ create: { width: 804, height: 350, channels: 3, background: '#204080' } }).jpeg().toBuffer();
+    vi.mocked(fetchRssPhoto).mockResolvedValue(data);
+    const f = fixture();
+    f.sendRichMessage.mockRejectedValueOnce(new GrammyError('Offline photo rejection', {
+      ok: false, error_code: 400, description: 'Bad Request: Wrong type of the web page content',
+    }, 'sendRichMessage', {}));
+    await f.send({ kind: 'entry', entry: { ...payload.entry, images: [images[0]!] } });
+    expect(f.sendRichMessage).toHaveBeenCalledTimes(2);
+    expect(fetchRssPhoto).toHaveBeenCalledExactlyOnceWith(images[0], expect.any(AbortSignal), RSS_PHOTO_MAX_REPAIR_BYTES);
+    expect(fork).toHaveBeenCalledOnce();
+    expect(f.sendRichMessage.mock.calls[1]![1].blocks?.[0]).toMatchObject({ type: 'photo', photo: { media: expect.any(InputFile) } });
+  });
+
+  it('does not let invalid bytes or an animation poison a valid repaired photo', async () => {
+    vi.mocked(fetchRssPhoto).mockResolvedValueOnce(Buffer.from('invalid image')).mockResolvedValueOnce(await photo());
+    const f = fixture(); f.sendRichMessage.mockRejectedValueOnce(rejected());
+    const animation = 'https://images.example.com/motion.gif';
+    await f.send({ kind: 'entry', entry: { ...payload.entry, images: [...images, animation], animationIndices: [2] } });
+    expect(fetchRssPhoto).toHaveBeenCalledTimes(2);
+    expect(fork).toHaveBeenCalledOnce();
+    expect(f.sendRichMessage).toHaveBeenCalledTimes(2);
+    const uploaded = f.sendRichMessage.mock.calls[1]![1];
+    expect(uploaded.blocks?.[0]).toMatchObject({ type: 'photo', photo: { media: expect.any(InputFile) } });
+    expect(uploaded.blocks?.some(block => block.type === 'animation' || block.type === 'slideshow')).toBe(false);
+    expect(uploaded.blocks).toContainEqual({ type: 'paragraph', text: [
+      { type: 'url', text: 'Image 1', url: images[0] }, ' | ', { type: 'url', text: 'Animation 3', url: animation },
+    ] });
+    expect(uploaded.skip_entity_detection).toBe(true);
+  });
+
+  it('never sends a fallback after cancellation during the repaired upload', async () => {
+    vi.mocked(fetchRssPhoto).mockResolvedValue(await photo());
+    const f = fixture(); const controller = new AbortController();
+    f.sendRichMessage.mockRejectedValueOnce(rejected()).mockImplementationOnce(async () => {
+      controller.abort(); throw new Error('Cancelled after possible delivery');
+    });
+    await expect(f.send({ kind: 'entry', entry: { ...payload.entry, images: [images[0]!] } }, controller.signal)).rejects.toMatchObject({ code: 'UNKNOWN' });
+    expect(f.sendRichMessage).toHaveBeenCalledTimes(2);
+    expect(fetchRssPhoto).toHaveBeenCalledOnce();
   });
 
   it('shares the injected heavy lane and preserves literal original links while it is busy', async () => {

@@ -1,5 +1,5 @@
 import { Bot, Context, GrammyError, InlineKeyboard } from 'grammy';
-import type { ChatMember, InputRichMessage, Message, MessageEntity, RichMessageButton, RichText } from 'grammy/types';
+import type { ChatMember, InputRichMessage, Message, MessageEntity, ReplyKeyboardRemove, RichMessageButton, RichText } from 'grammy/types';
 import { sequentialize } from '@grammyjs/runner';
 import { languagePreferences, supportedLocales } from '../../shared/schemas/index.js';
 import { aliasNameSchema, type AliasSnapshot, type AliasMutationResult } from '../../shared/schemas/alias.js';
@@ -371,12 +371,12 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
     });
   }
 
-  async function send(ctx: Context, text: string, keyboard?: InlineKeyboard, entities?: MessageEntity[]): Promise<void> {
+  async function send(ctx: Context, text: string, keyboard?: InlineKeyboard | ReplyKeyboardRemove, entities?: MessageEntity[]): Promise<void> {
     const message = supportedMessage(ctx);
     if (!message) return;
     if (text.length > 4096) { text = translator(languageOf(ctx))('bot:outputTooLong'); entities = undefined; }
     if (keyboard) {
-      const rows = richButtonRows(keyboard);
+      const rows = 'inline_keyboard' in keyboard ? richButtonRows(keyboard) : undefined;
       await call(() => bot.api.sendRichMessage(message.chat.id, panelContent(text, entities, rows), {
         message_thread_id: messageTopicId(message), reply_markup: rows === undefined ? keyboard : { inline_keyboard: [] },
         reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
@@ -1480,8 +1480,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
         const row = (label: string, value: RichText) => { content.push('\n', `${t(`bot:idInfo.${label}`)} `, value); };
         const id = (label: string, value: number | undefined, missing = t('bot:idInfo.unavailable')) => {
           if (value === undefined || !Number.isSafeInteger(value) || value === 0) { row(label, missing); return; }
-          const text = String(value);
-          row(label, [{ type: 'code', text }, ' ', { type: 'button', button: { text: t('bot:idInfo.copy'), copy_text: { text } } }]);
+          row(label, { type: 'code', text: String(value) });
         };
         if (sender) {
           row('name', plainValue(sender.type === 'private' ? [sender.first_name, sender.last_name].filter(Boolean).join(' ') : sender.title, 128));
@@ -1519,7 +1518,7 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
           return panel.value.kind !== 'approval';
         });
         await Promise.all([closed, aiCancelled, relay.cancel(ctx), ...(privateChat ? [executor.execute(invocation(ctx), 'sticker.cancel', {})] : [])]);
-        await send(ctx, t('bot:cancelled')); return;
+        await send(ctx, t('bot:cancelled'), { remove_keyboard: true, selective: true }); return;
       }
       case 'stats': {
         const status = await resultData(ctx, await executor.execute<RuntimeStatus>(invocation(ctx), 'core.status', {}));
@@ -1814,10 +1813,19 @@ export function createTelegramAdapter(bot: Bot, deps: TelegramDependencies) {
       const replyId = message.reply_to_message?.message_id;
       const field = replyId === undefined ? undefined : (['aliasInput', 'rssInput', 'weatherInput', 'subconvInput'] as const)
         .find(field => waiting?.[field]?.promptMessageId === replyId);
-      if (field) {
+      if (field && replyId !== undefined) {
         suppressAlbum(ctx);
-        const handled = await ({ aliasInput, rssInput, weatherInput, subconvInput }[field])(ctx);
-        if (!handled) await sendError(ctx, 'INVALID_INPUT');
+        try {
+          const handled = await ({ aliasInput, rssInput, weatherInput, subconvInput }[field])(ctx);
+          if (!handled) await sendError(ctx, 'INVALID_INPUT');
+        } finally {
+          const remaining = sessions.get(sessionKey(ctx));
+          // Removal targets the user, not a prompt; preserve retries and newer module prompts.
+          if (inputReply(ctx, replyId) && !remaining?.[field]
+            && !Object.values(remaining ?? {}).some(input => input?.promptMessageId === undefined || input.promptMessageId >= replyId)) {
+            await bestEffort(() => send(ctx, translator(languageOf(ctx))('bot:inputClosed'), { remove_keyboard: true, selective: true }));
+          }
+        }
         return;
       }
       if (ai.ownsReply(ctx)) { await ai.input(ctx); return; }

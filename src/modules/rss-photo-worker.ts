@@ -6,7 +6,10 @@ process.once('message', (job: { source: Buffer; format: string; width: number; h
   const image = sharp(job.source, { limitInputPixels: job.maxPixels, failOn: 'warning', unlimited: false, sequentialRead: true }).timeout({ seconds: 10 });
   void (async () => {
     const metadata = await image.metadata();
-    if (metadata.format !== job.format || metadata.width !== job.width || metadata.height !== job.height
+    const dimensionsMatch = job.format === 'avif'
+      ? metadata.format === 'heif' && metadata.compression === 'av1' && metadata.width * metadata.height <= job.width * job.height
+      : metadata.format === job.format && metadata.width === job.width && metadata.height === job.height;
+    if (!dimensionsMatch || metadata.width < 1 || metadata.height < 1 || Math.max(metadata.width, metadata.height) / Math.min(metadata.width, metadata.height) > 20
       || (metadata.pages ?? 1) !== 1 || (metadata.pageHeight ?? metadata.height) !== metadata.height || (metadata.delay?.length ?? 0) > 1) throw new Error('INVALID_INPUT');
     const { data, info } = await image.autoOrient().resize({ width: job.maxDimension, height: job.maxDimension, fit: 'inside', withoutEnlargement: true })
       .flatten({ background: '#ffffff' }).toColourspace('srgb').jpeg({ quality: 85 }).toBuffer({ resolveWithObject: true });

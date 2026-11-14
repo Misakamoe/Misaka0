@@ -39,7 +39,7 @@
   "idInfo": {
     "self": "目前使用者", "reply": "被回覆訊息的傳送者", "name": "名稱：", "username": "使用者名稱：", "type": "類型：",
     "user": "使用者", "bot": "機器人", "group": "群組", "channel": "頻道", "userId": "使用者 ID：", "senderChatId": "傳送者聊天 ID：", "chatId": "聊天 ID：", "threadId": "話題 ID：",
-    "unavailable": "未提供", "anonymous": "此訊息以群組或頻道身分傳送，無法據此判定個人帳號。", "missing": "訊息未提供可識別的傳送者資訊，不推測身分。", "copy": "複製"
+    "unavailable": "未提供", "anonymous": "此訊息以群組或頻道身分傳送，無法據此判定個人帳號。", "missing": "訊息未提供可識別的傳送者資訊，不推測身分。"
   },
   "noThread": "無",
   "modulesEmpty": "未傳回原生模組。封存模組不會被載入。",
@@ -193,6 +193,7 @@
     "usage": "/alias\n/alias add help 說明\n/alias remove help 說明"
   },
   "cancelled": "已中止目前使用者、聊天與話題中的暫存工作並等待清理，關閉表單及非核准面板，暫停替身預設轉送。不會刪除已儲存的聯絡人、對話或已送達訊息。與已取消 AI 執行無關的獨立核准仍依各自期限有效。",
+  "inputClosed": "本次輸入已結束。",
   "privateOnly": "請透過與機器人的私訊使用此指令。",
   "unknownCommand": "未知指令。使用 /help 查看可用指令。",
   "unknownCommandSuggestion": "未知指令。你是不是想輸入 {{commands}}？",
